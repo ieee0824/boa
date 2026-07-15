@@ -72,3 +72,44 @@ fn class_can_access_super_from_static_initializer() {
         TestAction::assert_eq("c.field", js_str!("super field")),
     ]);
 }
+
+#[test]
+fn class_field_initializers_capture_outer_lexical_bindings() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function makeClass() {
+                const value = "captured";
+                return class {
+                    publicField = () => value;
+                    static publicStatic = () => value;
+                    #privateField = () => value;
+                    static #privateStatic = () => value;
+
+                    privateValue() { return this.#privateField(); }
+                    static privateStaticValue() { return this.#privateStatic(); }
+                };
+            }
+            const CapturingClass = makeClass();
+            const capturingInstance = new CapturingClass();
+        "#}),
+        TestAction::assert_eq("capturingInstance.publicField()", js_str!("captured")),
+        TestAction::assert_eq("CapturingClass.publicStatic()", js_str!("captured")),
+        TestAction::assert_eq("capturingInstance.privateValue()", js_str!("captured")),
+        TestAction::assert_eq("CapturingClass.privateStaticValue()", js_str!("captured")),
+    ]);
+}
+
+#[test]
+fn static_class_field_arrows_capture_module_binding() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            let language;
+            class Text {
+                static setLanguage = value => { language = value; };
+                static getLanguage = () => language;
+            }
+            Text.setLanguage("ja");
+        "#}),
+        TestAction::assert_eq("Text.getLanguage()", js_str!("ja")),
+    ]);
+}
