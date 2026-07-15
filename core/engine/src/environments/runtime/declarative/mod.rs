@@ -74,7 +74,7 @@ impl DeclarativeEnvironment {
     ///
     /// # Panics
     ///
-    /// Panics if the binding value is out of range.
+    /// Panics if a module binding index is out of range.
     #[track_caller]
     pub(crate) fn set(&self, index: u32, value: JsValue) {
         self.kind.set(index, value);
@@ -128,6 +128,22 @@ impl DeclarativeEnvironment {
                 bindings.resize(compile_bindings_number, None);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PoisonableEnvironment;
+    use crate::JsValue;
+
+    #[test]
+    fn set_grows_for_binding_discovered_by_late_escape_analysis() {
+        let environment = PoisonableEnvironment::new(0, false, false);
+
+        environment.set(2, JsValue::new(42));
+
+        assert_eq!(environment.bindings().borrow().len(), 3);
+        assert_eq!(environment.get(2), Some(JsValue::new(42)));
     }
 }
 
@@ -189,9 +205,10 @@ impl DeclarativeEnvironmentKind {
 
     /// Sets the binding value from the environment by index.
     ///
-    /// # Panics
-    ///
-    /// Panics if the binding value is out of range.
+    /// The binding vector can lag behind escape analysis when a nested class
+    /// field initializer makes an otherwise-local binding observable. Grow it
+    /// on initialization so the runtime environment matches the finalized
+    /// binding indices.
     #[track_caller]
     pub(crate) fn set(&self, index: u32, value: JsValue) {
         match self {
@@ -302,12 +319,18 @@ impl PoisonableEnvironment {
 
     /// Sets the binding value from the environment by index.
     ///
-    /// # Panics
-    ///
-    /// Panics if the binding value is out of range.
+    /// The binding vector can lag behind escape analysis when a nested class
+    /// field initializer makes an otherwise-local binding observable. Grow it
+    /// on initialization so the runtime environment matches the finalized
+    /// binding indices.
     #[track_caller]
     pub(crate) fn set(&self, index: u32, value: JsValue) {
-        self.bindings.borrow_mut()[index as usize] = Some(value);
+        let mut bindings = self.bindings.borrow_mut();
+        let index = index as usize;
+        if bindings.len() <= index {
+            bindings.resize(index + 1, None);
+        }
+        bindings[index] = Some(value);
     }
 
     /// Returns `true` if this environment is poisoned.
