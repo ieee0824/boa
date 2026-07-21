@@ -3,7 +3,7 @@
 use super::{JsArray, JsFunction};
 use crate::value::TryIntoJs;
 use crate::{
-    Context, JsArgs, JsError, JsNativeError, JsResult, JsValue, NativeFunction,
+    Context, JsArgs, JsError, JsExpect, JsNativeError, JsResult, JsValue, NativeFunction,
     builtins::{
         Promise,
         promise::{PromiseState, ResolvingFunctions},
@@ -52,7 +52,7 @@ use std::{future::Future, pin::Pin, task};
 ///         Ok(JsValue::undefined())
 ///     },
 ///     context,
-/// );
+/// )?;
 ///
 /// let promise = promise
 ///     .then(
@@ -65,14 +65,14 @@ use std::{future::Future, pin::Pin, task};
 ///         ),
 ///         None,
 ///         context,
-///     )
+///     )?
 ///     .catch(
 ///         NativeFunction::from_fn_ptr(|_, args, _| {
 ///             Ok(args.get_or_undefined(0).clone())
 ///         })
 ///         .to_js_function(context.realm()),
 ///         context,
-///     )
+///     )?
 ///     .finally(
 ///         NativeFunction::from_fn_ptr(|_, _, context| {
 ///             context.global_object().clone().set(
@@ -85,7 +85,7 @@ use std::{future::Future, pin::Pin, task};
 ///         })
 ///         .to_js_function(context.realm()),
 ///         context,
-///     );
+///     )?;
 ///
 /// context.run_jobs();
 ///
@@ -109,7 +109,7 @@ use std::{future::Future, pin::Pin, task};
 /// [promise]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise
 #[derive(Debug, Clone, Trace, Finalize)]
 pub struct JsPromise {
-    inner: JsObject,
+    inner: JsObject<Promise>,
 }
 
 impl JsPromise {
@@ -149,7 +149,7 @@ impl JsPromise {
     ///         Ok(JsValue::undefined())
     ///     },
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -162,7 +162,7 @@ impl JsPromise {
     /// ```
     ///
     /// [`Promise()`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/Promise
-    pub fn new<F>(executor: F, context: &mut Context) -> Self
+    pub fn new<F>(executor: F, context: &mut Context) -> JsResult<Self>
     where
         F: FnOnce(&ResolvingFunctions, &mut Context) -> JsResult<JsValue>,
     {
@@ -174,14 +174,14 @@ impl JsPromise {
         let resolvers = Promise::create_resolving_functions(&promise, context);
 
         if let Err(e) = executor(&resolvers, context) {
-            let e = e.to_opaque(context);
+            let e = e.into_opaque(context)?;
             resolvers
                 .reject
                 .call(&JsValue::undefined(), &[e], context)
-                .expect("default `reject` function cannot throw");
+                .js_expect("default `reject` function cannot throw")?;
         }
 
-        Self { inner: promise }
+        Ok(Self { inner: promise })
     }
 
     /// Creates a new pending promise and returns it and its associated `ResolvingFunctions`.
@@ -223,10 +223,8 @@ impl JsPromise {
             Promise::new(),
         );
         let resolvers = Promise::create_resolving_functions(&promise, context);
-        let promise =
-            Self::from_object(promise).expect("this shouldn't fail with a newly created promise");
 
-        (promise, resolvers)
+        (promise.into(), resolvers)
     }
 
     /// Wraps an existing object with the `JsPromise` interface, returning `Err` if the object
@@ -263,12 +261,12 @@ impl JsPromise {
     /// ```
     #[inline]
     pub fn from_object(object: JsObject) -> JsResult<Self> {
-        if !object.is::<Promise>() {
+        let Ok(inner) = object.downcast::<Promise>() else {
             return Err(JsNativeError::typ()
                 .with_message("`object` is not a Promise")
                 .into());
-        }
-        Ok(Self { inner: object })
+        };
+        Ok(Self { inner })
     }
 
     /// Creates a new `JsPromise` from a [`Future`]-like.
@@ -313,7 +311,7 @@ impl JsPromise {
                 match result {
                     Ok(v) => resolvers.resolve.call(&JsValue::undefined(), &[v], context),
                     Err(e) => {
-                        let e = e.to_opaque(context);
+                        let e = e.into_opaque(context)?;
                         resolvers.reject.call(&JsValue::undefined(), &[e], context)
                     }
                 }
@@ -337,6 +335,7 @@ impl JsPromise {
     /// #    builtins::promise::PromiseState,
     /// #    Context, JsResult, JsString, js_string, js_error
     /// # };
+    /// # fn main() -> Result<(), Box<dyn Error>> {
     /// let context = &mut Context::default();
     ///
     /// fn do_thing(success: bool) -> JsResult<JsString> {
@@ -345,22 +344,24 @@ impl JsPromise {
     ///         .ok_or(js_error!("rejected!"))
     /// }
     ///
-    /// let promise = JsPromise::from_result(do_thing(true), context);
+    /// let promise = JsPromise::from_result(do_thing(true), context)?;
     /// assert_eq!(
     ///     promise.state(),
     ///     PromiseState::Fulfilled(js_string!("resolved!").into())
     /// );
     ///
-    /// let promise = JsPromise::from_result(do_thing(false), context);
+    /// let promise = JsPromise::from_result(do_thing(false), context)?;
     /// assert_eq!(
     ///     promise.state(),
     ///     PromiseState::Rejected(js_string!("rejected!").into())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn from_result<V: Into<JsValue>, E: Into<JsError>>(
         value: Result<V, E>,
         context: &mut Context,
-    ) -> Self {
+    ) -> JsResult<Self> {
         match value {
             Ok(v) => Self::resolve(v, context),
             Err(e) => Self::reject(e, context),
@@ -384,26 +385,30 @@ impl JsPromise {
     /// #    builtins::promise::PromiseState,
     /// #    Context, js_string
     /// # };
+    /// # fn main() -> Result<(), Box<dyn Error>> {
     /// let context = &mut Context::default();
     ///
-    /// let promise = JsPromise::resolve(js_string!("resolved!"), context);
+    /// let promise = JsPromise::resolve(js_string!("resolved!"), context)?;
     ///
     /// assert_eq!(
     ///     promise.state(),
     ///     PromiseState::Fulfilled(js_string!("resolved!").into())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// [`Promise.resolve()`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/resolve
     /// [thenables]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise#thenables
-    pub fn resolve<V: Into<JsValue>>(value: V, context: &mut Context) -> Self {
+    pub fn resolve<V: Into<JsValue>>(value: V, context: &mut Context) -> JsResult<Self> {
         Promise::promise_resolve(
             &context.intrinsics().constructors().promise().constructor(),
             value.into(),
             context,
         )
         .and_then(Self::from_object)
-        .expect("default resolving functions cannot throw and must return a promise")
+        .js_expect("default resolve functions cannot throw and must return a promise")
+        .map_err(Into::into)
     }
 
     /// Creates a `JsPromise` that is rejected with the reason `error`.
@@ -422,29 +427,39 @@ impl JsPromise {
     /// #    builtins::promise::PromiseState,
     /// #    Context, js_string, JsError
     /// # };
+    /// # fn main() -> Result<(), Box<dyn Error>> {
     /// let context = &mut Context::default();
     ///
     /// let promise = JsPromise::reject(
     ///     JsError::from_opaque(js_string!("oops!").into()),
     ///     context,
-    /// );
+    /// )?;
     ///
     /// assert_eq!(
     ///     promise.state(),
     ///     PromiseState::Rejected(js_string!("oops!").into())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// [`Promise.reject`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/reject
     /// [thenable]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise#thenables
-    pub fn reject<E: Into<JsError>>(error: E, context: &mut Context) -> Self {
+    pub fn reject<E: Into<JsError>>(error: E, context: &mut Context) -> JsResult<Self> {
+        let error = error.into();
+        assert!(
+            error.is_catchable(),
+            "cannot create a reject function from an uncatchable error"
+        );
+
         Promise::promise_reject(
             &context.intrinsics().constructors().promise().constructor(),
-            &error.into(),
+            error,
             context,
         )
         .and_then(Self::from_object)
-        .expect("default resolving functions cannot throw and must return a promise")
+        .js_expect("default resolve functions cannot throw and must return a promise")
+        .map_err(Into::into)
     }
 
     /// Gets the current state of the promise.
@@ -467,11 +482,7 @@ impl JsPromise {
     #[inline]
     #[must_use]
     pub fn state(&self) -> PromiseState {
-        self.inner
-            .downcast_ref::<Promise>()
-            .expect("objects cannot change type after creation")
-            .state()
-            .clone()
+        self.inner.borrow().data().state().clone()
     }
 
     /// Schedules callback functions to run when the promise settles.
@@ -508,6 +519,7 @@ impl JsPromise {
     /// #     object::{builtins::JsPromise, FunctionObjectBuilder},
     /// #     Context, JsArgs, JsError, JsValue, NativeFunction,
     /// # };
+    /// # fn main() -> Result<(), Box<dyn Error>> {
     /// let context = &mut Context::default();
     ///
     /// let promise = JsPromise::new(
@@ -520,7 +532,7 @@ impl JsPromise {
     ///         Ok(JsValue::undefined())
     ///     },
     ///     context,
-    /// )
+    /// )?
     /// .then(
     ///     Some(
     ///         NativeFunction::from_fn_ptr(|_, args, context| {
@@ -532,7 +544,7 @@ impl JsPromise {
     ///     ),
     ///     None,
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -540,6 +552,8 @@ impl JsPromise {
     ///     promise.state(),
     ///     PromiseState::Fulfilled(js_string!("255.255").into())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// [`Promise.prototype.then`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/then
@@ -550,10 +564,11 @@ impl JsPromise {
         on_fulfilled: Option<JsFunction>,
         on_rejected: Option<JsFunction>,
         context: &mut Context,
-    ) -> Self {
+    ) -> JsResult<Self> {
         Promise::inner_then(self, on_fulfilled, on_rejected, context)
             .and_then(Self::from_object)
-            .expect("`inner_then` cannot fail for native `JsPromise`")
+            .js_expect("`inner_then` cannot fail for native `JsPromise`")
+            .map_err(Into::into)
     }
 
     /// Schedules a callback to run when the promise is rejected.
@@ -573,12 +588,13 @@ impl JsPromise {
     /// #     object::{builtins::JsPromise, FunctionObjectBuilder},
     /// #     Context, JsArgs, JsNativeError, JsValue, NativeFunction,
     /// # };
+    /// # fn main() -> Result<(), Box<dyn Error>> {
     /// let context = &mut Context::default();
     ///
     /// let promise = JsPromise::new(
     ///     |resolvers, context| {
     ///         let error = JsNativeError::typ().with_message("thrown");
-    ///         let error = error.to_opaque(context);
+    ///         let error = error.into_opaque(context);
     ///         resolvers.reject.call(
     ///             &JsValue::undefined(),
     ///             &[error.into()],
@@ -587,7 +603,7 @@ impl JsPromise {
     ///         Ok(JsValue::undefined())
     ///     },
     ///     context,
-    /// )
+    /// )?
     /// .catch(
     ///     NativeFunction::from_fn_ptr(|_, args, context| {
     ///         args.get_or_undefined(0)
@@ -596,7 +612,7 @@ impl JsPromise {
     ///     })
     ///     .to_js_function(context.realm()),
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -604,13 +620,15 @@ impl JsPromise {
     ///     promise.state(),
     ///     PromiseState::Fulfilled(js_string!("TypeError: thrown").into())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// [`Promise.prototype.catch`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/catch
     /// [then]: JsPromise::then
     #[inline]
     #[allow(clippy::return_self_not_must_use)] // Could just be used to add a handler on an existing promise
-    pub fn catch(&self, on_rejected: JsFunction, context: &mut Context) -> Self {
+    pub fn catch(&self, on_rejected: JsFunction, context: &mut Context) -> JsResult<Self> {
         self.then(None, Some(on_rejected), context)
     }
 
@@ -646,7 +664,7 @@ impl JsPromise {
     /// let promise = JsPromise::new(
     ///     |resolvers, context| {
     ///         let error = JsNativeError::typ().with_message("thrown");
-    ///         let error = error.to_opaque(context);
+    ///         let error = error.into_opaque(context);
     ///         resolvers.reject.call(
     ///             &JsValue::undefined(),
     ///             &[error.into()],
@@ -655,7 +673,7 @@ impl JsPromise {
     ///         Ok(JsValue::undefined())
     ///     },
     ///     context,
-    /// )
+    /// )?
     /// .finally(
     ///     NativeFunction::from_fn_ptr(|_, _, context| {
     ///         context.global_object().clone().set(
@@ -668,7 +686,7 @@ impl JsPromise {
     ///     })
     ///     .to_js_function(context.realm()),
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -688,7 +706,7 @@ impl JsPromise {
     /// [then]: JsPromise::then
     #[inline]
     #[allow(clippy::return_self_not_must_use)] // Could just be used to add a handler on an existing promise
-    pub fn finally(&self, on_finally: JsFunction, context: &mut Context) -> Self {
+    pub fn finally(&self, on_finally: JsFunction, context: &mut Context) -> JsResult<Self> {
         let (then, catch) = Promise::then_catch_finally_closures(
             context.intrinsics().constructors().promise().constructor(),
             on_finally,
@@ -696,7 +714,8 @@ impl JsPromise {
         );
         Promise::inner_then(self, Some(then), Some(catch), context)
             .and_then(Self::from_object)
-            .expect("`inner_then` cannot fail for native `JsPromise`")
+            .js_expect("`inner_then` cannot fail for native `JsPromise`")
+            .map_err(Into::into)
     }
 
     /// Waits for a list of promises to settle with fulfilled values, rejecting the aggregate promise
@@ -718,21 +737,21 @@ impl JsPromise {
     ///
     /// let promise1 = JsPromise::all(
     ///     [
-    ///         JsPromise::resolve(0, context),
-    ///         JsPromise::resolve(2, context),
-    ///         JsPromise::resolve(4, context),
+    ///         JsPromise::resolve(0, context)?,
+    ///         JsPromise::resolve(2, context)?,
+    ///         JsPromise::resolve(4, context)?,
     ///     ],
     ///     context,
-    /// );
+    /// )?;
     ///
     /// let promise2 = JsPromise::all(
     ///     [
-    ///         JsPromise::resolve(1, context),
-    ///         JsPromise::reject(JsNativeError::typ(), context),
-    ///         JsPromise::resolve(3, context),
+    ///         JsPromise::resolve(1, context)?,
+    ///         JsPromise::reject(JsNativeError::typ(), context)?,
+    ///         JsPromise::resolve(3, context)?,
     ///     ],
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -755,7 +774,7 @@ impl JsPromise {
     /// ```
     ///
     /// [`Promise.all`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all
-    pub fn all<I>(promises: I, context: &mut Context) -> Self
+    pub fn all<I>(promises: I, context: &mut Context) -> JsResult<Self>
     where
         I: IntoIterator<Item = Self>,
     {
@@ -769,14 +788,14 @@ impl JsPromise {
             .into();
 
         let value = Promise::all(c, &[promises.into()], context)
-            .expect("Promise.all cannot fail with the default `%Promise%` constructor");
+            .js_expect("Promise.all cannot fail with the default `%Promise%` constructor")?;
 
         let object = value
             .as_object()
-            .expect("`Promise.all` always returns an object on success");
+            .js_expect("`Promise.all` always returns an object on success")?;
 
         Self::from_object(object.clone())
-        .expect("`Promise::all` with the  default `%Promise%` constructor always returns a native `JsPromise`")
+            .js_expect("`Promise::all` with the default `%Promise%` constructor always returns a native `JsPromise`").map_err(Into::into)
     }
 
     /// Waits for a list of promises to settle, fulfilling with an array of the outcomes of every
@@ -798,12 +817,12 @@ impl JsPromise {
     ///
     /// let promise = JsPromise::all_settled(
     ///     [
-    ///         JsPromise::resolve(1, context),
-    ///         JsPromise::reject(JsNativeError::typ(), context),
-    ///         JsPromise::resolve(3, context),
+    ///         JsPromise::resolve(1, context)?,
+    ///         JsPromise::reject(JsNativeError::typ(), context)?,
+    ///         JsPromise::resolve(3, context)?,
     ///     ],
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -844,7 +863,7 @@ impl JsPromise {
     /// ```
     ///
     /// [`Promise.allSettled`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/allSettled
-    pub fn all_settled<I>(promises: I, context: &mut Context) -> Self
+    pub fn all_settled<I>(promises: I, context: &mut Context) -> JsResult<Self>
     where
         I: IntoIterator<Item = Self>,
     {
@@ -857,15 +876,16 @@ impl JsPromise {
             .constructor()
             .into();
 
-        let value = Promise::all_settled(c, &[promises.into()], context)
-            .expect("`Promise.all_settled` cannot fail with the default `%Promise%` constructor");
+        let value = Promise::all_settled(c, &[promises.into()], context).js_expect(
+            "`Promise.all_settled` cannot fail with the default `%Promise%` constructor",
+        )?;
 
         let object = value
             .as_object()
-            .expect("`Promise.all_settled` always returns an object on success");
+            .js_expect("`Promise.all_settled` always returns an object on success")?;
 
         Self::from_object(object.clone())
-        .expect("`Promise::all_settled` with the  default `%Promise%` constructor always returns a native `JsPromise`")
+            .js_expect("`Promise::all_settled` with the default `%Promise%` constructor always returns a native `JsPromise`").map_err(Into::into)
     }
 
     /// Returns the first promise that fulfills from a list of promises.
@@ -886,17 +906,18 @@ impl JsPromise {
     /// #     object::builtins::JsPromise,
     /// #     Context, JsNativeError,
     /// # };
+    /// # fn main() -> Result<(), Box<dyn Error>> {
     /// let context = &mut Context::default();
     ///
     /// let promise = JsPromise::any(
     ///     [
-    ///         JsPromise::reject(JsNativeError::syntax(), context),
-    ///         JsPromise::reject(JsNativeError::typ(), context),
-    ///         JsPromise::resolve(js_string!("fulfilled"), context),
-    ///         JsPromise::reject(JsNativeError::range(), context),
+    ///         JsPromise::reject(JsNativeError::syntax(), context)?,
+    ///         JsPromise::reject(JsNativeError::typ(), context)?,
+    ///         JsPromise::resolve(js_string!("fulfilled"), context)?,
+    ///         JsPromise::reject(JsNativeError::range(), context)?,
     ///     ],
     ///     context,
-    /// );
+    /// )?;
     ///
     /// context.run_jobs();
     ///
@@ -904,10 +925,12 @@ impl JsPromise {
     ///     promise.state(),
     ///     PromiseState::Fulfilled(js_string!("fulfilled").into())
     /// );
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// [`Promise.any`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/any
-    pub fn any<I>(promises: I, context: &mut Context) -> Self
+    pub fn any<I>(promises: I, context: &mut Context) -> JsResult<Self>
     where
         I: IntoIterator<Item = Self>,
     {
@@ -921,14 +944,14 @@ impl JsPromise {
             .into();
 
         let value = Promise::any(c, &[promises.into()], context)
-            .expect("`Promise.any` cannot fail with the default `%Promise%` constructor");
+            .js_expect("`Promise.any` cannot fail with the default `%Promise%` constructor")?;
 
         let object = value
             .as_object()
-            .expect("`Promise.any` always returns an object on success");
+            .js_expect("`Promise.any` always returns an object on success")?;
 
         Self::from_object(object.clone())
-        .expect("`Promise::any` with the  default `%Promise%` constructor always returns a native `JsPromise`")
+            .js_expect("`Promise::any` with the default `%Promise%` constructor always returns a native `JsPromise`").map_err(Into::into)
     }
 
     /// Returns the first promise that settles from a list of promises.
@@ -955,7 +978,7 @@ impl JsPromise {
     /// let (b, resolvers_b) = JsPromise::new_pending(context);
     /// let (c, resolvers_c) = JsPromise::new_pending(context);
     ///
-    /// let promise = JsPromise::race([a, b, c], context);
+    /// let promise = JsPromise::race([a, b, c], context)?;
     ///
     /// resolvers_b
     ///     .reject
@@ -981,7 +1004,7 @@ impl JsPromise {
     /// ```
     ///
     /// [`Promise.race`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/race
-    pub fn race<I>(promises: I, context: &mut Context) -> Self
+    pub fn race<I>(promises: I, context: &mut Context) -> JsResult<Self>
     where
         I: IntoIterator<Item = Self>,
     {
@@ -995,14 +1018,14 @@ impl JsPromise {
             .into();
 
         let value = Promise::race(c, &[promises.into()], context)
-            .expect("`Promise.race` cannot fail with the default `%Promise%` constructor");
+            .js_expect("`Promise.race` cannot fail with the default `%Promise%` constructor")?;
 
         let object = value
             .as_object()
-            .expect("`Promise.race` always returns an object on success");
+            .js_expect("`Promise.race` always returns an object on success")?;
 
         Self::from_object(object.clone())
-        .expect("`Promise::race` with the  default `%Promise%` constructor always returns a native `JsPromise`")
+            .js_expect("`Promise::race` with the default `%Promise%` constructor always returns a native `JsPromise`").map_err(Into::into)
     }
 
     /// Creates a `JsFuture` from this `JsPromise`.
@@ -1024,7 +1047,7 @@ impl JsPromise {
     /// let context = &mut Context::default();
     ///
     /// let (promise, resolvers) = JsPromise::new_pending(context);
-    /// let promise_future = promise.into_js_future(context);
+    /// let promise_future = promise.into_js_future(context)?;
     ///
     /// let future1 = async move { promise_future.await };
     ///
@@ -1044,7 +1067,7 @@ impl JsPromise {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn into_js_future(self, context: &mut Context) -> JsFuture {
+    pub fn into_js_future(self, context: &mut Context) -> JsResult<JsFuture> {
         // Mostly based from:
         // https://docs.rs/wasm-bindgen-futures/0.4.37/src/wasm_bindgen_futures/lib.rs.html#109-168
 
@@ -1104,9 +1127,9 @@ impl JsPromise {
             Some(resolve.to_js_function(context.realm())),
             Some(reject.to_js_function(context.realm())),
             context,
-        ));
+        )?);
 
-        JsFuture { inner: state }
+        Ok(JsFuture { inner: state })
     }
 
     /// Run jobs until this promise is resolved or rejected. This could
@@ -1125,6 +1148,7 @@ impl JsPromise {
     /// ```
     /// # use boa_engine::{Context, JsArgs, JsValue, NativeFunction};
     /// # use boa_engine::object::builtins::{JsFunction, JsPromise};
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let context = &mut Context::default();
     ///
     /// let p1 = JsPromise::new(
@@ -1133,7 +1157,7 @@ impl JsPromise {
     ///             .call(&JsValue::undefined(), &[JsValue::new(1)], context)
     ///     },
     ///     context,
-    /// );
+    /// )?;
     /// let p2 = p1.then(
     ///     Some(
     ///         NativeFunction::from_fn_ptr(|_, args, context| {
@@ -1144,9 +1168,11 @@ impl JsPromise {
     ///     ),
     ///     None,
     ///     context,
-    /// );
+    /// )?;
     ///
     /// assert_eq!(p2.await_blocking(context), Ok(JsValue::new(2)));
+    /// # Ok(())
+    /// # }
     /// ```
     ///
     /// This will not panic as `run_jobs()` is not executed.
@@ -1154,11 +1180,12 @@ impl JsPromise {
     /// # use boa_engine::{Context, JsValue, NativeFunction};
     /// # use boa_engine::object::builtins::JsPromise;
     ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let context = &mut Context::default();
     /// let p1 = JsPromise::new(
     ///     |fns, context| fns.resolve.call(&JsValue::undefined(), &[], context),
     ///     context,
-    /// )
+    /// )?
     /// .then(
     ///     Some(
     ///         NativeFunction::from_fn_ptr(|_, _, _| {
@@ -1168,12 +1195,14 @@ impl JsPromise {
     ///     ),
     ///     None,
     ///     context,
-    /// );
-    /// let p2 = JsPromise::resolve(1, context);
+    /// )?;
+    /// let p2 = JsPromise::resolve(1, context)?;
     ///
     /// assert_eq!(p2.await_blocking(context), Ok(JsValue::new(1)));
     /// // Uncommenting the following line would panic.
     /// // context.run_jobs();
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn await_blocking(&self, context: &mut Context) -> Result<JsValue, JsError> {
         loop {
@@ -1197,8 +1226,10 @@ impl JsPromise {
             builtins::{async_generator::AsyncGenerator, generator::GeneratorContext},
             js_string,
             object::FunctionObjectBuilder,
+            vm::CompletionRecord,
         };
         use std::cell::Cell;
+        use std::ops::ControlFlow;
 
         // Clone the stack since we split it.
         let stack = context.vm.stack.clone();
@@ -1215,23 +1246,32 @@ impl JsPromise {
                     // b. Suspend prevContext.
                     // c. Push asyncContext onto the execution context stack; asyncContext is now the running execution context.
                     // d. Resume the suspended evaluation of asyncContext using NormalCompletion(value) as the result of the operation that suspended it.
+
                     let continuation = &captures.0;
-                    let mut r#gen = captures.1.take().expect("should only run once");
+                    let mut r#gen = captures.1.take().js_expect("should only run once")?;
 
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
-                    let async_generator = r#gen.async_generator_object();
+                    let async_generator = r#gen.async_generator_object()?;
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    let frame = r#gen.call_frame.take().expect("should have a call frame");
+                    let frame = r#gen
+                        .call_frame
+                        .take()
+                        .js_expect("should have a call frame")?;
+                    let fp = frame.fp;
                     let rp = frame.rp;
                     context.vm.push_frame(frame);
-                    context.vm.frame_mut().set_register_pointer(rp);
+                    context.vm.frame_mut().fp = fp;
+                    context.vm.frame_mut().rp = rp;
 
-                    if let crate::native_function::CoroutineState::Yielded(value) =
-                        continuation.call(Ok(args.get_or_undefined(0).clone()), context)
-                    {
-                        JsPromise::resolve(value, context)
-                            .await_native(continuation.clone(), context);
+                    match continuation.call(
+                        CompletionRecord::Normal(args.get_or_undefined(0).clone()),
+                        context,
+                    ) {
+                        ControlFlow::Continue(value) => JsPromise::resolve(value, context)?
+                            .await_native(continuation.clone(), context),
+                        ControlFlow::Break(Err(err)) => return Err(err),
+                        ControlFlow::Break(Ok(())) => {}
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
@@ -1241,7 +1281,7 @@ impl JsPromise {
                     if let Some(async_generator) = async_generator {
                         async_generator
                             .downcast_mut::<AsyncGenerator>()
-                            .expect("must be async generator")
+                            .js_expect("must be async generator")?
                             .context = Some(r#gen);
                     }
 
@@ -1272,26 +1312,34 @@ impl JsPromise {
                     // d. Resume the suspended evaluation of asyncContext using ThrowCompletion(reason) as the result of the operation that suspended it.
                     // e. Assert: When we reach this step, asyncContext has already been removed from the execution context stack and prevContext is the currently running execution context.
                     // f. Return undefined.
+
                     let continuation = &captures.0;
-                    let mut r#gen = captures.1.take().expect("should only run once");
+                    let mut r#gen = captures.1.take().js_expect("should only run once")?;
 
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
-                    let async_generator = r#gen.async_generator_object();
+                    let async_generator = r#gen.async_generator_object()?;
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    let frame = r#gen.call_frame.take().expect("should have a call frame");
+                    let frame = r#gen
+                        .call_frame
+                        .take()
+                        .js_expect("should have a call frame")?;
+                    let fp = frame.fp;
                     let rp = frame.rp;
                     context.vm.push_frame(frame);
-                    context.vm.frame_mut().set_register_pointer(rp);
+                    context.vm.frame_mut().fp = fp;
+                    context.vm.frame_mut().rp = rp;
 
-                    if let crate::native_function::CoroutineState::Yielded(value) = continuation
-                        .call(
-                            Err(JsError::from_opaque(args.get_or_undefined(0).clone())),
-                            context,
-                        )
-                    {
-                        JsPromise::resolve(value, context)
-                            .await_native(continuation.clone(), context);
+                    match continuation.call(
+                        CompletionRecord::Throw(JsError::from_opaque(
+                            args.get_or_undefined(0).clone(),
+                        )),
+                        context,
+                    ) {
+                        ControlFlow::Continue(value) => JsPromise::resolve(value, context)?
+                            .await_native(continuation.clone(), context),
+                        ControlFlow::Break(Err(err)) => return Err(err),
+                        ControlFlow::Break(Ok(())) => {}
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
@@ -1301,7 +1349,7 @@ impl JsPromise {
                     if let Some(async_generator) = async_generator {
                         async_generator
                             .downcast_mut::<AsyncGenerator>()
-                            .expect("must be async generator")
+                            .js_expect("must be async generator")?
                             .context = Some(r#gen);
                     }
 
@@ -1325,10 +1373,16 @@ impl JsPromise {
     }
 }
 
+impl From<JsObject<Promise>> for JsPromise {
+    fn from(value: JsObject<Promise>) -> Self {
+        Self { inner: value }
+    }
+}
+
 impl From<JsPromise> for JsObject {
     #[inline]
     fn from(o: JsPromise) -> Self {
-        o.inner.clone()
+        o.inner.clone().upcast()
     }
 }
 
@@ -1340,7 +1394,7 @@ impl From<JsPromise> for JsValue {
 }
 
 impl std::ops::Deref for JsPromise {
-    type Target = JsObject;
+    type Target = JsObject<Promise>;
 
     #[inline]
     fn deref(&self) -> &Self::Target {

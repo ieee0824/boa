@@ -73,43 +73,131 @@ fn class_can_access_super_from_static_initializer() {
     ]);
 }
 
+// https://github.com/boa-dev/boa/issues/4400
 #[test]
-fn class_field_initializers_capture_outer_lexical_bindings() {
+fn class_in_constructor() {
     run_test_actions([
         TestAction::run(indoc! {r#"
-            function makeClass() {
-                const value = "captured";
-                return class {
-                    publicField = () => value;
-                    static publicStatic = () => value;
-                    #privateField = () => value;
-                    static #privateStatic = () => value;
-
-                    privateValue() { return this.#privateField(); }
-                    static privateStaticValue() { return this.#privateStatic(); }
-                };
+            class C {
+                constructor() {
+                    class D {}
+                    this.v = D.name.toString()
+                }
             }
-            const CapturingClass = makeClass();
-            const capturingInstance = new CapturingClass();
+            let c = new C()
+
         "#}),
-        TestAction::assert_eq("capturingInstance.publicField()", js_str!("captured")),
-        TestAction::assert_eq("CapturingClass.publicStatic()", js_str!("captured")),
-        TestAction::assert_eq("capturingInstance.privateValue()", js_str!("captured")),
-        TestAction::assert_eq("CapturingClass.privateStaticValue()", js_str!("captured")),
+        TestAction::assert_eq("c.v", js_str!("D")),
+    ]);
+}
+
+// https://github.com/boa-dev/boa/issues/4555
+#[test]
+fn nested_class_in_class_expression_constructor() {
+    run_test_actions([TestAction::run(
+        "new (class { constructor() { class D {} } })();",
+    )]);
+}
+
+// https://github.com/boa-dev/boa/issues/4555
+#[test]
+fn nested_class_in_static_block() {
+    run_test_actions([TestAction::run("(class { static { class D {} } });")]);
+}
+
+#[test]
+fn property_initializer_reference_escaped_variable() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function run() {
+                const x = "D";
+                class C {
+                    a = x;
+                    static b = x;
+                    #c = x;
+                    static #d = x;
+
+                    getC() { return this.#c }
+                    static getD() { return C.#d }
+                }
+                return C
+            }
+            var Z = run();
+            var z = new Z();
+        "#}),
+        TestAction::assert_eq("z.a", js_str!("D")),
+        TestAction::assert_eq("Z.b", js_str!("D")),
+        TestAction::assert_eq("z.getC()", js_str!("D")),
+        TestAction::assert_eq("Z.getD()", js_str!("D")),
     ]);
 }
 
 #[test]
-fn static_class_field_arrows_capture_module_binding() {
+fn private_field_initializer_reference_non_escaped_variable() {
     run_test_actions([
         TestAction::run(indoc! {r#"
-            let language;
-            class Text {
-                static setLanguage = value => { language = value; };
-                static getLanguage = () => language;
+            function outer() {
+                let x = 1;
+                class C {
+                    #p = x;
+                    m() { return this.#p; }
+                }
+                return new C().m();
             }
-            Text.setLanguage("ja");
         "#}),
-        TestAction::assert_eq("Text.getLanguage()", js_str!("ja")),
+        TestAction::assert_eq("outer()", 1),
+    ]);
+}
+
+// https://github.com/boa-dev/boa/issues/4605
+#[test]
+fn class_boolean_literal_method_names() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            class A {
+                true() { return 1; }
+                false() { return 2; }
+                null() { return 3; }
+            }
+            var a = new A();
+        "#}),
+        TestAction::assert_eq("a.true()", 1),
+        TestAction::assert_eq("a.false()", 2),
+        TestAction::assert_eq("a.null()", 3),
+    ]);
+}
+
+// https://github.com/boa-dev/boa/issues/4605
+#[test]
+fn class_boolean_literal_static_method_names() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            class B {
+                static true() { return 10; }
+                static false() { return 20; }
+            }
+        "#}),
+        TestAction::assert_eq("B.true()", 10),
+        TestAction::assert_eq("B.false()", 20),
+    ]);
+}
+
+// https://github.com/boa-dev/boa/issues/4605
+#[test]
+fn class_boolean_literal_getter_setter_names() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            class C {
+                get true() { return this._true; }
+                set true(v) { this._true = v; }
+                get false() { return this._false; }
+                set false(v) { this._false = v; }
+            }
+            var c = new C();
+            c.true = 42;
+            c.false = 84;
+        "#}),
+        TestAction::assert_eq("c.true", 42),
+        TestAction::assert_eq("c.false", 84),
     ]);
 }

@@ -1,5 +1,5 @@
 use crate::{
-    Context, JsArgs, JsData, JsError, JsNativeError, JsResult, JsValue,
+    Context, JsArgs, JsData, JsError, JsExpect, JsNativeError, JsResult, JsValue,
     builtins::{
         BuiltInBuilder, IntrinsicObject, Promise,
         iterable::{IteratorRecord, IteratorResult, create_iter_result_object},
@@ -72,7 +72,8 @@ impl AsyncFromSyncIterator {
             Self {
                 sync_iterator_record,
             },
-        );
+        )
+        .upcast();
 
         // 3. Let nextMethod be ! Get(asyncIterator, "next").
         let next_method = async_iterator
@@ -98,7 +99,7 @@ impl AsyncFromSyncIterator {
         let mut sync_iterator_record = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
-            .expect("async from sync iterator prototype must be object")
+            .js_expect("async from sync iterator prototype must be object")?
             .sync_iterator_record
             .clone();
 
@@ -107,7 +108,7 @@ impl AsyncFromSyncIterator {
             &context.intrinsics().constructors().promise().constructor(),
             context,
         )
-        .expect("cannot fail with promise constructor");
+        .js_expect("cannot fail with promise constructor")?;
 
         // 5. If value is present, then
         //     a. Let result be Completion(IteratorNext(syncIteratorRecord, value)).
@@ -142,7 +143,7 @@ impl AsyncFromSyncIterator {
         let sync_iterator_record = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
-            .expect("async from sync iterator prototype must be object")
+            .js_expect("async from sync iterator prototype must be object")?
             .sync_iterator_record
             .clone();
         // 5. Let syncIterator be syncIteratorRecord.[[Iterator]].
@@ -153,7 +154,7 @@ impl AsyncFromSyncIterator {
             &context.intrinsics().constructors().promise().constructor(),
             context,
         )
-        .expect("cannot fail with promise constructor");
+        .js_expect("cannot fail with promise constructor")?;
 
         // 6. Let return be Completion(GetMethod(syncIterator, "return")).
         let r#return = sync_iterator.get_method(js_string!("return"), context);
@@ -172,7 +173,7 @@ impl AsyncFromSyncIterator {
                 promise_capability
                     .resolve()
                     .call(&JsValue::undefined(), &[iter_result], context)
-                    .expect("cannot fail according to spec");
+                    .js_expect("cannot fail according to spec")?;
 
                 // c. Return promiseCapability.[[Promise]].
                 return Ok(promise_capability.promise().clone().into());
@@ -224,7 +225,7 @@ impl AsyncFromSyncIterator {
         let sync_iterator_record = object
             .as_ref()
             .and_then(JsObject::downcast_ref::<Self>)
-            .expect("async from sync iterator prototype must be object")
+            .js_expect("async from sync iterator prototype must be object")?
             .sync_iterator_record
             .clone();
         // 5. Let syncIterator be syncIteratorRecord.[[Iterator]].
@@ -235,7 +236,7 @@ impl AsyncFromSyncIterator {
             &context.intrinsics().constructors().promise().constructor(),
             context,
         )
-        .expect("cannot fail with promise constructor");
+        .js_expect("cannot fail with promise constructor")?;
 
         // 6. Let throw be Completion(GetMethod(syncIterator, "throw")).
         let throw = sync_iterator.get_method(js_string!("throw"), context);
@@ -262,11 +263,11 @@ impl AsyncFromSyncIterator {
                         &JsValue::undefined(),
                         &[JsNativeError::typ()
                             .with_message("sync iterator does not have a throw method")
-                            .to_opaque(context)
+                            .into_opaque(context)
                             .into()],
                         context,
                     )
-                    .expect("cannot fail according to spec");
+                    .js_expect("cannot fail according to spec")?;
 
                 // h. Return promiseCapability.[[Promise]].
                 return Ok(promise_capability.promise().clone().into());
@@ -347,7 +348,10 @@ impl AsyncFromSyncIterator {
                     "closing an iterator with an error must always return an error back",
                 ))
             }
-            other => other,
+            other => other.map(|o| {
+                o.downcast::<Promise>()
+                    .expect("%Promise% constructor must return a `Promise` object")
+            }),
         };
 
         // 8. IfAbruptRejectPromise(valueWrapper, promiseCapability).

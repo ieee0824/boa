@@ -7,10 +7,10 @@ use boa_engine::object::builtins::{
     js_typed_array_from_kind,
 };
 use boa_engine::{Context, JsBigInt, JsObject, JsResult, JsString, JsValue, js_error};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 #[derive(Default)]
-pub(super) struct ReverseSeenMap(HashMap<usize, JsObject>);
+pub(super) struct ReverseSeenMap(FxHashMap<usize, JsObject>);
 
 impl ReverseSeenMap {
     fn get(&self, object: &JsValueStore) -> Option<JsObject> {
@@ -47,7 +47,7 @@ fn try_items_into_js_array(
     seen: &mut ReverseSeenMap,
     context: &mut Context,
 ) -> JsResult<JsValue> {
-    let dolly = JsArray::new(context);
+    let dolly = JsArray::new(context)?;
     seen.insert(store, dolly.clone().into());
 
     for (k, v) in items

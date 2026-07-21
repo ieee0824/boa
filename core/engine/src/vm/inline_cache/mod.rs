@@ -1,15 +1,28 @@
-use std::cell::Cell;
+use arrayvec::ArrayVec;
+use itertools::Itertools;
+use std::{cell::Cell, fmt};
 
 use boa_gc::GcRefCell;
 use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot, slot::SlotAttributes},
+    object::shape::{Shape, WeakShape, slot::Slot},
 };
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) const PIC_CAPACITY: usize = 4;
+
+/// A cached shape-to-slot mapping for a polymorphic inline cache.
+#[derive(Clone, Debug, Trace, Finalize)]
+pub(crate) struct CacheEntry {
+    /// A weak reference is kept to the shape to avoid the shape preventing deallocation.
+    pub(crate) shape: WeakShape,
+    #[unsafe_ignore_trace]
+    pub(crate) slot: Slot,
+}
 
 /// An inline cache entry for a property access.
 #[derive(Clone, Debug, Trace, Finalize)]
@@ -17,104 +30,85 @@ pub(crate) struct InlineCache {
     /// The property that is accessed.
     pub(crate) name: JsString,
 
-    /// A pointer is kept to the shape to avoid the shape from being deallocated.
-    pub(crate) shape: GcRefCell<WeakShape>,
+    /// Multiple cached shape-to-slot entries.
+    pub(crate) entries: GcRefCell<ArrayVec<CacheEntry, PIC_CAPACITY>>,
 
-    /// For a prototype-property slot, the shape of the holder prototype at the
-    /// time the slot was cached.
-    ///
-    /// The cached [`Slot`] indexes into the *prototype's* property storage, but
-    /// [`Self::shape`] only tracks the *receiver's* shape. Mutating the
-    /// prototype (e.g. a polyfill deleting or redefining methods on
-    /// `String.prototype`) leaves the receiver's shape untouched yet shifts the
-    /// prototype's storage layout, so the cached slot index would then point at
-    /// a different property. Guarding on the prototype's shape as well detects
-    /// that mutation and forces a cache miss. It is [`WeakShape::None`] for
-    /// own-property slots (which do not read from a prototype).
-    pub(crate) prototype_shape: GcRefCell<WeakShape>,
-
-    /// The [`Slot`] of the property.
+    /// Whether this access site has seen too many shapes and should no longer be cached.
     #[unsafe_ignore_trace]
-    pub(crate) slot: Cell<Slot>,
+    pub(crate) megamorphic: Cell<bool>,
+}
+
+impl fmt::Display for InlineCache {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "(name:{} entries:", self.name.display_escaped())?;
+
+        if self.megamorphic.get() {
+            return write!(f, "(megamorphic))");
+        }
+
+        let entries = self.entries.borrow();
+        let entries = entries.iter().map(|e| e.shape.to_addr_usize()).format(", ");
+
+        write!(f, "({entries:#x}))")
+    }
 }
 
 impl InlineCache {
-    pub(crate) const fn new(name: JsString) -> Self {
+    pub(crate) fn new(name: JsString) -> Self {
         Self {
             name,
-            shape: GcRefCell::new(WeakShape::None),
-            prototype_shape: GcRefCell::new(WeakShape::None),
-            slot: Cell::new(Slot::new()),
+            entries: GcRefCell::new(ArrayVec::new()),
+            megamorphic: Cell::new(false),
         }
     }
 
     pub(crate) fn set(&self, shape: &Shape, slot: Slot) {
-        *self.shape.borrow_mut() = shape.into();
-        // Prototype-property slots index into the holder prototype's storage, so
-        // remember the prototype's shape to guard against it being reindexed
-        // later (see the `prototype_shape` field docs). A cachable prototype
-        // slot is always resolved on the receiver's immediate prototype
-        // (`Slot::set_not_cachable_if_already_prototype` makes deeper lookups
-        // non-cachable), so `shape.prototype()` is exactly the holder.
-        *self.prototype_shape.borrow_mut() = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            match shape.prototype() {
-                Some(prototype) => WeakShape::from(prototype.borrow().shape()),
-                None => WeakShape::None,
-            }
-        } else {
-            WeakShape::None
-        };
-        self.slot.set(slot);
+        if self.megamorphic.get() {
+            return;
+        }
+
+        let mut entries = self.entries.borrow_mut();
+
+        // Add a new entry if there's space.
+        if entries
+            .try_push(CacheEntry {
+                shape: shape.into(),
+                slot,
+            })
+            .is_err()
+        {
+            // Polymorphic cache is full, transition to megamorphic.
+            self.megamorphic.set(true);
+            entries.clear();
+        }
     }
 
-    pub(crate) fn slot(&self) -> Slot {
-        self.slot.get()
-    }
-
-    /// Returns `Some((shape, slot))`, if the [`InlineCache`]'s cached shape
-    /// matches the given receiver shape (and, for a prototype-property slot, the
-    /// holder prototype's shape still matches too).
+    /// Returns the cached `(Shape, Slot)` if a matching shape exists in the inline cache.
     ///
-    /// Otherwise we reset the internal weak reference(s) to [`WeakShape::None`],
-    /// so they can be deallocated by the GC.
-    pub(crate) fn match_or_reset(&self, shape: &Shape) -> Option<(Shape, Slot)> {
-        let mut old = self.shape.borrow_mut();
-
-        let old_upgraded = old.upgrade();
-        if old_upgraded.as_ref().map_or(0, Shape::to_addr_usize) != shape.to_addr_usize() {
-            *old = WeakShape::None;
-            *self.prototype_shape.borrow_mut() = WeakShape::None;
+    /// Opportunistically cleans up stale weak shape references during lookup.
+    pub(crate) fn get(&self, shape: &Shape) -> Option<(Shape, Slot)> {
+        if self.megamorphic.get() {
             return None;
         }
 
-        let matched = old_upgraded.expect("addr matched a live shape, so it upgrades");
-        let slot = self.slot();
+        let mut entries = self.entries.borrow_mut();
+        let mut i = 0;
+        let mut result = None;
+        let shape_addr = shape.to_addr_usize();
 
-        // A prototype-property slot indexes into the holder prototype's storage;
-        // the receiver-shape match above does not observe changes to that
-        // prototype. Require the holder prototype's current shape to still match
-        // the one recorded at cache time, otherwise the slot index may be stale.
-        if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let current_prototype_addr = matched
-                .prototype()
-                .map_or(0, |prototype| prototype.borrow().shape().to_addr_usize());
-
-            let mut cached_prototype = self.prototype_shape.borrow_mut();
-            let cached_addr = cached_prototype
-                .upgrade()
-                .as_ref()
-                .map_or(0, Shape::to_addr_usize);
-
-            // Treat a missing prototype (`0`) as a miss: a `0 == 0` comparison
-            // here would be a false match between a collected cached shape and a
-            // now-prototype-less receiver.
-            if current_prototype_addr == 0 || cached_addr != current_prototype_addr {
-                *cached_prototype = WeakShape::None;
-                *old = WeakShape::None;
-                return None;
+        while i < entries.len() {
+            if let Some(upgraded) = entries[i].shape.upgrade() {
+                if upgraded.to_addr_usize() == shape_addr {
+                    result = Some((upgraded, entries[i].slot));
+                    break;
+                }
+                i += 1;
+            } else {
+                // Opportunistically clean up stale weak shapes.
+                entries.swap_remove(i);
             }
         }
 
-        Some((matched, slot))
+        result
     }
 }

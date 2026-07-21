@@ -5,12 +5,7 @@
 use num_bigint::BigInt;
 use num_integer::Integer;
 use num_traits::{ToPrimitive, Zero};
-use std::{
-    collections::HashSet,
-    fmt::{self, Display},
-    ops::Sub,
-    sync::LazyLock,
-};
+use std::{ops::Sub, sync::LazyLock};
 
 use boa_gc::{Finalize, Trace};
 #[doc(inline)]
@@ -130,6 +125,21 @@ impl JsValue {
     }
 
     /// Create a new [`JsValue`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let integer = JsValue::new(42);
+    /// assert_eq!(integer.as_number(), Some(42.0));
+    ///
+    /// let float = JsValue::new(3.14);
+    /// assert_eq!(float.as_number(), Some(3.14));
+    ///
+    /// let boolean = JsValue::new(true);
+    /// assert_eq!(boolean.as_boolean(), Some(true));
+    /// ```
     #[inline]
     #[must_use]
     pub fn new<T>(value: T) -> Self
@@ -140,6 +150,23 @@ impl JsValue {
     }
 
     /// Return the variant of this value.
+    ///
+    /// This can be used to match on the underlying type of the value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, value::JsVariant};
+    ///
+    /// let value = JsValue::new(42);
+    /// match value.variant() {
+    ///     JsVariant::Integer32(n) => assert_eq!(n, 42),
+    ///     _ => unreachable!(),
+    /// }
+    ///
+    /// let value = JsValue::undefined();
+    /// assert!(matches!(value.variant(), JsVariant::Undefined));
+    /// ```
     #[inline]
     #[must_use]
     pub fn variant(&self) -> JsVariant {
@@ -147,6 +174,17 @@ impl JsValue {
     }
 
     /// Creates a new `undefined` value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let value = JsValue::undefined();
+    /// assert!(value.is_undefined());
+    /// assert!(value.is_null_or_undefined());
+    /// assert_eq!(value.display().to_string(), "undefined");
+    /// ```
     #[inline]
     #[must_use]
     pub const fn undefined() -> Self {
@@ -154,6 +192,17 @@ impl JsValue {
     }
 
     /// Creates a new `null` value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let value = JsValue::null();
+    /// assert!(value.is_null());
+    /// assert!(value.is_null_or_undefined());
+    /// assert_eq!(value.display().to_string(), "null");
+    /// ```
     #[inline]
     #[must_use]
     pub const fn null() -> Self {
@@ -161,6 +210,18 @@ impl JsValue {
     }
 
     /// Creates a new number with `NaN` value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let value = JsValue::nan();
+    /// assert!(value.is_number());
+    /// // NaN is not equal to itself.
+    /// assert!(value.as_number().unwrap().is_nan());
+    /// assert_eq!(value.display().to_string(), "NaN");
+    /// ```
     #[inline]
     #[must_use]
     pub const fn nan() -> Self {
@@ -168,6 +229,17 @@ impl JsValue {
     }
 
     /// Creates a new number with `Infinity` value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let value = JsValue::positive_infinity();
+    /// assert!(value.is_number());
+    /// assert_eq!(value.as_number(), Some(f64::INFINITY));
+    /// assert_eq!(value.display().to_string(), "Infinity");
+    /// ```
     #[inline]
     #[must_use]
     pub const fn positive_infinity() -> Self {
@@ -175,6 +247,17 @@ impl JsValue {
     }
 
     /// Creates a new number with `-Infinity` value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let value = JsValue::negative_infinity();
+    /// assert!(value.is_number());
+    /// assert_eq!(value.as_number(), Some(f64::NEG_INFINITY));
+    /// assert_eq!(value.display().to_string(), "-Infinity");
+    /// ```
     #[inline]
     #[must_use]
     pub const fn negative_infinity() -> Self {
@@ -182,6 +265,20 @@ impl JsValue {
     }
 
     /// Creates a new number from a float.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// let value = JsValue::rational(3.14);
+    /// assert!(value.is_number());
+    /// assert_eq!(value.as_number(), Some(3.14));
+    ///
+    /// // Can also represent special float values.
+    /// let neg_zero = JsValue::rational(-0.0);
+    /// assert!(neg_zero.is_number());
+    /// ```
     // #[inline]
     #[must_use]
     pub fn rational(rational: f64) -> Self {
@@ -189,6 +286,18 @@ impl JsValue {
     }
 
     /// Returns true if the value is an object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, object::JsObject};
+    ///
+    /// let obj = JsValue::new(JsObject::with_null_proto());
+    /// assert!(obj.is_object());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(!number.is_object());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_object(&self) -> bool {
@@ -196,6 +305,18 @@ impl JsValue {
     }
 
     /// Returns the object if the value is object, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, object::JsObject};
+    ///
+    /// let obj = JsValue::new(JsObject::with_null_proto());
+    /// assert!(obj.as_object().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_object().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_object(&self) -> Option<JsObject> {
@@ -203,6 +324,19 @@ impl JsValue {
     }
 
     /// Consumes the value and return the inner object if it was an object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, object::JsObject};
+    ///
+    /// let obj = JsValue::new(JsObject::with_null_proto());
+    /// let inner = obj.into_object();
+    /// assert!(inner.is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.into_object().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn into_object(self) -> Option<JsObject> {
@@ -215,6 +349,20 @@ impl JsValue {
     /// - [ECMAScript reference][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-iscallable
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, NativeFunction};
+    ///
+    /// let context = &mut Context::default();
+    /// let native_fn = NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined()));
+    /// let js_value = JsValue::from(native_fn.to_js_function(context.realm()));
+    /// assert!(js_value.is_callable());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(!number.is_callable());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_callable(&self) -> bool {
@@ -222,6 +370,20 @@ impl JsValue {
     }
 
     /// Returns the callable value if the value is callable, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, NativeFunction};
+    ///
+    /// let context = &mut Context::default();
+    /// let native_fn = NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined()));
+    /// let js_value = JsValue::from(native_fn.to_js_function(context.realm()));
+    /// assert!(js_value.as_callable().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_callable().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_callable(&self) -> Option<JsObject> {
@@ -230,6 +392,20 @@ impl JsValue {
 
     /// Returns a [`JsFunction`] if the value is callable, otherwise `None`.
     /// This is equivalent to `JsFunction::from_object(value.as_callable()?)`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, NativeFunction};
+    ///
+    /// let context = &mut Context::default();
+    /// let native_fn = NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined()));
+    /// let js_value = JsValue::from(native_fn.to_js_function(context.realm()));
+    /// assert!(js_value.as_function().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_function().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_function(&self) -> Option<JsFunction> {
@@ -237,6 +413,21 @@ impl JsValue {
     }
 
     /// Returns true if the value is a constructor object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, Source};
+    ///
+    /// let mut context = Context::default();
+    /// // Classes and regular functions are constructors.
+    /// let class = context.eval(Source::from_bytes(b"(class {})")).unwrap();
+    /// assert!(class.is_constructor());
+    ///
+    /// // Arrow functions are not constructors.
+    /// let arrow = context.eval(Source::from_bytes(b"(() => {})")).unwrap();
+    /// assert!(!arrow.is_constructor());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_constructor(&self) -> bool {
@@ -246,6 +437,19 @@ impl JsValue {
     }
 
     /// Returns the constructor if the value is a constructor, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, Source};
+    ///
+    /// let mut context = Context::default();
+    /// let class = context.eval(Source::from_bytes(b"(class {})")).unwrap();
+    /// assert!(class.as_constructor().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_constructor().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_constructor(&self) -> Option<JsObject> {
@@ -253,6 +457,20 @@ impl JsValue {
     }
 
     /// Returns true if the value is a promise object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, object::builtins::JsPromise};
+    ///
+    /// let context = &mut Context::default();
+    /// let (promise, _) = JsPromise::new_pending(context);
+    /// let js_value = JsValue::from(promise);
+    /// assert!(js_value.is_promise());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(!number.is_promise());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_promise(&self) -> bool {
@@ -262,19 +480,47 @@ impl JsValue {
     /// Returns the value as an object if the value is a promise, otherwise `None`.
     #[inline]
     #[must_use]
-    pub(crate) fn as_promise_object(&self) -> Option<JsObject> {
-        self.as_object().filter(|obj| obj.is::<Promise>())
+    pub(crate) fn as_promise_object(&self) -> Option<JsObject<Promise>> {
+        self.as_object()
+            .and_then(|obj| obj.downcast::<Promise>().ok())
     }
 
     /// Returns the value as a promise if the value is a promise, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, object::builtins::JsPromise};
+    ///
+    /// let context = &mut Context::default();
+    /// let (promise, _) = JsPromise::new_pending(context);
+    /// let js_value = JsValue::from(promise);
+    /// assert!(js_value.as_promise().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_promise().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_promise(&self) -> Option<JsPromise> {
-        self.as_promise_object()
-            .and_then(|o| JsPromise::from_object(o).ok())
+        self.as_promise_object().map(JsPromise::from)
     }
 
     /// Returns true if the value is a regular expression object.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, js_string, object::builtins::JsRegExp};
+    ///
+    /// let context = &mut Context::default();
+    /// let regexp = JsRegExp::new(js_string!("abc"), js_string!("g"), context).unwrap();
+    /// let js_value = JsValue::from(regexp);
+    /// assert!(js_value.is_regexp());
+    ///
+    /// let string = JsValue::new(js_string!("abc"));
+    /// assert!(!string.is_regexp());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_regexp(&self) -> bool {
@@ -282,6 +528,20 @@ impl JsValue {
     }
 
     /// Returns the value as a regular expression if the value is a regexp, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{Context, JsValue, js_string, object::builtins::JsRegExp};
+    ///
+    /// let context = &mut Context::default();
+    /// let regexp = JsRegExp::new(js_string!("abc"), js_string!("g"), context).unwrap();
+    /// let js_value = JsValue::from(regexp);
+    /// assert!(js_value.as_regexp().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_regexp().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_regexp(&self) -> Option<JsRegExp> {
@@ -291,6 +551,18 @@ impl JsValue {
     }
 
     /// Returns true if the value is a symbol.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, JsSymbol};
+    ///
+    /// let sym = JsValue::new(JsSymbol::new(None).unwrap());
+    /// assert!(sym.is_symbol());
+    ///
+    /// let string = JsValue::new(boa_engine::js_string!("hello"));
+    /// assert!(!string.is_symbol());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_symbol(&self) -> bool {
@@ -298,6 +570,18 @@ impl JsValue {
     }
 
     /// Returns the symbol if the value is a symbol, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, JsSymbol};
+    ///
+    /// let sym = JsValue::new(JsSymbol::new(None).unwrap());
+    /// assert!(sym.as_symbol().is_some());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_symbol().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_symbol(&self) -> Option<JsSymbol> {
@@ -305,6 +589,16 @@ impl JsValue {
     }
 
     /// Returns true if the value is undefined.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert!(JsValue::undefined().is_undefined());
+    /// assert!(!JsValue::null().is_undefined());
+    /// assert!(!JsValue::new(0).is_undefined());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_undefined(&self) -> bool {
@@ -312,6 +606,16 @@ impl JsValue {
     }
 
     /// Returns true if the value is null.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert!(JsValue::null().is_null());
+    /// assert!(!JsValue::undefined().is_null());
+    /// assert!(!JsValue::new(0).is_null());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_null(&self) -> bool {
@@ -319,10 +623,21 @@ impl JsValue {
     }
 
     /// Returns true if the value is null or undefined.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert!(JsValue::null().is_null_or_undefined());
+    /// assert!(JsValue::undefined().is_null_or_undefined());
+    /// assert!(!JsValue::new(0).is_null_or_undefined());
+    /// assert!(!JsValue::new(false).is_null_or_undefined());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_null_or_undefined(&self) -> bool {
-        self.is_undefined() || self.is_null()
+        self.0.is_null_or_undefined()
     }
 
     /// Returns the number if the value is a finite integral Number value, otherwise `None`.
@@ -331,31 +646,83 @@ impl JsValue {
     /// - [ECMAScript reference][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-isintegralnumber
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// // Integers are returned directly.
+    /// assert_eq!(JsValue::new(42).as_i32(), Some(42));
+    ///
+    /// // Floats that are whole numbers also succeed.
+    /// assert_eq!(JsValue::new(5.0).as_i32(), Some(5));
+    ///
+    /// // Non-integral floats return None.
+    /// assert_eq!(JsValue::new(3.14).as_i32(), None);
+    ///
+    /// // Non-number types return None.
+    /// assert_eq!(JsValue::new(true).as_i32(), None);
+    /// ```
     #[inline]
     #[must_use]
     #[allow(clippy::float_cmp)]
     pub fn as_i32(&self) -> Option<i32> {
         if let Some(integer) = self.0.as_integer32() {
-            Some(integer)
-        } else if let Some(rational) = self.0.as_float64() {
-            if rational == f64::from(rational as i32) {
-                Some(rational as i32)
-            } else {
-                None
-            }
-        } else {
-            None
+            return Some(integer);
         }
+
+        if let Some(rational) = self.0.as_float64() {
+            let int_val = rational as i32;
+            // Use bitwise comparison to handle -0.0 correctly
+            if rational.to_bits() == f64::from(int_val).to_bits() {
+                return Some(int_val);
+            }
+        }
+        None
     }
 
     /// Returns true if the value is a number.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert!(JsValue::new(42).is_number());
+    /// assert!(JsValue::new(3.14).is_number());
+    /// assert!(JsValue::nan().is_number());
+    ///
+    /// assert!(!JsValue::new(true).is_number());
+    /// assert!(!JsValue::undefined().is_number());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_number(&self) -> bool {
         self.0.is_integer32() || self.0.is_float64()
     }
 
+    /// Returns true if the value is a negative zero (`-0`).
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_negative_zero(&self) -> bool {
+        self.0.is_negative_zero()
+    }
+
     /// Returns the number if the value is a number, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert_eq!(JsValue::new(42).as_number(), Some(42.0));
+    /// assert_eq!(JsValue::new(3.14).as_number(), Some(3.14));
+    ///
+    /// // Non-number types return None.
+    /// assert_eq!(JsValue::null().as_number(), None);
+    /// assert_eq!(JsValue::new(true).as_number(), None);
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_number(&self) -> Option<f64> {
@@ -367,6 +734,18 @@ impl JsValue {
     }
 
     /// Returns true if the value is a string.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, js_string};
+    ///
+    /// let s = JsValue::new(js_string!("hello"));
+    /// assert!(s.is_string());
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(!number.is_string());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_string(&self) -> bool {
@@ -374,6 +753,18 @@ impl JsValue {
     }
 
     /// Returns the string if the value is a string, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, js_string};
+    ///
+    /// let s = JsValue::new(js_string!("hello"));
+    /// assert_eq!(s.as_string().map(|s| s == js_string!("hello")), Some(true));
+    ///
+    /// let number = JsValue::new(42);
+    /// assert!(number.as_string().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_string(&self) -> Option<JsString> {
@@ -381,6 +772,18 @@ impl JsValue {
     }
 
     /// Returns true if the value is a boolean.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert!(JsValue::new(true).is_boolean());
+    /// assert!(JsValue::new(false).is_boolean());
+    ///
+    /// assert!(!JsValue::new(1).is_boolean());
+    /// assert!(!JsValue::null().is_boolean());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_boolean(&self) -> bool {
@@ -388,6 +791,19 @@ impl JsValue {
     }
 
     /// Returns the boolean if the value is a boolean, otherwise `None`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// assert_eq!(JsValue::new(true).as_boolean(), Some(true));
+    /// assert_eq!(JsValue::new(false).as_boolean(), Some(false));
+    ///
+    /// // Non-boolean types return None, even "truthy" or "falsy" ones.
+    /// assert_eq!(JsValue::new(1).as_boolean(), None);
+    /// assert_eq!(JsValue::new(0).as_boolean(), None);
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_boolean(&self) -> Option<bool> {
@@ -395,6 +811,19 @@ impl JsValue {
     }
 
     /// Returns true if the value is a bigint.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, JsBigInt};
+    ///
+    /// let big = JsValue::new(JsBigInt::from(42));
+    /// assert!(big.is_bigint());
+    ///
+    /// // Regular numbers are not bigints.
+    /// let number = JsValue::new(42);
+    /// assert!(!number.is_bigint());
+    /// ```
     #[inline]
     #[must_use]
     pub fn is_bigint(&self) -> bool {
@@ -402,6 +831,18 @@ impl JsValue {
     }
 
     /// Returns a `BigInt` if the value is a `BigInt` primitive.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, JsBigInt};
+    ///
+    /// let big = JsValue::new(JsBigInt::from(100));
+    /// assert!(big.as_bigint().is_some());
+    ///
+    /// let number = JsValue::new(100);
+    /// assert!(number.as_bigint().is_none());
+    /// ```
     #[inline]
     #[must_use]
     pub fn as_bigint(&self) -> Option<JsBigInt> {
@@ -414,23 +855,41 @@ impl JsValue {
     ///  - [ECMAScript][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-toboolean
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, js_string};
+    ///
+    /// // Numbers: 0 and NaN are false, everything else is true.
+    /// assert!(!JsValue::new(0).to_boolean());
+    /// assert!(!JsValue::nan().to_boolean());
+    /// assert!(JsValue::new(1).to_boolean());
+    /// assert!(JsValue::new(-1).to_boolean());
+    ///
+    /// // Strings: empty string is false, non-empty is true.
+    /// assert!(!JsValue::new(js_string!("")).to_boolean());
+    /// assert!(JsValue::new(js_string!("hello")).to_boolean());
+    ///
+    /// // null and undefined are always false.
+    /// assert!(!JsValue::null().to_boolean());
+    /// assert!(!JsValue::undefined().to_boolean());
+    ///
+    /// // Booleans pass through.
+    /// assert!(JsValue::new(true).to_boolean());
+    /// assert!(!JsValue::new(false).to_boolean());
+    /// ```
     #[must_use]
+    #[inline]
     pub fn to_boolean(&self) -> bool {
-        match self.variant() {
-            JsVariant::Symbol(_) | JsVariant::Object(_) => true,
-            JsVariant::String(s) if !s.is_empty() => true,
-            JsVariant::Float64(n) if n != 0.0 && !n.is_nan() => true,
-            JsVariant::Integer32(n) if n != 0 => true,
-            JsVariant::BigInt(n) if !n.is_zero() => true,
-            JsVariant::Boolean(v) => v,
-            _ => false,
-        }
+        self.0.to_boolean()
     }
 
     /// The abstract operation `ToPrimitive` takes an input argument and an optional argument
     /// `PreferredType`.
     ///
     /// <https://tc39.es/ecma262/#sec-toprimitive>
+    #[inline]
     pub fn to_primitive(
         &self,
         context: &mut Context,
@@ -438,45 +897,8 @@ impl JsValue {
     ) -> JsResult<Self> {
         // 1. Assert: input is an ECMAScript language value. (always a value not need to check)
         // 2. If Type(input) is Object, then
-        if let Some(input) = self.as_object() {
-            // a. Let exoticToPrim be ? GetMethod(input, @@toPrimitive).
-            let exotic_to_prim = input.get_method(JsSymbol::to_primitive(), context)?;
-
-            // b. If exoticToPrim is not undefined, then
-            if let Some(exotic_to_prim) = exotic_to_prim {
-                // i. If preferredType is not present, let hint be "default".
-                // ii. Else if preferredType is string, let hint be "string".
-                // iii. Else,
-                //     1. Assert: preferredType is number.
-                //     2. Let hint be "number".
-                let hint = match preferred_type {
-                    PreferredType::Default => js_string!("default"),
-                    PreferredType::String => js_string!("string"),
-                    PreferredType::Number => js_string!("number"),
-                }
-                .into();
-
-                // iv. Let result be ? Call(exoticToPrim, input, « hint »).
-                let result = exotic_to_prim.call(self, &[hint], context)?;
-                // v. If Type(result) is not Object, return result.
-                // vi. Throw a TypeError exception.
-                return if result.is_object() {
-                    Err(JsNativeError::typ()
-                        .with_message("Symbol.toPrimitive cannot return an object")
-                        .into())
-                } else {
-                    Ok(result)
-                };
-            }
-
-            // c. If preferredType is not present, let preferredType be number.
-            let preferred_type = match preferred_type {
-                PreferredType::Default | PreferredType::Number => PreferredType::Number,
-                PreferredType::String => PreferredType::String,
-            };
-
-            // d. Return ? OrdinaryToPrimitive(input, preferredType).
-            return input.ordinary_to_primitive(context, preferred_type);
+        if let Some(o) = self.as_object() {
+            return o.to_primitive(context, preferred_type);
         }
 
         // 3. Return input.
@@ -513,11 +935,10 @@ impl JsValue {
             JsVariant::Integer32(_) | JsVariant::Float64(_) => Err(JsNativeError::typ()
                 .with_message("cannot convert Number to a BigInt")
                 .into()),
-            JsVariant::BigInt(b) => Ok(b.clone()),
-            JsVariant::Object(_) => {
-                let primitive = self.to_primitive(context, PreferredType::Number)?;
-                primitive.to_bigint(context)
-            }
+            JsVariant::BigInt(b) => Ok(b),
+            JsVariant::Object(o) => o
+                .to_primitive(context, PreferredType::Number)?
+                .to_bigint(context),
             JsVariant::Symbol(_) => Err(JsNativeError::typ()
                 .with_message("cannot convert Symbol to a BigInt")
                 .into()),
@@ -558,15 +979,14 @@ impl JsValue {
             JsVariant::Boolean(false) => Ok(js_string!("false")),
             JsVariant::Float64(rational) => Ok(JsString::from(rational)),
             JsVariant::Integer32(integer) => Ok(JsString::from(integer)),
-            JsVariant::String(string) => Ok(string.clone()),
+            JsVariant::String(string) => Ok(string),
             JsVariant::Symbol(_) => Err(JsNativeError::typ()
                 .with_message("can't convert symbol to string")
                 .into()),
             JsVariant::BigInt(bigint) => Ok(bigint.to_string().into()),
-            JsVariant::Object(_) => {
-                let primitive = self.to_primitive(context, PreferredType::String)?;
-                primitive.to_string(context)
-            }
+            JsVariant::Object(o) => o
+                .to_primitive(context, PreferredType::String)?
+                .to_string(context),
         }
     }
 
@@ -595,22 +1015,42 @@ impl JsValue {
                 .templates()
                 .number()
                 .create(rational, Vec::default())),
-            JsVariant::String(string) => Ok(context
-                .intrinsics()
-                .templates()
-                .string()
-                .create(string.clone(), vec![string.len().into()])),
+            JsVariant::String(string) => {
+                let len = string.len();
+                Ok(context
+                    .intrinsics()
+                    .templates()
+                    .string()
+                    .create(string, vec![len.into()]))
+            }
             JsVariant::Symbol(symbol) => Ok(context
                 .intrinsics()
                 .templates()
                 .symbol()
-                .create(symbol.clone(), Vec::default())),
+                .create(symbol, Vec::default())),
             JsVariant::BigInt(bigint) => Ok(context
                 .intrinsics()
                 .templates()
                 .bigint()
-                .create(bigint.clone(), Vec::default())),
-            JsVariant::Object(jsobject) => Ok(jsobject.clone()),
+                .create(bigint, Vec::default())),
+            JsVariant::Object(jsobject) => Ok(jsobject),
+        }
+    }
+
+    pub(crate) fn base_class(&self, context: &Context) -> JsResult<JsObject> {
+        let constructors = context.intrinsics().constructors();
+        match self.variant() {
+            JsVariant::Undefined | JsVariant::Null => Err(JsNativeError::typ()
+                .with_message("cannot convert 'null' or 'undefined' to object")
+                .into()),
+            JsVariant::Boolean(_) => Ok(constructors.boolean().prototype()),
+            JsVariant::Integer32(_) | JsVariant::Float64(_) => {
+                Ok(constructors.number().prototype())
+            }
+            JsVariant::String(_) => Ok(constructors.string().prototype()),
+            JsVariant::Symbol(_) => Ok(constructors.symbol().prototype()),
+            JsVariant::BigInt(_) => Ok(constructors.bigint().prototype()),
+            JsVariant::Object(object) => Ok(object.clone()),
         }
     }
 
@@ -618,23 +1058,32 @@ impl JsValue {
     ///
     /// See <https://tc39.es/ecma262/#sec-topropertykey>
     pub fn to_property_key(&self, context: &mut Context) -> JsResult<PropertyKey> {
-        Ok(match self.variant() {
-            // Fast path:
-            JsVariant::String(string) => string.clone().into(),
-            JsVariant::Symbol(symbol) => symbol.clone().into(),
-            JsVariant::Integer32(integer) => integer.into(),
-            // Slow path:
-            JsVariant::Object(_) => {
-                let primitive = self.to_primitive(context, PreferredType::String)?;
-                match primitive.variant() {
-                    JsVariant::String(string) => string.clone().into(),
-                    JsVariant::Symbol(symbol) => symbol.clone().into(),
-                    JsVariant::Integer32(integer) => integer.into(),
-                    _ => primitive.to_string(context)?.into(),
-                }
-            }
-            _ => self.to_string(context)?.into(),
-        })
+        match self.variant() {
+            // fast path
+            //
+            // The compiler will surely make this a jump table, but in case it
+            // doesn't, we put the "expected" property key types first
+            // (integer, string, symbol), then the rest of the variants.
+            JsVariant::Integer32(integer) => Ok(integer.into()),
+            JsVariant::String(string) => Ok(string.into()),
+            JsVariant::Symbol(symbol) => Ok(symbol.into()),
+
+            // We also inline the call to `to_string`, removing the
+            // double match against `self.variant()`.
+            JsVariant::Float64(float) => Ok(JsString::from(float).into()),
+            JsVariant::Undefined => Ok(js_string!("undefined").into()),
+            JsVariant::Null => Ok(js_string!("null").into()),
+            JsVariant::Boolean(true) => Ok(js_string!("true").into()),
+            JsVariant::Boolean(false) => Ok(js_string!("false").into()),
+            JsVariant::BigInt(bigint) => Ok(JsString::from(bigint.to_string()).into()),
+
+            // slow path
+            // Cannot infinitely recurse since it is guaranteed that `to_primitive` returns a non-object
+            // value or errors.
+            JsVariant::Object(o) => o
+                .to_primitive(context, PreferredType::String)?
+                .to_property_key(context),
+        }
     }
 
     /// It returns value converted to a numeric value of type `Number` or `BigInt`.
@@ -646,7 +1095,7 @@ impl JsValue {
 
         // 2. If primValue is a BigInt, return primValue.
         if let Some(bigint) = primitive.as_bigint() {
-            return Ok(bigint.clone().into());
+            return Ok(bigint.into());
         }
 
         // 3. Return ? ToNumber(primValue).
@@ -1002,6 +1451,20 @@ impl JsValue {
     ///
     /// [table]: https://tc39.es/ecma262/#table-14
     /// [spec]: https://tc39.es/ecma262/#sec-requireobjectcoercible
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::JsValue;
+    ///
+    /// // Most values are object-coercible.
+    /// assert!(JsValue::new(42).require_object_coercible().is_ok());
+    /// assert!(JsValue::new(true).require_object_coercible().is_ok());
+    ///
+    /// // null and undefined are not.
+    /// assert!(JsValue::null().require_object_coercible().is_err());
+    /// assert!(JsValue::undefined().require_object_coercible().is_err());
+    /// ```
     #[inline]
     pub fn require_object_coercible(&self) -> JsResult<&Self> {
         if self.is_null_or_undefined() {
@@ -1038,12 +1501,35 @@ impl JsValue {
     /// - [ECMAScript reference][spec]
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-typeof-operator
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, js_string, JsSymbol};
+    ///
+    /// assert_eq!(JsValue::undefined().type_of(), "undefined");
+    /// assert_eq!(JsValue::null().type_of(), "object");
+    /// assert_eq!(JsValue::new(true).type_of(), "boolean");
+    /// assert_eq!(JsValue::new(42).type_of(), "number");
+    /// assert_eq!(JsValue::new(js_string!("hi")).type_of(), "string");
+    /// assert_eq!(JsValue::new(JsSymbol::new(None).unwrap()).type_of(), "symbol");
+    /// ```
     #[must_use]
     pub fn type_of(&self) -> &'static str {
         self.variant().type_of()
     }
 
     /// Same as [`JsValue::type_of`], but returning a [`JsString`] instead.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use boa_engine::{JsValue, js_string};
+    ///
+    /// assert_eq!(JsValue::new(42).js_type_of(), js_string!("number"));
+    /// assert_eq!(JsValue::new(true).js_type_of(), js_string!("boolean"));
+    /// assert_eq!(JsValue::undefined().js_type_of(), js_string!("undefined"));
+    /// ```
     #[must_use]
     pub fn js_type_of(&self) -> JsString {
         self.variant().js_type_of()

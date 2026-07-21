@@ -8,7 +8,7 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/AggregateError
 
 use crate::{
-    Context, JsArgs, JsResult, JsString, JsValue,
+    Context, JsArgs, JsExpect, JsResult, JsString, JsValue,
     builtins::{
         Array, BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject,
         iterable::IteratorHint,
@@ -89,7 +89,8 @@ impl BuiltInConstructor for AggregateError {
             context.root_shape(),
             prototype,
             Error::with_caller_position(ErrorKind::Aggregate, context),
-        );
+        )
+        .upcast();
 
         // 3. If message is not undefined, then
         let message = args.get_or_undefined(1);
@@ -127,7 +128,7 @@ impl BuiltInConstructor for AggregateError {
                 .build(),
             context,
         )
-        .expect("should not fail according to spec");
+        .js_expect("should not fail according to spec")?;
 
         // 5. Return O.
         Ok(o.into())

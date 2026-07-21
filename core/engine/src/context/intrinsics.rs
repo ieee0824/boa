@@ -19,7 +19,7 @@ use crate::builtins::intl::Intl;
 
 /// The intrinsic objects and constructors.
 ///
-/// `Intrinsics` is internally stored using a `Gc`, which makes it cheapily clonable
+/// `Intrinsics` is internally stored using a `Gc`, which makes it cheapily cloneable
 /// for multiple references to the same set of intrinsic objects.
 #[derive(Debug, Trace, Finalize)]
 pub struct Intrinsics {
@@ -170,6 +170,8 @@ pub struct StandardConstructors {
     weak_ref: StandardConstructor,
     weak_map: StandardConstructor,
     weak_set: StandardConstructor,
+    iterator: StandardConstructor,
+    finalization_registry: StandardConstructor,
     #[cfg(feature = "intl")]
     collator: StandardConstructor,
     #[cfg(feature = "intl")]
@@ -264,6 +266,8 @@ impl Default for StandardConstructors {
             weak_ref: StandardConstructor::default(),
             weak_map: StandardConstructor::default(),
             weak_set: StandardConstructor::default(),
+            iterator: StandardConstructor::default(),
+            finalization_registry: StandardConstructor::default(),
             #[cfg(feature = "intl")]
             collator: StandardConstructor::default(),
             #[cfg(feature = "intl")]
@@ -840,6 +844,30 @@ impl StandardConstructors {
     #[must_use]
     pub const fn weak_set(&self) -> &StandardConstructor {
         &self.weak_set
+    }
+
+    /// Returns the `Iterator` constructor.
+    ///
+    /// More information:
+    ///  - [ECMAScript reference][spec]
+    ///
+    /// [spec]: https://tc39.es/proposal-iterator-helpers/#sec-iterator-constructor
+    #[inline]
+    #[must_use]
+    pub const fn iterator(&self) -> &StandardConstructor {
+        &self.iterator
+    }
+
+    /// Returns the `FinalizationRegistry` constructor.
+    ///
+    /// More information:
+    ///  - [ECMAScript reference][spec]
+    ///
+    /// [spec]: https://tc39.es/ecma262/#sec-finalization-registry-constructor
+    #[inline]
+    #[must_use]
+    pub const fn finalization_registry(&self) -> &StandardConstructor {
+        &self.finalization_registry
     }
 
     /// Returns the `Intl.Collator` constructor.
@@ -1709,7 +1737,7 @@ impl ObjectTemplates {
     /// Transitions:
     ///
     /// 1. `__proto__`: `Object.prototype`
-    /// 2. `"contructor"`: (`WRITABLE`, `CONFIGURABLE`, `NON_ENUMERABLE`)
+    /// 2. `"constructor"`: (`WRITABLE`, `CONFIGURABLE`, `NON_ENUMERABLE`)
     pub(crate) const fn function_prototype(&self) -> &ObjectTemplate {
         &self.function_prototype
     }

@@ -94,7 +94,7 @@ impl DynamicDryDataProvider<BufferMarker> for LazyBufferProvider {
 /// A macro that creates a [`LazyBufferProvider`] from an icu4x crate.
 macro_rules! provider_from_icu_crate {
     ($service:path) => {
-        paste::paste! {
+        pastey::paste! {
             LazyBufferProvider {
                 provider: OnceCell::new(),
                 bytes: include_bytes!(concat!(
@@ -116,6 +116,7 @@ static PROVIDER: Lazy<LocaleFallbackProvider<MultiForkByMarkerProvider<LazyBuffe
             provider_from_icu_crate!(icu_casemap),
             provider_from_icu_crate!(icu_collator),
             provider_from_icu_crate!(icu_datetime),
+            provider_from_icu_crate!(icu_time),
             provider_from_icu_crate!(icu_decimal),
             provider_from_icu_crate!(icu_list),
             provider_from_icu_crate!(icu_locale),

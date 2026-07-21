@@ -50,7 +50,7 @@ The `Start` (in green) and `End` (in red) node in the graph represents the start
 They are not instructions, just markers.
 
 The conditional instructions are diamond shaped, with the `"YES"` branch in green and the `"NO"` branch in red.
-The push and pop evironment pairs match colors and are connected by a dotted line.
+The push and pop environment pairs match colors and are connected by a dotted line.
 
 You can use the `--flowgraph` (or `--flowgraph=mermaid` for [mermaid][mermaid] format) flag which outputs
 [graphviz][graphviz] format by default, and pipe it to `dot` (from the `graphviz` package which is installed
@@ -74,7 +74,7 @@ By using a `mermaid` block as seen below.
 ```
 ````
 
-Additionaly you can specify the direction of "flow" by using the `--flowgraph-direction` cli option,
+Additionally you can specify the direction of "flow" by using the `--flowgraph-direction` cli option,
 for example `--flowgraph-direction=left-to-right`, the default is `top-to-bottom`.
 
 [mermaid]: https://mermaid-js.github.io/
@@ -85,13 +85,13 @@ for example `--flowgraph-direction=left-to-right`, the default is `top-to-bottom
 
 Certain debugging actions in JavaScript land are difficult to impossible, like triggering a GC collect.
 
-For such puroposes we have the `$boa` object that contains useful utilities that can be used to debug JavaScript in JavaScript.
+For such purposes we have the `$boa` object that contains useful utilities that can be used to debug JavaScript in JavaScript.
 The debug object becomes available with the `--debug-object` cli flag, It injects the `$boa` debug object in the context as global variable,
 the object is separated into modules `gc`, `function`, `object`, etc.
 
 We can now do `$boa.gc.collect()`, which force triggers a GC collect.
 
-If you want to trace only a particular function (without being flodded by the `--trace` flag, that traces everything),
+If you want to trace only a particular function (without being flooded by the `--trace` flag, that traces everything),
 for that we have the `$boa.function.trace(func, this, ...args)`.
 
 The full documentation of the `$boa` object's modules and functionalities can be found [`here`](./boa_object.md).

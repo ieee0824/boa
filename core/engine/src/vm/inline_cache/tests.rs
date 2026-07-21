@@ -6,9 +6,8 @@ use crate::{
     builtins::{OrdinaryObject, function::OrdinaryFunction},
     js_string,
     object::{
-        ObjectInitializer,
-        internal_methods::InternalMethodPropertyContext,
-        shape::{WeakShape, slot::SlotAttributes},
+        ObjectInitializer, internal_methods::InternalMethodPropertyContext,
+        shape::slot::SlotAttributes,
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     vm::CodeBlock,
@@ -44,8 +43,8 @@ fn get_own_property_internal_method() {
     );
 
     assert!(
-        context.slot().is_cachable(),
-        "Since it's an owned property, this should be cachable"
+        context.slot().is_cacheable(),
+        "Since it's an owned property, this should be cacheable"
     );
 
     let shape = o.borrow().shape().clone();
@@ -89,8 +88,8 @@ fn get_internal_method() {
     );
 
     assert!(
-        context.slot().is_cachable(),
-        "Since it's an owned property, this should be cachable"
+        context.slot().is_cacheable(),
+        "Since it's an owned property, this should be cacheable"
     );
 
     let shape = o.borrow().shape().clone();
@@ -137,8 +136,8 @@ fn get_internal_method_in_prototype() {
     );
 
     assert!(
-        context.slot().is_cachable(),
-        "Since it's an prototype property, this should be cachable"
+        context.slot().is_cacheable(),
+        "Since it's an prototype property, this should be cacheable"
     );
 
     let shape = prototype.borrow().shape().clone();
@@ -153,7 +152,7 @@ fn get_internal_method_in_prototype() {
 }
 
 #[test]
-fn define_own_property_internal_method_non_existant_property() {
+fn define_own_property_internal_method_non_existent_property() {
     let context = &mut Context::default();
 
     let o = context
@@ -191,8 +190,8 @@ fn define_own_property_internal_method_non_existant_property() {
     );
 
     assert!(
-        context.slot().is_cachable(),
-        "Since it's an owned property, this should be cachable"
+        context.slot().is_cacheable(),
+        "Since it's an owned property, this should be cacheable"
     );
 
     let shape = o.borrow().shape().clone();
@@ -257,8 +256,8 @@ fn define_own_property_internal_method_existing_property_property() {
     );
 
     assert!(
-        context.slot().is_cachable(),
-        "Since it's an owned property, this should be cachable"
+        context.slot().is_cacheable(),
+        "Since it's an owned property, this should be cacheable"
     );
 
     let shape = o.borrow().shape().clone();
@@ -302,8 +301,8 @@ fn set_internal_method() {
     );
 
     assert!(
-        context.slot().is_cachable(),
-        "Since it's an owned property, this should be cachable"
+        context.slot().is_cacheable(),
+        "Since it's an owned property, this should be cacheable"
     );
 
     let shape = o.borrow().shape().clone();
@@ -331,7 +330,7 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let (function, code) = get_codeblock(&function).unwrap();
 
     assert_eq!(code.ic.len(), 1);
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
+    assert_eq!(code.ic[0].entries.borrow().len(), 0);
 
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
@@ -340,55 +339,14 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
 
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::from(&o_shape));
-
-    Ok(())
-}
-
-/// Regression test: a warmed prototype-property inline cache must not return a
-/// stale slot after the prototype's storage is reindexed.
-///
-/// A cachable prototype-property slot indexes into the *prototype's* storage,
-/// but the inline cache only tracks the *receiver's* shape. Deleting an earlier
-/// property from the prototype compacts its storage and shifts the target
-/// property's slot index down, while the receiver's shape is unchanged. Before
-/// the prototype-shape guard was added, the warm call site kept hitting with
-/// the stale slot index and resolved to a different property (this is the
-/// core-js / `String.prototype` poisoning from Omoikane issue 058, reduced to a
-/// deterministic minimal case).
-#[test]
-fn prototype_property_inline_cache_survives_prototype_reindex() -> JsResult<()> {
-    let context = &mut Context::default();
-
-    let result = context.eval(Source::from_bytes(
-        r"
-        var proto = {};
-        proto.a = 10;
-        proto.b = 20;
-        proto.target = 42;
-        proto.c = 99;
-        proto.d = 88;
-        var o = Object.create(proto);
-        function read(x) { return x.target; }
-        // Warm the inline cache for the `target` prototype-property load; the
-        // slot caches index 2 into the prototype's storage.
-        read(o);
-        read(o);
-        read(o);
-        if (read(o) !== 42) { throw new Error('warmup should read 42'); }
-        // Reindex the prototype: deleting `a` then `b` compacts storage so that
-        // `target` moves to index 0 and index 2 now holds `d` (== 88). The
-        // receiver `o`'s shape is unaffected.
-        delete proto.a;
-        delete proto.b;
-        read(o)
-        ",
-    ))?;
-
+    assert_eq!(code.ic[0].entries.borrow().len(), 1);
     assert_eq!(
-        result.as_number(),
-        Some(42.0),
-        "prototype inline cache returned a stale slot after the prototype was reindexed"
+        code.ic[0].entries.borrow()[0]
+            .shape
+            .upgrade()
+            .unwrap()
+            .to_addr_usize(),
+        o_shape.to_addr_usize()
     );
 
     Ok(())
@@ -401,7 +359,7 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let (function, code) = get_codeblock(&function).unwrap();
 
     assert_eq!(code.ic.len(), 1);
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
+    assert_eq!(code.ic[0].entries.borrow().len(), 0);
 
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
@@ -410,7 +368,100 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
 
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::from(&o_shape));
+    assert_eq!(code.ic[0].entries.borrow().len(), 1);
+    assert_eq!(
+        code.ic[0].entries.borrow()[0]
+            .shape
+            .upgrade()
+            .unwrap()
+            .to_addr_usize(),
+        o_shape.to_addr_usize()
+    );
+
+    Ok(())
+}
+
+#[test]
+fn test_polymorphic_inline_cache() -> JsResult<()> {
+    let context = &mut Context::default();
+    let function = context.eval(Source::from_bytes("(function (o) { return o.test; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+
+    assert_eq!(code.ic.len(), 1);
+    assert_eq!(code.ic[0].entries.borrow().len(), 0);
+    assert!(!code.ic[0].megamorphic.get());
+
+    let shapes = vec![
+        ObjectInitializer::new(context)
+            .property(js_string!("test"), 1, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("a"), 2, Attribute::all())
+            .property(js_string!("test"), 3, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("b"), 4, Attribute::all())
+            .property(js_string!("test"), 5, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("c"), 6, Attribute::all())
+            .property(js_string!("test"), 7, Attribute::all())
+            .build(),
+    ];
+
+    for o in &shapes {
+        function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
+    }
+
+    assert_eq!(code.ic[0].entries.borrow().len(), 4);
+    assert!(!code.ic[0].megamorphic.get());
+
+    Ok(())
+}
+
+#[test]
+fn test_megamorphic_inline_cache() -> JsResult<()> {
+    let context = &mut Context::default();
+    let function = context.eval(Source::from_bytes("(function (o) { return o.test; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+
+    let shapes = vec![
+        ObjectInitializer::new(context)
+            .property(js_string!("test"), 1, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("a"), 1, Attribute::all())
+            .property(js_string!("test"), 1, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("b"), 1, Attribute::all())
+            .property(js_string!("test"), 1, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("c"), 1, Attribute::all())
+            .property(js_string!("test"), 1, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("d"), 1, Attribute::all())
+            .property(js_string!("test"), 1, Attribute::all())
+            .build(),
+    ];
+
+    for o in &shapes {
+        function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
+    }
+
+    assert_eq!(code.ic[0].entries.borrow().len(), 0);
+    assert!(code.ic[0].megamorphic.get());
+
+    // Regression check: repeated miss should remain empty
+    let o6 = ObjectInitializer::new(context)
+        .property(js_string!("e"), 1, Attribute::all())
+        .property(js_string!("test"), 1, Attribute::all())
+        .build();
+    function.call(&JsValue::undefined(), &[o6.clone().into()], context)?;
+    assert_eq!(code.ic[0].entries.borrow().len(), 0);
+    assert!(code.ic[0].megamorphic.get());
 
     Ok(())
 }

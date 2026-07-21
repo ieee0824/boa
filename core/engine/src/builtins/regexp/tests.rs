@@ -87,6 +87,35 @@ fn flags() {
 }
 
 #[test]
+fn escape() {
+    run_test_actions([
+        TestAction::assert_eq(
+            r"RegExp.escape('The Quick Brown Fox')",
+            js_str!("\\x54he\\x20Quick\\x20Brown\\x20Fox"),
+        ),
+        TestAction::assert_eq(
+            r"RegExp.escape('Buy it. use it. break it. fix it.')",
+            js_str!("\\x42uy\\x20it\\.\\x20use\\x20it\\.\\x20break\\x20it\\.\\x20fix\\x20it\\."),
+        ),
+        TestAction::assert_eq(r"RegExp.escape('(*.*)')", js_str!("\\(\\*\\.\\*\\)")),
+        TestAction::assert_eq(r"RegExp.escape('｡^･ｪ･^｡')", js_str!("｡\\^･ｪ･\\^｡")),
+        TestAction::assert_eq(
+            r"RegExp.escape('😊 *_* +_+ ... 👍')",
+            js_str!("😊\\x20\\*_\\*\\x20\\+_\\+\\x20\\.\\.\\.\\x20👍"),
+        ),
+        TestAction::assert_eq(
+            r"RegExp.escape('\\d \\D (?:)')",
+            js_str!("\\\\d\\x20\\\\D\\x20\\(\\?\\x3a\\)"),
+        ),
+        TestAction::assert_native_error(
+            "RegExp.escape(1)",
+            JsNativeErrorKind::Type,
+            "RegExp.escape requires a string argument",
+        ),
+    ]);
+}
+
+#[test]
 fn last_index() {
     run_test_actions([
         TestAction::run(r"var regex = /[0-9]+(\.[0-9]+)?/g;"),
@@ -217,11 +246,19 @@ fn search() {
 }
 
 #[test]
-fn regular_expression_construction_independant_of_global_reg_exp() {
+fn regular_expression_construction_independent_of_global_reg_exp() {
     let regex = "/abc/";
     run_test_actions([
         TestAction::run(regex),
         TestAction::run("RegExp = null"),
         TestAction::run(regex),
     ]);
+}
+
+#[test]
+fn regexp_no_panic_on_empty_class_quantifier() {
+    // Regression test for https://github.com/boa-dev/boa/issues/2718
+    // `/[]*1/u.exec()` previously caused a panic in the regress crate.
+    // It should return null without panicking.
+    run_test_actions([TestAction::assert_eq("/[]*1/u.exec()", JsValue::null())]);
 }

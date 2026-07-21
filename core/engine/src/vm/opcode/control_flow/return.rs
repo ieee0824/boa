@@ -4,7 +4,7 @@ use crate::{
     Context, JsNativeError,
     vm::{
         CompletionRecord,
-        opcode::{Operation, VaryingOperand},
+        opcode::{Operation, RegisterOperand},
     },
 };
 
@@ -50,11 +50,11 @@ impl CheckReturn {
         } else if !this.is_undefined() {
             this.clone()
         } else if !result.is_undefined() {
-            let realm = context.vm.frame().realm.clone();
             context.vm.pending_exception = Some(
+                // Avoid setting the realm here, since it needs to be set by the parent
+                // execution context.
                 JsNativeError::typ()
                     .with_message("derived constructor can only return an Object or undefined")
-                    .with_realm(realm)
                     .into(),
             );
             return context.handle_throw();
@@ -63,11 +63,10 @@ impl CheckReturn {
             if frame.has_this_value_cached() {
                 this.clone()
             } else {
-                let realm = frame.realm.clone();
-
-                match context.vm.environments.get_this_binding() {
+                match context.vm.frame().environments.get_this_binding() {
                     Err(err) => {
-                        let err = err.inject_realm(realm);
+                        // Avoid setting the realm here, since it needs to be set by the parent
+                        // execution context.
                         context.vm.pending_exception = Some(err);
                         return context.handle_throw();
                     }
@@ -97,7 +96,7 @@ pub(crate) struct SetAccumulator;
 
 impl SetAccumulator {
     #[inline(always)]
-    pub(crate) fn operation(register: VaryingOperand, context: &mut Context) {
+    pub(crate) fn operation(register: RegisterOperand, context: &mut Context) {
         let value = context.vm.get_register(register.into());
         context.vm.set_return_value(value.clone());
     }
@@ -118,7 +117,7 @@ pub(crate) struct Move;
 
 impl Move {
     #[inline(always)]
-    pub(crate) fn operation((dst, src): (VaryingOperand, VaryingOperand), context: &mut Context) {
+    pub(crate) fn operation((dst, src): (RegisterOperand, RegisterOperand), context: &mut Context) {
         let value = context.vm.get_register(src.into());
         context.vm.set_register(dst.into(), value.clone());
     }
@@ -130,14 +129,17 @@ impl Operation for Move {
     const COST: u8 = 2;
 }
 
-/// TODO: doc
+/// `PopIntoRegister` implements the Opcode Operation for `Opcode::PopIntoRegister`.
+///
+/// Operation:
+///  - Pop a value from the stack and store it in a register.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PopIntoRegister;
 
 impl PopIntoRegister {
     #[inline(always)]
-    pub(crate) fn operation(dst: VaryingOperand, context: &mut Context) {
-        let value = context.vm.stack.pop().clone();
+    pub(crate) fn operation(dst: RegisterOperand, context: &mut Context) {
+        let value = context.vm.stack.pop();
         context.vm.set_register(dst.into(), value);
     }
 }
@@ -148,13 +150,16 @@ impl Operation for PopIntoRegister {
     const COST: u8 = 2;
 }
 
-/// TODO: doc
+/// `PushFromRegister` implements the Opcode Operation for `Opcode::PushFromRegister`.
+///
+/// Operation:
+///  - Read a value from a register and push it onto the stack.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PushFromRegister;
 
 impl PushFromRegister {
     #[inline(always)]
-    pub(crate) fn operation(dst: VaryingOperand, context: &mut Context) {
+    pub(crate) fn operation(dst: RegisterOperand, context: &mut Context) {
         let value = context.vm.get_register(dst.into());
         context.vm.stack.push(value.clone());
     }
@@ -175,7 +180,7 @@ pub(crate) struct SetRegisterFromAccumulator;
 
 impl SetRegisterFromAccumulator {
     #[inline(always)]
-    pub(crate) fn operation(register: VaryingOperand, context: &mut Context) {
+    pub(crate) fn operation(register: RegisterOperand, context: &mut Context) {
         context
             .vm
             .set_register(register.into(), context.vm.get_return_value());

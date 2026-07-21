@@ -3,9 +3,10 @@ use std::ops::ControlFlow;
 use crate::{
     Context, JsValue,
     builtins::async_generator::{AsyncGenerator, AsyncGeneratorState},
+    error::PanicError,
     vm::{
         CompletionRecord, GeneratorResumeKind,
-        opcode::{Operation, VaryingOperand},
+        opcode::{Operation, RegisterOperand},
     },
 };
 
@@ -19,7 +20,7 @@ pub(crate) struct GeneratorYield;
 impl GeneratorYield {
     #[inline(always)]
     pub(crate) fn operation(
-        value: VaryingOperand,
+        value: RegisterOperand,
         context: &mut Context,
     ) -> ControlFlow<CompletionRecord> {
         let value = context.vm.get_register(value.into());
@@ -44,7 +45,7 @@ pub(crate) struct AsyncGeneratorYield;
 impl AsyncGeneratorYield {
     #[inline(always)]
     pub(crate) fn operation(
-        value: VaryingOperand,
+        value: RegisterOperand,
         context: &mut Context,
     ) -> ControlFlow<CompletionRecord> {
         // AsyncGeneratorYield ( value )
@@ -54,14 +55,17 @@ impl AsyncGeneratorYield {
         // 2. Assert: genContext is the execution context of a generator.
         // 3. Let generator be the value of the Generator component of genContext.
         // 4. Assert: GetGeneratorKind() is async.
-        let async_generator_object = context
-            .vm
-            .stack
-            .async_generator_object(&context.vm.frame)
-            .expect("`AsyncGeneratorYield` must only be called inside async generators");
-        let async_generator_object = async_generator_object
-            .downcast::<AsyncGenerator>()
-            .expect("must be async generator object");
+        let Some(async_generator_object) = context.vm.async_generator_object() else {
+            return context.handle_error(
+                PanicError::new(
+                    "`AsyncGeneratorYield` must only be called inside async generators",
+                )
+                .into(),
+            );
+        };
+        let Ok(async_generator_object) = async_generator_object.downcast::<AsyncGenerator>() else {
+            return context.handle_error(PanicError::new("must be async generator object").into());
+        };
 
         // 5. Let completion be NormalCompletion(value).
         let value = context.vm.get_register(value.into());
@@ -71,7 +75,11 @@ impl AsyncGeneratorYield {
         // TODO: 7. Let previousContext be the second to top element of the execution context stack.
         // TODO: 8. Let previousRealm be previousContext's Realm.
         // 9. Perform AsyncGeneratorCompleteStep(generator, completion, false, previousRealm).
-        AsyncGenerator::complete_step(&async_generator_object, completion, false, None, context);
+        if let Err(err) =
+            AsyncGenerator::complete_step(&async_generator_object, completion, false, None, context)
+        {
+            return context.handle_error(err);
+        }
 
         let mut r#gen = async_generator_object.borrow_mut();
 
@@ -91,7 +99,10 @@ impl AsyncGeneratorYield {
                     GeneratorResumeKind::Return
                 }
                 CompletionRecord::Throw(err) => {
-                    let err = err.to_opaque(context);
+                    let err = match err.into_opaque(context) {
+                        Ok(e) => e,
+                        Err(e) => return context.handle_error(e),
+                    };
                     context.vm.stack.push(err);
                     GeneratorResumeKind::Throw
                 }

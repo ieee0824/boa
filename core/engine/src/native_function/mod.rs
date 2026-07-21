@@ -25,11 +25,9 @@ use crate::{
     realm::Realm,
 };
 
-#[cfg(feature = "experimental")]
 mod continuation;
 
-#[cfg(feature = "experimental")]
-pub(crate) use continuation::{CoroutineState, NativeCoroutine};
+pub(crate) use continuation::{CoroutineBranch, CoroutineState, NativeCoroutine};
 
 /// The required signature for all native built-in function pointers.
 ///
@@ -213,7 +211,7 @@ impl NativeFunction {
                     match result {
                         Ok(v) => resolvers.resolve.call(&JsValue::undefined(), &[v], context),
                         Err(e) => {
-                            let e = e.to_opaque(context);
+                            let e = e.into_opaque(context)?;
                             resolvers.reject.call(&JsValue::undefined(), &[e], context)
                         }
                     }
@@ -349,7 +347,7 @@ pub(crate) fn native_function_call(
         .expect("the object should be a native function object")
         .clone();
 
-    let pc = context.vm.frame.pc;
+    let pc = context.vm.frame().pc;
     let native_source_info = context.native_source_info();
     context
         .vm
@@ -404,7 +402,7 @@ fn native_function_construct(
         .expect("the object should be a native function object")
         .clone();
 
-    let pc = context.vm.frame.pc;
+    let pc = context.vm.frame().pc;
     let native_source_info = context.native_source_info();
     context
         .vm
@@ -440,7 +438,8 @@ fn native_function_construct(
                         context.root_shape(),
                         prototype,
                         OrdinaryObject,
-                    ))
+                    )
+                    .upcast())
                 } else {
                     Err(JsNativeError::typ()
                         .with_message("derived constructor can only return an Object or undefined")

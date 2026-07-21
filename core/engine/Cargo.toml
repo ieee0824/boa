@@ -12,7 +12,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
-default = ["float16", "xsum"]
+default = ["float16", "xsum", "temporal"]
 
 embedded_lz4 = ["boa_macros/embedded_lz4", "lz4_flex"]
 
@@ -40,6 +40,7 @@ intl = [
     "icu_normalizer/serde",
     "dep:icu_locale",
     "dep:icu_datetime",
+    "dep:icu_time",
     "dep:icu_plurals",
     "dep:icu_provider",
     "dep:icu_calendar",
@@ -54,6 +55,8 @@ intl = [
     "dep:zerofrom",
     "dep:fixed_decimal",
     "dep:tinystr",
+    "dep:timezone_provider",
+    "timezone_provider/experimental_tzif",
 ]
 
 fuzz = ["boa_ast/arbitrary", "boa_interner/arbitrary"]
@@ -68,10 +71,13 @@ trace = ["js"]
 annex-b = ["boa_ast/annex-b", "boa_parser/annex-b"]
 
 # Enable Boa's Temporal proposal implementation
-temporal = ["dep:icu_calendar", "dep:temporal_rs", "dep:iana-time-zone", "dep:timezone_provider", "timezone_provider/tzif"]
+temporal = ["dep:icu_calendar", "dep:temporal_rs", "dep:timezone_provider", "timezone_provider/experimental_tzif"]
+
+#Enable access to host system timezone
+system-time-zone = ["dep:iana-time-zone"]
 
 # Enable experimental features, like Stage 3 proposals.
-experimental = ["temporal"]
+experimental = []
 
 # Enable binding to JS APIs for system related utilities.
 js = ["dep:web-time", "dep:getrandom", "getrandom/wasm_js", "time/wasm-bindgen"]
@@ -88,7 +94,7 @@ native-backtrace = []
 [dependencies]
 tag_ptr.workspace = true
 boa_interner.workspace = true
-boa_gc = { workspace = true, features = ["thin-vec", "boa_string"] }
+boa_gc = { workspace = true, features = ["thin-vec", "boa_string", "arrayvec"] }
 boa_macros.workspace = true
 boa_ast.workspace = true
 boa_parser.workspace = true
@@ -97,7 +103,7 @@ cow-utils.workspace = true
 futures-lite.workspace = true
 float16 = { version = "0.1", optional = true }
 lz4_flex = { workspace = true, optional = true }
-xsum = { version = "0.1.5", optional = true }
+xsum = { version = "0.1.6", optional = true }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
 rand.workspace = true
@@ -112,12 +118,12 @@ ryu-js.workspace = true
 fast-float2.workspace = true
 tap.workspace = true
 small_btree.workspace = true
-paste.workspace = true
+pastey.workspace = true
 thiserror.workspace = true
 dashmap.workspace = true
 num_enum.workspace = true
 thin-vec.workspace = true
-itertools = { workspace = true, default-features = false }
+itertools = { workspace = true, default-features = false, features = ["use_alloc"] }
 icu_normalizer = { workspace = true, features = [
     "compiled_data",
     "utf16_iter",
@@ -131,8 +137,11 @@ time.workspace = true
 hashbrown.workspace = true
 either = { workspace = true, optional = true }
 static_assertions.workspace = true
-futures-channel.workspace = true
 aligned-vec.workspace = true
+dynify = { workspace = true, features = ["macros"] }
+futures-concurrency.workspace = true
+oneshot = { workspace = true, features = ["async"] }
+async-channel.workspace = true
 
 # intl deps
 boa_icu_provider = { workspace = true, features = ["std"], optional = true }
@@ -143,7 +152,9 @@ icu_locale = { workspace = true, default-features = false, features = [
 ], optional = true }
 icu_datetime = { workspace = true, default-features = false, features = [
     "serde",
-    "experimental",
+], optional = true }
+icu_time = { workspace = true, default-features = false, features = [
+    "serde",
 ], optional = true }
 icu_calendar = { workspace = true, default-features = false, optional = true }
 icu_collator = { workspace = true, default-features = false, features = [
@@ -151,7 +162,7 @@ icu_collator = { workspace = true, default-features = false, features = [
 ], optional = true }
 icu_plurals = { workspace = true, default-features = false, features = [
     "serde",
-    "experimental",
+    "unstable",
 ], optional = true }
 icu_list = { workspace = true, default-features = false, features = [
     "serde",
@@ -165,23 +176,20 @@ icu_segmenter = { workspace = true, default-features = false, features = [
     "serde",
 ], optional = true }
 icu_decimal = { workspace = true, default-features = false, features = [
-    "serde",
+    "serde", "unstable"
 ], optional = true }
 writeable = { workspace = true, optional = true }
 yoke = { workspace = true, optional = true }
 zerofrom = { workspace = true, optional = true }
 fixed_decimal = { workspace = true, features = [
     "ryu",
-    "experimental",
 ], optional = true }
 tinystr = { workspace = true, optional = true }
-dynify.workspace = true
-futures-concurrency.workspace = true
 
 # temporal deps
 temporal_rs = { workspace = true, optional = true }
 timezone_provider = { workspace = true, optional = true }
-iana-time-zone = { version = "0.1.64", optional = true }
+iana-time-zone = { workspace = true, optional = true }
 
 [target.'cfg(all(target_family = "wasm", not(any(target_os = "emscripten", target_os = "wasi"))))'.dependencies]
 web-time = { workspace = true, optional = true }
@@ -194,6 +202,7 @@ float-cmp.workspace = true
 indoc.workspace = true
 textwrap.workspace = true
 test-case.workspace = true
+husky-rs.workspace = true
 
 [target.x86_64-unknown-linux-gnu.dev-dependencies]
 jemallocator.workspace = true

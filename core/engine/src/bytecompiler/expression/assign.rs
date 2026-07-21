@@ -183,11 +183,11 @@ impl ByteCompiler<'_> {
                             let object = compiler.register_allocator.alloc();
                             compiler.compile_expr(access.target(), &object);
 
-                            compiler.emit_get_property_by_name(dst, &object, &object, name.sym());
+                            compiler.emit_get_property_by_name(dst, None, &object, name.sym());
 
                             early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
 
-                            compiler.emit_set_property_by_name(dst, &object, &object, name.sym());
+                            compiler.emit_set_property_by_name(dst, None, &object, name.sym());
 
                             compiler.register_allocator.dealloc(object);
                         }
@@ -244,14 +244,23 @@ impl ByteCompiler<'_> {
                         PropertyAccessField::Const(name) => {
                             let object = compiler.register_allocator.alloc();
                             let receiver = compiler.register_allocator.alloc();
-                            compiler.bytecode.emit_super(object.variable());
-                            compiler.bytecode.emit_this(receiver.variable());
+                            compiler.super_(&receiver, &object);
 
-                            compiler.emit_get_property_by_name(dst, &receiver, &object, name.sym());
+                            compiler.emit_get_property_by_name(
+                                dst,
+                                Some(&receiver),
+                                &object,
+                                name.sym(),
+                            );
 
                             early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
 
-                            compiler.emit_set_property_by_name(dst, &receiver, &object, name.sym());
+                            compiler.emit_set_property_by_name(
+                                dst,
+                                Some(&receiver),
+                                &object,
+                                name.sym(),
+                            );
 
                             compiler.register_allocator.dealloc(receiver);
                             compiler.register_allocator.dealloc(object);
@@ -259,8 +268,7 @@ impl ByteCompiler<'_> {
                         PropertyAccessField::Expr(expr) => {
                             let object = compiler.register_allocator.alloc();
                             let receiver = compiler.register_allocator.alloc();
-                            compiler.bytecode.emit_super(object.variable());
-                            compiler.bytecode.emit_this(receiver.variable());
+                            compiler.super_(&receiver, &object);
 
                             let key = compiler.register_allocator.alloc();
                             compiler.compile_expr(expr, &key);

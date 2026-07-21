@@ -10,12 +10,15 @@ use crate::{
     string::StaticJsStrings,
 };
 use temporal_rs::{
-    TemporalError, TemporalResult, TimeZone,
+    TemporalResult, TimeZone,
     host::{HostClock, HostHooks, HostTimeZone},
     now::Now as InnerNow,
     provider::TimeZoneProvider,
     unix_time::EpochNanoseconds,
 };
+
+#[cfg(feature = "system-time-zone")]
+use temporal_rs::TemporalError;
 
 use super::{
     create_temporal_date, create_temporal_datetime, create_temporal_instant, create_temporal_time,
@@ -81,8 +84,8 @@ impl Now {
         // TODO: this should be optimized once system time zone is in context
         // 1. Return ! SystemTimeZone().
         let context: &Context = context;
-        let time_zone = context.get_system_time_zone(context.tz_provider())?;
-        Ok(JsString::from(time_zone.identifier_with_provider(context.tz_provider())?).into())
+        let time_zone = context.get_system_time_zone(context.timezone_provider())?;
+        Ok(JsString::from(time_zone.identifier_with_provider(context.timezone_provider())?).into())
     }
 
     /// 2.2.2 `Temporal.Now.instant()`
@@ -105,7 +108,7 @@ impl Now {
     ///
     /// Returns the current date and time as a `Temporal.PlainDateTime` with an ISO8601 calendar.
     ///
-    /// Takes an optional time zone, which defaults to the sytem time zone if undefined.
+    /// Takes an optional time zone, which defaults to the system time zone if undefined.
     ///
     /// More information:
     ///  - [ECMAscript specification][spec]
@@ -125,7 +128,8 @@ impl Now {
 
         let now: InnerNow<&Context> = InnerNow::new(context);
 
-        let datetime = now.plain_date_time_iso_with_provider(time_zone, context.tz_provider())?;
+        let datetime =
+            now.plain_date_time_iso_with_provider(time_zone, context.timezone_provider())?;
         create_temporal_datetime(datetime, None, context).map(Into::into)
     }
 
@@ -133,7 +137,7 @@ impl Now {
     ///
     /// Returns the current date and time as a `Temporal.ZonedDateTime` with an ISO8601 calendar.
     ///
-    /// Takes an optional time zone, which defaults to the sytem time zone if undefined.
+    /// Takes an optional time zone, which defaults to the system time zone if undefined.
     ///
     /// More information:
     ///  - [ECMAscript specification][spec]
@@ -152,7 +156,7 @@ impl Now {
             .transpose()?;
 
         let now: InnerNow<&Context> = InnerNow::new(context);
-        let zdt = now.zoned_date_time_iso_with_provider(time_zone, context.tz_provider())?;
+        let zdt = now.zoned_date_time_iso_with_provider(time_zone, context.timezone_provider())?;
         create_temporal_zoneddatetime(zdt, None, context).map(Into::into)
     }
 
@@ -160,7 +164,7 @@ impl Now {
     ///
     /// Returns the current date as a `Temporal.PlainDate` with an ISO8601 calendar.
     ///
-    /// Takes an optional time zone, which defaults to the sytem time zone if undefined.
+    /// Takes an optional time zone, which defaults to the system time zone if undefined.
     ///
     /// More information:
     ///  - [ECMAscript specification][spec]
@@ -176,7 +180,7 @@ impl Now {
 
         let now: InnerNow<&Context> = InnerNow::new(context);
 
-        let pd = now.plain_date_iso_with_provider(time_zone, context.tz_provider())?;
+        let pd = now.plain_date_iso_with_provider(time_zone, context.timezone_provider())?;
         create_temporal_date(pd, None, context).map(Into::into)
     }
 
@@ -184,7 +188,7 @@ impl Now {
     ///
     /// Returns the current time as a `Temporal.PlainTime` with an ISO8601 calendar.
     ///
-    /// Takes an optional time zone, which defaults to the sytem time zone if undefined.
+    /// Takes an optional time zone, which defaults to the system time zone if undefined.
     ///
     /// More information:
     ///  - [ECMAscript specification][spec]
@@ -200,7 +204,7 @@ impl Now {
 
         let now: InnerNow<&Context> = InnerNow::new(context);
 
-        let pt = now.plain_time_with_provider(time_zone, context.tz_provider())?;
+        let pt = now.plain_time_iso_with_provider(time_zone, context.timezone_provider())?;
         create_temporal_time(pt, None, context).map(Into::into)
     }
 }
@@ -209,16 +213,29 @@ impl HostHooks for &Context {}
 
 impl HostClock for &Context {
     fn get_host_epoch_nanoseconds(&self) -> TemporalResult<EpochNanoseconds> {
-        Ok(EpochNanoseconds::from(
-            self.clock().now().nanos_since_epoch() as i128,
-        ))
+        // Temporal needs actual Unix epoch time, not monotonic time
+        let millis = self.clock().system_time_millis();
+        let nanos = i128::from(millis) * 1_000_000;
+        Ok(EpochNanoseconds::from(nanos))
     }
 }
 
 impl HostTimeZone for &Context {
-    fn get_host_time_zone(&self, provider: &impl TimeZoneProvider) -> TemporalResult<TimeZone> {
-        iana_time_zone::get_timezone()
-            .map_err(|_| TemporalError::range().with_message("Unable to fetch system time zone"))
-            .and_then(|id| TimeZone::try_from_str_with_provider(&id, provider))
+    fn get_host_time_zone(
+        &self,
+        provider: &(impl TimeZoneProvider + ?Sized),
+    ) -> TemporalResult<TimeZone> {
+        #[cfg(not(feature = "system-time-zone"))]
+        {
+            Ok(TimeZone::utc_with_provider(provider))
+        }
+        #[cfg(feature = "system-time-zone")]
+        {
+            iana_time_zone::get_timezone()
+                .map_err(|_| {
+                    TemporalError::range().with_message("Unable to fetch system time zone")
+                })
+                .and_then(|id| TimeZone::try_from_str_with_provider(&id, provider))
+        }
     }
 }

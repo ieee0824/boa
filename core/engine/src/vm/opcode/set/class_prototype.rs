@@ -1,5 +1,5 @@
 use crate::value::JsVariant;
-use crate::vm::opcode::VaryingOperand;
+use crate::vm::opcode::RegisterOperand;
 use crate::{
     Context,
     builtins::{OrdinaryObject, function::OrdinaryFunction},
@@ -18,7 +18,7 @@ pub(crate) struct SetClassPrototype;
 impl SetClassPrototype {
     #[inline(always)]
     pub(crate) fn operation(
-        (dst, prototype, class): (VaryingOperand, VaryingOperand, VaryingOperand),
+        (dst, prototype, class): (RegisterOperand, RegisterOperand, RegisterOperand),
         context: &mut Context,
     ) {
         let prototype = context.vm.get_register(prototype.into());
@@ -34,7 +34,8 @@ impl SetClassPrototype {
             context.root_shape(),
             prototype,
             OrdinaryObject,
-        );
+        )
+        .upcast();
         let class = context.vm.get_register(class.into()).clone();
 
         {

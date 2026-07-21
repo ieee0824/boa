@@ -9,7 +9,7 @@ pub(crate) use lexical::LexicalEnvironment;
 pub(crate) use module::ModuleEnvironment;
 
 use crate::{JsResult, JsValue};
-use boa_gc::{Finalize, GcRefCell, Trace};
+use boa_gc::{Finalize, Trace};
 use std::cell::Cell;
 
 /// A declarative environment holds binding values at runtime.
@@ -32,9 +32,13 @@ use std::cell::Cell;
 /// If bindings where added at runtime, the current environment and all inner environments
 /// are marked as poisoned.
 /// All poisoned environments have to be checked for added bindings.
+/// Module Environments are never poisoned as they run in strict mode.
 #[derive(Debug, Trace, Finalize)]
 pub(crate) struct DeclarativeEnvironment {
     kind: DeclarativeEnvironmentKind,
+    #[unsafe_ignore_trace]
+    poisoned: Cell<bool>,
+    with: bool,
 }
 
 impl DeclarativeEnvironment {
@@ -42,15 +46,21 @@ impl DeclarativeEnvironment {
     pub(crate) fn global() -> Self {
         Self {
             kind: DeclarativeEnvironmentKind::Global(GlobalEnvironment::new()),
+            poisoned: Cell::new(false),
+            with: false,
         }
     }
 
     /// Creates a new `DeclarativeEnvironment` from its kind and compile environment.
-    pub(crate) fn new(kind: DeclarativeEnvironmentKind) -> Self {
-        Self { kind }
+    pub(crate) fn new(kind: DeclarativeEnvironmentKind, poisoned: bool, with: bool) -> Self {
+        Self {
+            kind,
+            poisoned: Cell::new(poisoned),
+            with,
+        }
     }
 
-    /// Returns a reference to the the kind of the environment.
+    /// Returns a reference to the kind of the environment.
     pub(crate) const fn kind(&self) -> &DeclarativeEnvironmentKind {
         &self.kind
     }
@@ -74,10 +84,25 @@ impl DeclarativeEnvironment {
     ///
     /// # Panics
     ///
-    /// Panics if a module binding index is out of range.
+    /// Panics if the binding value is out of range.
     #[track_caller]
     pub(crate) fn set(&self, index: u32, value: JsValue) {
         self.kind.set(index, value);
+    }
+
+    #[track_caller]
+    pub(crate) fn delete_binding(&self, index: u32) -> bool {
+        self.kind.delete_binding(index)
+    }
+
+    #[track_caller]
+    pub(crate) fn is_deleted_binding(&self, index: u32) -> bool {
+        self.kind.is_deleted_binding(index)
+    }
+
+    #[track_caller]
+    pub(crate) fn restore_deleted_binding(&self, index: u32) {
+        self.kind.restore_deleted_binding(index);
     }
 
     /// `GetThisBinding`
@@ -106,44 +131,24 @@ impl DeclarativeEnvironment {
 
     /// Returns `true` if this environment is poisoned.
     pub(crate) fn poisoned(&self) -> bool {
-        self.kind.poisoned()
+        self.poisoned.get()
     }
 
     /// Returns `true` if this environment is inside a `with` environment.
     pub(crate) fn with(&self) -> bool {
-        self.kind.with()
+        self.with
     }
 
-    /// Poisons this environment for future binding searchs.
+    /// Poisons this environment for future binding searches.
     pub(crate) fn poison(&self) {
-        self.kind.poison();
+        self.poisoned.set(true);
     }
 
     /// Extends the environment with the bindings from the compile time environment.
     pub(crate) fn extend_from_compile(&self) {
         if let Some(env) = self.kind().as_function() {
-            let compile_bindings_number = env.compile().num_bindings() as usize;
-            let mut bindings = env.poisonable_environment().bindings().borrow_mut();
-            if compile_bindings_number > bindings.len() {
-                bindings.resize(compile_bindings_number, None);
-            }
+            env.extend_from_compile();
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::PoisonableEnvironment;
-    use crate::JsValue;
-
-    #[test]
-    fn set_grows_for_binding_discovered_by_late_escape_analysis() {
-        let environment = PoisonableEnvironment::new(0, false, false);
-
-        environment.set(2, JsValue::new(42));
-
-        assert_eq!(environment.bindings().borrow().len(), 3);
-        assert_eq!(environment.get(2), Some(JsValue::new(42)));
     }
 }
 
@@ -205,10 +210,9 @@ impl DeclarativeEnvironmentKind {
 
     /// Sets the binding value from the environment by index.
     ///
-    /// The binding vector can lag behind escape analysis when a nested class
-    /// field initializer makes an otherwise-local binding observable. Grow it
-    /// on initialization so the runtime environment matches the finalized
-    /// binding indices.
+    /// # Panics
+    ///
+    /// Panics if the binding value is out of range.
     #[track_caller]
     pub(crate) fn set(&self, index: u32, value: JsValue) {
         match self {
@@ -216,6 +220,29 @@ impl DeclarativeEnvironmentKind {
             Self::Global(inner) => inner.set(index, value),
             Self::Function(inner) => inner.set(index, value),
             Self::Module(inner) => inner.set(index, value),
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn delete_binding(&self, index: u32) -> bool {
+        match self {
+            Self::Function(inner) => inner.delete_binding(index),
+            Self::Lexical(_) | Self::Global(_) | Self::Module(_) => false,
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn is_deleted_binding(&self, index: u32) -> bool {
+        match self {
+            Self::Function(inner) => inner.is_deleted_binding(index),
+            Self::Lexical(_) | Self::Global(_) | Self::Module(_) => false,
+        }
+    }
+
+    #[track_caller]
+    pub(crate) fn restore_deleted_binding(&self, index: u32) {
+        if let Self::Function(inner) = self {
+            inner.restore_deleted_binding(index);
         }
     }
 
@@ -249,102 +276,5 @@ impl DeclarativeEnvironmentKind {
             Self::Function(f) => f.has_this_binding(),
             Self::Global(_) | Self::Module(_) => true,
         }
-    }
-
-    /// Returns `true` if this environment is poisoned.
-    pub(crate) fn poisoned(&self) -> bool {
-        match self {
-            Self::Lexical(lex) => lex.poisonable_environment().poisoned(),
-            Self::Global(g) => g.poisonable_environment().poisoned(),
-            Self::Function(f) => f.poisonable_environment().poisoned(),
-            Self::Module(_) => false,
-        }
-    }
-
-    /// Returns `true` if this environment is inside a `with` environment.
-    pub(crate) fn with(&self) -> bool {
-        match self {
-            Self::Lexical(lex) => lex.poisonable_environment().with(),
-            Self::Global(g) => g.poisonable_environment().with(),
-            Self::Function(f) => f.poisonable_environment().with(),
-            Self::Module(_) => false,
-        }
-    }
-
-    /// Poisons this environment for future binding searches.
-    pub(crate) fn poison(&self) {
-        match self {
-            Self::Lexical(lex) => lex.poisonable_environment().poison(),
-            Self::Global(g) => g.poisonable_environment().poison(),
-            Self::Function(f) => f.poisonable_environment().poison(),
-            Self::Module(_) => {
-                unreachable!("modules are always run in strict mode")
-            }
-        }
-    }
-}
-
-#[derive(Debug, Trace, Finalize)]
-pub(crate) struct PoisonableEnvironment {
-    bindings: GcRefCell<Vec<Option<JsValue>>>,
-    #[unsafe_ignore_trace]
-    poisoned: Cell<bool>,
-    with: bool,
-}
-
-impl PoisonableEnvironment {
-    /// Creates a new `PoisonableEnvironment`.
-    pub(crate) fn new(bindings_count: u32, poisoned: bool, with: bool) -> Self {
-        Self {
-            bindings: GcRefCell::new(vec![None; bindings_count as usize]),
-            poisoned: Cell::new(poisoned),
-            with,
-        }
-    }
-
-    /// Gets the bindings of this poisonable environment.
-    pub(crate) const fn bindings(&self) -> &GcRefCell<Vec<Option<JsValue>>> {
-        &self.bindings
-    }
-
-    /// Gets the binding value from the environment by it's index.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the binding value is out of range.
-    #[track_caller]
-    fn get(&self, index: u32) -> Option<JsValue> {
-        self.bindings.borrow()[index as usize].clone()
-    }
-
-    /// Sets the binding value from the environment by index.
-    ///
-    /// The binding vector can lag behind escape analysis when a nested class
-    /// field initializer makes an otherwise-local binding observable. Grow it
-    /// on initialization so the runtime environment matches the finalized
-    /// binding indices.
-    #[track_caller]
-    pub(crate) fn set(&self, index: u32, value: JsValue) {
-        let mut bindings = self.bindings.borrow_mut();
-        let index = index as usize;
-        if bindings.len() <= index {
-            bindings.resize(index + 1, None);
-        }
-        bindings[index] = Some(value);
-    }
-
-    /// Returns `true` if this environment is poisoned.
-    fn poisoned(&self) -> bool {
-        self.poisoned.get()
-    }
-
-    /// Returns `true` if this environment is inside a `with` environment.
-    fn with(&self) -> bool {
-        self.with
-    }
-
-    /// Poisons this environment for future binding searches.
-    fn poison(&self) {
-        self.poisoned.set(true);
     }
 }

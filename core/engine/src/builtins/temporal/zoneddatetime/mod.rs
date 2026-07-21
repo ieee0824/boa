@@ -28,6 +28,7 @@ use temporal_rs::{
         Disambiguation, DisplayCalendar, DisplayOffset, DisplayTimeZone, OffsetDisambiguation,
         Overflow, RoundingIncrement, RoundingMode, RoundingOptions, ToStringRoundingOptions, Unit,
     },
+    parsed_intermediates::ParsedZonedDateTime,
     partial::{PartialTime, PartialZonedDateTime},
     provider::TransitionDirection,
 };
@@ -431,7 +432,7 @@ impl BuiltInConstructor for ZonedDateTime {
         // a. Set timeZone to FormatOffsetTimeZoneIdentifier(timeZoneParse.[[OffsetMinutes]]).
         let timezone = TimeZone::try_from_identifier_str_with_provider(
             &timezone_str.to_std_string_escaped(),
-            context.tz_provider(),
+            context.timezone_provider(),
         )?;
 
         //  8. If calendar is undefined, set calendar to "iso8601".
@@ -454,7 +455,7 @@ impl BuiltInConstructor for ZonedDateTime {
             epoch_nanos.to_i128(),
             timezone,
             calendar,
-            context.tz_provider(),
+            context.timezone_provider(),
         )?;
 
         //  11. Return ? CreateTemporalZonedDateTime(epochNanoseconds, timeZone, calendar, NewTarget).
@@ -511,7 +512,7 @@ impl ZonedDateTime {
         Ok(JsString::from(
             zdt.inner
                 .time_zone()
-                .identifier_with_provider(context.tz_provider())?,
+                .identifier_with_provider(context.timezone_provider())?,
         )
         .into())
     }
@@ -955,7 +956,7 @@ impl ZonedDateTime {
 
         Ok(zdt
             .inner
-            .hours_in_day_with_provider(context.tz_provider())?
+            .hours_in_day_with_provider(context.timezone_provider())?
             .into())
     }
 
@@ -1137,7 +1138,7 @@ impl ZonedDateTime {
         // 1. Return ? ToTemporalZonedDateTime(item, options).
         let item = args.get_or_undefined(0);
         let options = args.get(1);
-        let inner = to_temporal_zoneddatetime(item, options.cloned(), context)?;
+        let inner = to_temporal_zoneddatetime(item, options, context)?;
         create_temporal_zoneddatetime(inner, None, context).map(Into::into)
     }
 
@@ -1228,7 +1229,7 @@ impl ZonedDateTime {
             disambiguation,
             offset,
             overflow,
-            context.tz_provider(),
+            context.timezone_provider(),
         )?;
         create_temporal_zoneddatetime(result, None, context).map(Into::into)
     }
@@ -1264,7 +1265,7 @@ impl ZonedDateTime {
 
         let inner = zdt
             .inner
-            .with_plain_time_and_provider(time, context.tz_provider())?;
+            .with_plain_time_and_provider(time, context.timezone_provider())?;
         create_temporal_zoneddatetime(inner, None, context).map(Into::into)
     }
 
@@ -1292,7 +1293,7 @@ impl ZonedDateTime {
 
         let inner = zdt
             .inner
-            .with_time_zone_with_provider(timezone, context.tz_provider())?;
+            .with_time_zone_with_provider(timezone, context.timezone_provider())?;
         create_temporal_zoneddatetime(inner, None, context).map(Into::into)
     }
 
@@ -1347,9 +1348,9 @@ impl ZonedDateTime {
         let options = get_options_object(args.get_or_undefined(1))?;
         let overflow = get_option::<Overflow>(&options, js_string!("overflow"), context)?;
 
-        let result = zdt
-            .inner
-            .add_with_provider(&duration, overflow, context.tz_provider())?;
+        let result =
+            zdt.inner
+                .add_with_provider(&duration, overflow, context.timezone_provider())?;
         create_temporal_zoneddatetime(result, None, context).map(Into::into)
     }
 
@@ -1380,7 +1381,7 @@ impl ZonedDateTime {
 
         let result =
             zdt.inner
-                .subtract_with_provider(&duration, overflow, context.tz_provider())?;
+                .subtract_with_provider(&duration, overflow, context.timezone_provider())?;
         create_temporal_zoneddatetime(result, None, context).map(Into::into)
     }
 
@@ -1409,9 +1410,9 @@ impl ZonedDateTime {
         let options = get_options_object(args.get_or_undefined(1))?;
         let settings = get_difference_settings(&options, context)?;
 
-        let result = zdt
-            .inner
-            .until_with_provider(&other, settings, context.tz_provider())?;
+        let result =
+            zdt.inner
+                .until_with_provider(&other, settings, context.timezone_provider())?;
         create_temporal_duration(result, None, context).map(Into::into)
     }
 
@@ -1440,9 +1441,9 @@ impl ZonedDateTime {
         let options = get_options_object(args.get_or_undefined(1))?;
         let settings = get_difference_settings(&options, context)?;
 
-        let result = zdt
-            .inner
-            .since_with_provider(&other, settings, context.tz_provider())?;
+        let result =
+            zdt.inner
+                .since_with_provider(&other, settings, context.timezone_provider())?;
         create_temporal_duration(result, None, context).map(Into::into)
     }
 
@@ -1468,33 +1469,31 @@ impl ZonedDateTime {
                 JsNativeError::typ().with_message("the this object must be a ZonedDateTime object.")
             })?;
 
-        let round_to = match args.first().map(JsValue::variant) {
-            // 3. If roundTo is undefined, then
-            None | Some(JsVariant::Undefined) => {
-                // a. Throw a TypeError exception.
-                return Err(JsNativeError::typ()
-                    .with_message("roundTo cannot be undefined.")
-                    .into());
-            }
-            // 4. If Type(roundTo) is String, then
-            Some(JsVariant::String(rt)) => {
-                // a. Let paramString be roundTo.
-                let param_string = rt.clone();
-                // b. Set roundTo to OrdinaryObjectCreate(null).
-                let new_round_to = JsObject::with_null_proto();
-                // c. Perform ! CreateDataPropertyOrThrow(roundTo, "smallestUnit", paramString).
-                new_round_to.create_data_property_or_throw(
-                    js_string!("smallestUnit"),
-                    param_string,
-                    context,
-                )?;
-                new_round_to
-            }
+        // 3. If roundTo is undefined, then
+        let round_to_arg = args.get_or_undefined(0);
+        if round_to_arg.is_undefined() {
+            // a. Throw a TypeError exception.
+            return Err(JsNativeError::typ()
+                .with_message("roundTo cannot be undefined.")
+                .into());
+        }
+        // 4. If Type(roundTo) is String, then
+        let round_to = if let Some(param_string) = round_to_arg.as_string() {
+            // a. Let paramString be roundTo.
+            let param_string = param_string.clone();
+            // b. Set roundTo to OrdinaryObjectCreate(null).
+            let new_round_to = JsObject::with_null_proto();
+            // c. Perform ! CreateDataPropertyOrThrow(roundTo, "smallestUnit", paramString).
+            new_round_to.create_data_property_or_throw(
+                js_string!("smallestUnit"),
+                param_string,
+                context,
+            )?;
+            new_round_to
+        } else {
             // 5. Else,
-            Some(round_to) => {
-                // a. Set roundTo to ? GetOptionsObject(roundTo).
-                get_options_object(&JsValue::from(round_to))?
-            }
+            // a. Set roundTo to ? GetOptionsObject(roundTo).
+            get_options_object(round_to_arg)?
         };
 
         // 6. NOTE: The following steps read options and perform independent validation
@@ -1521,7 +1520,7 @@ impl ZonedDateTime {
 
         let result = zdt
             .inner
-            .round_with_provider(options, context.tz_provider())?;
+            .round_with_provider(options, context.timezone_provider())?;
         create_temporal_zoneddatetime(result, None, context).map(Into::into)
     }
 
@@ -1548,7 +1547,7 @@ impl ZonedDateTime {
         let other = to_temporal_zoneddatetime(args.get_or_undefined(0), None, context)?;
         Ok(zdt
             .inner
-            .equals_with_provider(&other, context.tz_provider())?
+            .equals_with_provider(&other, context.timezone_provider())?
             .into())
     }
 
@@ -1598,7 +1597,7 @@ impl ZonedDateTime {
             display_timezone,
             show_calendar,
             options,
-            context.tz_provider(),
+            context.timezone_provider(),
         )?;
 
         Ok(JsString::from(ixdtf).into())
@@ -1628,7 +1627,7 @@ impl ZonedDateTime {
             DisplayTimeZone::Auto,
             DisplayCalendar::Auto,
             ToStringRoundingOptions::default(),
-            context.tz_provider(),
+            context.timezone_provider(),
         )?;
 
         Ok(JsString::from(ixdtf).into())
@@ -1657,7 +1656,7 @@ impl ZonedDateTime {
             DisplayTimeZone::Auto,
             DisplayCalendar::Auto,
             ToStringRoundingOptions::default(),
-            context.tz_provider(),
+            context.timezone_provider(),
         )?;
 
         Ok(JsString::from(ixdtf).into())
@@ -1700,7 +1699,7 @@ impl ZonedDateTime {
 
         let new = zdt
             .inner
-            .start_of_day_with_provider(context.tz_provider())?;
+            .start_of_day_with_provider(context.timezone_provider())?;
         create_temporal_zoneddatetime(new, None, context).map(Into::into)
     }
 
@@ -1767,7 +1766,7 @@ impl ZonedDateTime {
         // Step 8-12
         let result = zdt
             .inner
-            .get_time_zone_transition_with_provider(direction, context.tz_provider())?;
+            .get_time_zone_transition_with_provider(direction, context.timezone_provider())?;
 
         match result {
             Some(zdt) => create_temporal_zoneddatetime(zdt, None, context).map(Into::into),
@@ -1912,7 +1911,7 @@ pub(crate) fn create_temporal_zoneddatetime(
 /// 6.5.2 `ToTemporalZonedDateTime ( item [ , options ] )`
 pub(crate) fn to_temporal_zoneddatetime(
     value: &JsValue,
-    options: Option<JsValue>,
+    options: Option<&JsValue>,
     context: &mut Context,
 ) -> JsResult<ZonedDateTimeInner> {
     // 1. If options is not present, set options to undefined.
@@ -1928,7 +1927,7 @@ pub(crate) fn to_temporal_zoneddatetime(
                 // (GetTemporalDisambiguationOption reads "disambiguation", GetTemporalOffsetOption
                 // reads "offset", and GetTemporalOverflowOption reads "overflow").
                 // ii. Let resolvedOptions be ? GetOptionsObject(options).
-                let options = get_options_object(&options.unwrap_or_default())?;
+                let options = get_options_object(options.unwrap_or(&JsValue::undefined()))?;
                 // iii. Perform ? GetTemporalDisambiguationOption(resolvedOptions).
                 let _disambiguation =
                     get_option::<Disambiguation>(&options, js_string!("disambiguation"), context)?
@@ -1947,7 +1946,7 @@ pub(crate) fn to_temporal_zoneddatetime(
             // f. If offsetString is unset, the
             // i. Set offsetBehaviour to wall.
             // g. Let resolvedOptions be ? GetOptionsObject(options).
-            let options = get_options_object(&options.unwrap_or_default())?;
+            let options = get_options_object(options.unwrap_or(&JsValue::undefined()))?;
             // h. Let disambiguation be ? GetTemporalDisambiguationOption(resolvedOptions).
             let disambiguation =
                 get_option::<Disambiguation>(&options, js_string!("disambiguation"), context)?;
@@ -1964,11 +1963,15 @@ pub(crate) fn to_temporal_zoneddatetime(
                 overflow,
                 disambiguation,
                 offset_option,
-                context.tz_provider(),
+                context.timezone_provider(),
             )?)
         }
         JsVariant::String(zdt_source) => {
             // b. Let result be ? ParseISODateTime(item, « TemporalDateTimeString[+Zoned] »).
+            let parsed = ParsedZonedDateTime::from_utf8_with_provider(
+                zdt_source.to_std_string_escaped().as_bytes(),
+                context.timezone_provider(),
+            )?;
             // c. Let annotation be result.[[TimeZone]].[[TimeZoneAnnotation]].
             // d. Assert: annotation is not empty.
             // e. Let timeZone be ? ToTemporalTimeZoneIdentifier(annotation).
@@ -1982,7 +1985,7 @@ pub(crate) fn to_temporal_zoneddatetime(
             // k. Set calendar to ? CanonicalizeCalendar(calendar).
             // l. Set matchBehaviour to match-minutes.
             // m. Let resolvedOptions be ? GetOptionsObject(options).
-            let options = get_options_object(&options.unwrap_or_default())?;
+            let options = get_options_object(options.unwrap_or(&JsValue::undefined()))?;
             // n. Let disambiguation be ? GetTemporalDisambiguationOption(resolvedOptions).
             let disambiguation =
                 get_option::<Disambiguation>(&options, js_string!("disambiguation"), context)?
@@ -1999,11 +2002,11 @@ pub(crate) fn to_temporal_zoneddatetime(
             // 7. If offsetBehaviour is option, then
             //        a. Set offsetNanoseconds to ! ParseDateTimeUTCOffset(offsetString).
             // 8. Let epochNanoseconds be ? InterpretISODateTimeOffset(isoDate, time, offsetBehaviour, offsetNanoseconds, timeZone, disambiguation, offsetOption, matchBehaviour).
-            Ok(ZonedDateTimeInner::from_utf8_with_provider(
-                zdt_source.to_std_string_escaped().as_bytes(),
+            Ok(ZonedDateTimeInner::from_parsed_with_provider(
+                parsed,
                 disambiguation,
                 offset_option,
-                context.tz_provider(),
+                context.timezone_provider(),
             )?)
         }
         // 5. Else,
@@ -2044,7 +2047,7 @@ pub(crate) fn to_temporal_timezone_identifier(
     // 9. Return timeZoneIdentifierRecord.[[Identifier]].
     let timezone = TimeZone::try_from_str_with_provider(
         &tz_string.to_std_string_escaped(),
-        context.tz_provider(),
+        context.timezone_provider(),
     )?;
 
     Ok(timezone)

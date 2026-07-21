@@ -7,8 +7,12 @@ use super::{
     BuiltInBuilder, BuiltInConstructor, IntrinsicObject,
     iterable::{IteratorHint, IteratorRecord},
 };
+#[cfg(feature = "experimental")]
+use crate::object::internal_methods::InternalMethodPropertyContext;
+#[cfg(feature = "experimental")]
+use crate::property::PropertyKey;
 use crate::{
-    Context, JsArgs, JsError, JsResult, JsString,
+    Context, JsArgs, JsError, JsExpect, JsResult, JsString,
     builtins::{Array, BuiltInObject},
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     error::JsNativeError,
@@ -27,8 +31,9 @@ use crate::{
 };
 use boa_gc::{Finalize, Gc, GcRefCell, Trace, custom_trace};
 use boa_macros::JsData;
+#[cfg(feature = "experimental")]
+use std::cell::RefCell;
 use std::{cell::Cell, rc::Rc};
-use tap::{Conv, Pipe};
 
 // ==================== Public API ====================
 
@@ -144,7 +149,7 @@ macro_rules! if_abrupt_reject_promise {
         match $value {
             // 1. If value is an abrupt completion, then
             Err(err) => {
-                let err = err.to_opaque($context);
+                let err = err.into_opaque($context)?;
                 // a. Perform ? Call(capability.[[Reject]], undefined, « value.[[Value]] »).
                 $capability
                     .reject()
@@ -338,7 +343,7 @@ impl IntrinsicObject for Promise {
             .name(js_string!("get [Symbol.species]"))
             .build();
 
-        BuiltInBuilder::from_standard_constructor::<Self>(realm)
+        let builder = BuiltInBuilder::from_standard_constructor::<Self>(realm)
             .static_method(Self::all, js_string!("all"), 1)
             .static_method(Self::all_settled, js_string!("allSettled"), 1)
             .static_method(Self::any, js_string!("any"), 1)
@@ -361,8 +366,14 @@ impl IntrinsicObject for Promise {
                 JsSymbol::to_string_tag(),
                 Self::NAME,
                 Attribute::READONLY | Attribute::NON_ENUMERABLE | Attribute::CONFIGURABLE,
-            )
-            .build();
+            );
+
+        #[cfg(feature = "experimental")]
+        let builder = builder
+            .static_method(Self::all_keyed, js_string!("allKeyed"), 1)
+            .static_method(Self::all_settled_keyed, js_string!("allSettledKeyed"), 1);
+
+        builder.build();
     }
 
     fn get(intrinsics: &Intrinsics) -> JsObject {
@@ -377,7 +388,7 @@ impl BuiltInObject for Promise {
 impl BuiltInConstructor for Promise {
     const CONSTRUCTOR_ARGUMENTS: usize = 1;
     const PROTOTYPE_STORAGE_SLOTS: usize = 4;
-    const CONSTRUCTOR_STORAGE_SLOTS: usize = 10;
+    const CONSTRUCTOR_STORAGE_SLOTS: usize = 12;
 
     const STANDARD_CONSTRUCTOR: fn(&StandardConstructors) -> &StandardConstructor =
         StandardConstructors::promise;
@@ -435,7 +446,7 @@ impl BuiltInConstructor for Promise {
 
         // 10. If completion is an abrupt completion, then
         if let Err(e) = completion {
-            let e = e.to_opaque(context);
+            let e = e.into_opaque(context)?;
             // a. Perform ? Call(resolvingFunctions.[[Reject]], undefined, « completion.[[Value]] »).
             resolving_functions
                 .reject
@@ -443,7 +454,7 @@ impl BuiltInConstructor for Promise {
         }
 
         // 11. Return promise.
-        promise.conv::<JsValue>().pipe(Ok)
+        Ok(promise.into())
     }
 }
 
@@ -492,7 +503,7 @@ impl Promise {
         match status {
             // 5. If status is an abrupt completion, then
             Err(err) => {
-                let value = err.to_opaque(context);
+                let value = err.into_opaque(context)?;
 
                 // a. Perform ? Call(promiseCapability.[[Reject]], undefined, « status.[[Value]] »).
                 promise_capability.functions.reject.call(
@@ -874,10 +885,12 @@ impl Promise {
             let next_promise =
                 promise_resolve.call(&constructor.clone().into(), &[next], context)?;
 
+            // h. Let alreadyCalled be the Record { [[Value]]: false }.
+            let already_called = Rc::new(Cell::new(false));
+
             // e. Let stepsFulfilled be the algorithm steps defined in Promise.allSettled Resolve Element Functions.
             // f. Let lengthFulfilled be the number of non-optional parameters of the function definition in Promise.allSettled Resolve Element Functions.
             // g. Let onFulfilled be CreateBuiltinFunction(stepsFulfilled, lengthFulfilled, "", « [[AlreadyCalled]], [[Index]], [[Values]], [[Capability]], [[RemainingElements]] »).
-            // h. Let alreadyCalled be the Record { [[Value]]: false }.
             // i. Set onFulfilled.[[AlreadyCalled]] to alreadyCalled.
             // j. Set onFulfilled.[[Index]] to index.
             // k. Set onFulfilled.[[Values]] to values.
@@ -914,7 +927,7 @@ impl Promise {
                             js_string!("fulfilled"),
                             context,
                         )
-                        .expect("cannot fail per spec");
+                        .js_expect("cannot fail per spec")?;
 
                         // 11. Perform ! CreateDataPropertyOrThrow(obj, "value", x).
                         obj.create_data_property_or_throw(
@@ -922,7 +935,7 @@ impl Promise {
                             args.get_or_undefined(0).clone(),
                             context,
                         )
-                        .expect("cannot fail per spec");
+                        .js_expect("cannot fail per spec")?;
 
                         // 12. Set values[index] to obj.
                         captures.values.borrow_mut()[captures.index] = obj.into();
@@ -952,7 +965,7 @@ impl Promise {
                         Ok(JsValue::undefined())
                     },
                     ResolveRejectElementCaptures {
-                        already_called: Rc::new(Cell::new(false)),
+                        already_called: already_called.clone(),
                         index,
                         values: values.clone(),
                         capability: result_capability.functions.resolve.clone(),
@@ -1004,7 +1017,7 @@ impl Promise {
                             js_string!("rejected"),
                             context,
                         )
-                        .expect("cannot fail per spec");
+                        .js_expect("cannot fail per spec")?;
 
                         // 11. Perform ! CreateDataPropertyOrThrow(obj, "reason", x).
                         obj.create_data_property_or_throw(
@@ -1012,7 +1025,7 @@ impl Promise {
                             args.get_or_undefined(0).clone(),
                             context,
                         )
-                        .expect("cannot fail per spec");
+                        .js_expect("cannot fail per spec")?;
 
                         // 12. Set values[index] to obj.
                         captures.values.borrow_mut()[captures.index] = obj.into();
@@ -1042,7 +1055,7 @@ impl Promise {
                         Ok(JsValue::undefined())
                     },
                     ResolveRejectElementCaptures {
-                        already_called: Rc::new(Cell::new(false)),
+                        already_called,
                         index,
                         values: values.clone(),
                         capability: result_capability.functions.resolve.clone(),
@@ -1089,6 +1102,358 @@ impl Promise {
 
         //     iii. Return resultCapability.[[Promise]].
         Ok(result_capability.promise.clone())
+    }
+
+    /// `Promise.allKeyed ( promises )`
+    ///
+    /// More information:
+    ///  - [TC39 proposal spec][spec]
+    ///
+    /// [spec]: https://tc39.es/proposal-await-dictionary/#sec-promise.allkeyed
+    #[cfg(feature = "experimental")]
+    pub(crate) fn all_keyed(
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        Self::keyed_common(this, args, context, KeyedVariant::All, "allKeyed")
+    }
+
+    /// `Promise.allSettledKeyed ( promises )`
+    ///
+    /// More information:
+    ///  - [TC39 proposal spec][spec]
+    ///
+    /// [spec]: https://tc39.es/proposal-await-dictionary/#sec-promise.allsettledkeyed
+    #[cfg(feature = "experimental")]
+    pub(crate) fn all_settled_keyed(
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        Self::keyed_common(
+            this,
+            args,
+            context,
+            KeyedVariant::AllSettled,
+            "allSettledKeyed",
+        )
+    }
+
+    /// Shared entry-point logic for `Promise.allKeyed` and `Promise.allSettledKeyed`.
+    #[cfg(feature = "experimental")]
+    fn keyed_common(
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+        variant: KeyedVariant,
+        name: &str,
+    ) -> JsResult<JsValue> {
+        // 1. Let C be the this value.
+        let c = this.as_object().ok_or_else(|| {
+            JsNativeError::typ().with_message(format!("Promise.{name}() called on a non-object"))
+        })?;
+
+        // 2. Let promiseCapability be ? NewPromiseCapability(C).
+        let promise_capability = PromiseCapability::new(&c, context)?;
+
+        // 3. Let promiseResolve be Completion(GetPromiseResolve(C)).
+        let promise_resolve = Self::get_promise_resolve(&c, context);
+
+        // 4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
+        let promise_resolve =
+            if_abrupt_reject_promise!(promise_resolve, promise_capability, context);
+
+        // 5. If promises is not an Object, then
+        let promises = args.get_or_undefined(0);
+        let Some(promises_obj) = promises.as_object() else {
+            // a. Let error be a newly created TypeError object.
+            let error = JsNativeError::typ()
+                .with_message(format!("Promise.{name}() expects an object argument"))
+                .into_opaque(context);
+            // b. Perform ? Call(promiseCapability.[[Reject]], undefined, « error »).
+            promise_capability.functions.reject.call(
+                &JsValue::undefined(),
+                &[error.into()],
+                context,
+            )?;
+            // c. Return promiseCapability.[[Promise]].
+            return Ok(promise_capability.promise.clone().into());
+        };
+
+        // 6. Let result be Completion(PerformPromiseAllKeyed(variant, promises, C, promiseCapability, promiseResolve)).
+        let result = Self::perform_promise_all_keyed(
+            variant,
+            &promises_obj,
+            &c,
+            &promise_capability,
+            &promise_resolve,
+            context,
+        );
+
+        // 7. IfAbruptRejectPromise(result, promiseCapability).
+        let _result = if_abrupt_reject_promise!(result, promise_capability, context);
+
+        // 8. Return promiseCapability.[[Promise]].
+        Ok(promise_capability.promise.clone().into())
+    }
+
+    /// `PerformPromiseAllKeyed ( variant, promises, constructor, resultCapability, promiseResolve )`
+    ///
+    /// More information:
+    ///  - [TC39 proposal spec][spec]
+    ///
+    /// [spec]: https://tc39.es/proposal-await-dictionary/#sec-performpromiseallkeyed
+    #[cfg(feature = "experimental")]
+    fn perform_promise_all_keyed(
+        variant: KeyedVariant,
+        promises: &JsObject,
+        constructor: &JsObject,
+        result_capability: &PromiseCapability,
+        promise_resolve: &JsObject,
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        #[derive(Debug, Trace, Finalize)]
+        struct KeyedResolveCaptures {
+            #[unsafe_ignore_trace]
+            already_called: Rc<Cell<bool>>,
+            index: usize,
+            #[unsafe_ignore_trace]
+            variant: KeyedVariant,
+            #[unsafe_ignore_trace]
+            keys: Rc<RefCell<Vec<PropertyKey>>>,
+            values: Gc<GcRefCell<Vec<JsValue>>>,
+            capability: JsFunction,
+            #[unsafe_ignore_trace]
+            remaining_elements: Rc<Cell<i32>>,
+        }
+
+        // 1. Let allKeys be ? promises.[[OwnPropertyKeys]]().
+        let all_keys = promises.own_property_keys(context)?;
+
+        // 2. Let keys be a new empty List.
+        let keys = Rc::new(RefCell::new(Vec::new()));
+
+        // 3. Let values be a new empty List.
+        let values = Gc::new(GcRefCell::new(Vec::new()));
+
+        // 4. Let remainingElementsCount be the Record { [[Value]]: 1 }.
+        let remaining_elements_count = Rc::new(Cell::new(1));
+
+        // 5. Let index be 0.
+        let mut index = 0;
+
+        // 6. For each element key of allKeys, do
+        for key in all_keys {
+            // a. Let desc be ? promises.[[GetOwnProperty]](key).
+            let desc = promises
+                .__get_own_property__(&key, &mut InternalMethodPropertyContext::new(context))?;
+
+            // b. If desc is not undefined and desc.[[Enumerable]] is true, then
+            if let Some(desc) = desc
+                && desc.expect_enumerable()
+            {
+                // i. Let value be ? Get(promises, key).
+                let value = promises.get(key.clone(), context)?;
+
+                // ii. Append key to keys.
+                keys.borrow_mut().push(key);
+
+                // iii. Append undefined to values.
+                values.borrow_mut().push(JsValue::undefined());
+
+                // iv. Let nextPromise be ? Call(promiseResolve, constructor, « value »).
+                let next_promise =
+                    promise_resolve.call(&JsValue::from(constructor.clone()), &[value], context)?;
+
+                // v. Let alreadyCalled be the Record { [[Value]]: false }.
+                let already_called = Rc::new(Cell::new(false));
+
+                // vi. Let onFulfilled be a new Abstract Closure...
+                let on_fulfilled = FunctionObjectBuilder::new(
+                    context.realm(),
+                    NativeFunction::from_copy_closure_with_captures(
+                        |_, args, captures, context| {
+                            // 1. If alreadyCalled.[[Value]] is true, return undefined.
+                            if captures.already_called.get() {
+                                return Ok(JsValue::undefined());
+                            }
+
+                            // 2. Set alreadyCalled.[[Value]] to true.
+                            captures.already_called.set(true);
+
+                            let x = args.get_or_undefined(0).clone();
+
+                            // 3. If variant is all, then
+                            if captures.variant == KeyedVariant::All {
+                                // a. Set values[index] to x.
+                                captures.values.borrow_mut()[captures.index] = x;
+                            } else {
+                                // 4. Else (variant is all-settled)
+                                // a. Let obj be OrdinaryObjectCreate(%Object.prototype%).
+                                let obj = JsObject::with_object_proto(context.intrinsics());
+                                // b. Perform ! CreateDataPropertyOrThrow(obj, "status", "fulfilled").
+                                obj.create_data_property_or_throw(
+                                    js_string!("status"),
+                                    js_string!("fulfilled"),
+                                    context,
+                                )
+                                .js_expect("cannot fail per spec")?;
+                                // c. Perform ! CreateDataPropertyOrThrow(obj, "value", x).
+                                obj.create_data_property_or_throw(js_string!("value"), x, context)
+                                    .js_expect("cannot fail per spec")?;
+                                // d. Set values[index] to obj.
+                                captures.values.borrow_mut()[captures.index] = obj.into();
+                            }
+
+                            // 5. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] - 1.
+                            captures
+                                .remaining_elements
+                                .set(captures.remaining_elements.get() - 1);
+
+                            // 6. If remainingElementsCount.[[Value]] = 0, then
+                            if captures.remaining_elements.get() == 0 {
+                                // a. Let result be CreateKeyedPromiseCombinatorResultObject(keys, values).
+                                let result = create_keyed_result_object(
+                                    &captures.keys.borrow(),
+                                    &captures.values.borrow(),
+                                    context,
+                                );
+                                // b. Return ? Call(resultCapability.[[Resolve]], undefined, « result »).
+                                return captures.capability.call(
+                                    &JsValue::undefined(),
+                                    &[result.into()],
+                                    context,
+                                );
+                            }
+
+                            // 7. Return undefined.
+                            Ok(JsValue::undefined())
+                        },
+                        KeyedResolveCaptures {
+                            already_called: already_called.clone(),
+                            index,
+                            variant,
+                            keys: keys.clone(),
+                            values: values.clone(),
+                            capability: result_capability.functions.resolve.clone(),
+                            remaining_elements: remaining_elements_count.clone(),
+                        },
+                    ),
+                )
+                .name("")
+                .length(1)
+                .constructor(false)
+                .build();
+
+                // vii-viii. Build onRejected
+                let on_rejected = if variant == KeyedVariant::All {
+                    // If variant is all, let onRejected be resultCapability.[[Reject]].
+                    result_capability.functions.reject.clone().into()
+                } else {
+                    // Else (variant is all-settled), let onRejected be a new Abstract Closure...
+                    let on_rejected_fn = FunctionObjectBuilder::new(
+                        context.realm(),
+                        NativeFunction::from_copy_closure_with_captures(
+                            |_, args, captures, context| {
+                                // 1. If alreadyCalled.[[Value]] is true, return undefined.
+                                if captures.already_called.get() {
+                                    return Ok(JsValue::undefined());
+                                }
+
+                                // 2. Set alreadyCalled.[[Value]] to true.
+                                captures.already_called.set(true);
+
+                                let x = args.get_or_undefined(0).clone();
+
+                                // 3. Let obj be OrdinaryObjectCreate(%Object.prototype%).
+                                let obj = JsObject::with_object_proto(context.intrinsics());
+                                // 4. Perform ! CreateDataPropertyOrThrow(obj, "status", "rejected").
+                                obj.create_data_property_or_throw(
+                                    js_string!("status"),
+                                    js_string!("rejected"),
+                                    context,
+                                )
+                                .js_expect("cannot fail per spec")?;
+                                // 5. Perform ! CreateDataPropertyOrThrow(obj, "reason", x).
+                                obj.create_data_property_or_throw(js_string!("reason"), x, context)
+                                    .js_expect("cannot fail per spec")?;
+                                // 6. Set values[index] to obj.
+                                captures.values.borrow_mut()[captures.index] = obj.into();
+
+                                // 7. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] - 1.
+                                captures
+                                    .remaining_elements
+                                    .set(captures.remaining_elements.get() - 1);
+
+                                // 8. If remainingElementsCount.[[Value]] = 0, then
+                                if captures.remaining_elements.get() == 0 {
+                                    let result = create_keyed_result_object(
+                                        &captures.keys.borrow(),
+                                        &captures.values.borrow(),
+                                        context,
+                                    );
+                                    return captures.capability.call(
+                                        &JsValue::undefined(),
+                                        &[result.into()],
+                                        context,
+                                    );
+                                }
+
+                                // 9. Return undefined.
+                                Ok(JsValue::undefined())
+                            },
+                            KeyedResolveCaptures {
+                                already_called,
+                                index,
+                                variant,
+                                keys: keys.clone(),
+                                values: values.clone(),
+                                capability: result_capability.functions.resolve.clone(),
+                                remaining_elements: remaining_elements_count.clone(),
+                            },
+                        ),
+                    )
+                    .name("")
+                    .length(1)
+                    .constructor(false)
+                    .build();
+
+                    on_rejected_fn.into()
+                };
+
+                // ix. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
+                remaining_elements_count.set(remaining_elements_count.get() + 1);
+
+                // x. Perform ? Invoke(nextPromise, "then", « onFulfilled, onRejected »).
+                next_promise.invoke(
+                    js_string!("then"),
+                    &[on_fulfilled.into(), on_rejected],
+                    context,
+                )?;
+
+                // xi. Set index to index + 1.
+                index += 1;
+            }
+        }
+
+        // 7. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] - 1.
+        remaining_elements_count.set(remaining_elements_count.get() - 1);
+
+        // 8. If remainingElementsCount.[[Value]] = 0, then
+        if remaining_elements_count.get() == 0 {
+            // a. Let result be CreateKeyedPromiseCombinatorResultObject(keys, values).
+            let result = create_keyed_result_object(&keys.borrow(), &values.borrow(), context);
+            // b. Perform ? Call(resultCapability.[[Resolve]], undefined, « result »).
+            result_capability.functions.resolve.call(
+                &JsValue::undefined(),
+                &[result.into()],
+                context,
+            )?;
+        }
+
+        // 9. Return resultCapability.[[Promise]].
+        Ok(result_capability.promise.clone().into())
     }
 
     /// `Promise.any ( iterable )`
@@ -1254,7 +1619,7 @@ impl Promise {
                             // c. Return ? Call(promiseCapability.[[Reject]], undefined, « error »).
                             return captures.capability_reject.call(
                                 &JsValue::undefined(),
-                                &[error.to_opaque(context).into()],
+                                &[error.into_opaque(context).into()],
                                 context,
                             );
                         }
@@ -1446,16 +1811,16 @@ impl Promise {
             JsNativeError::typ().with_message("Promise.reject() called on a non-object")
         })?;
 
-        Self::promise_reject(&c, &JsError::from_opaque(r), context).map(JsValue::from)
+        Self::promise_reject(&c, JsError::from_opaque(r), context).map(JsValue::from)
     }
 
     /// Utility function to create a rejected promise.
     pub(crate) fn promise_reject(
         c: &JsObject,
-        e: &JsError,
+        e: JsError,
         context: &mut Context,
     ) -> JsResult<JsObject> {
-        let e = e.to_opaque(context);
+        let e = e.into_opaque(context)?;
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(c, context)?;
@@ -1512,6 +1877,7 @@ impl Promise {
     ) -> JsResult<JsObject> {
         // 1. If IsPromise(x) is true, then
         if let Some(x) = x.as_promise_object() {
+            let x = x.upcast();
             // a. Let xConstructor be ? Get(x, "constructor").
             let x_constructor = x.get(CONSTRUCTOR, context)?;
             // b. If SameValue(xConstructor, C) is true, return x.
@@ -1519,7 +1885,7 @@ impl Promise {
                 .as_object()
                 .is_some_and(|o| JsObject::equals(&o, c))
             {
-                return Ok(x.clone());
+                return Ok(x);
             }
         }
 
@@ -1776,13 +2142,16 @@ impl Promise {
     /// Schedules callback functions for the eventual completion of `promise` — either fulfillment
     /// or rejection.
     pub(crate) fn inner_then(
-        promise: &JsObject,
+        promise: &JsObject<Promise>,
         on_fulfilled: Option<JsFunction>,
         on_rejected: Option<JsFunction>,
         context: &mut Context,
     ) -> JsResult<JsObject> {
         // 3. Let C be ? SpeciesConstructor(promise, %Promise%).
-        let c = promise.species_constructor(StandardConstructors::promise, context)?;
+        let c = promise
+            .clone()
+            .upcast()
+            .species_constructor(StandardConstructors::promise, context)?;
 
         // 4. Let resultCapability be ? NewPromiseCapability(C).
         let result_capability = PromiseCapability::new(&c, context)?;
@@ -1807,7 +2176,7 @@ impl Promise {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-performpromisethen
     pub(crate) fn perform_promise_then(
-        promise: &JsObject,
+        promise: &JsObject<Promise>,
         on_fulfilled: Option<JsFunction>,
         on_rejected: Option<JsFunction>,
         result_capability: Option<PromiseCapability>,
@@ -1849,18 +2218,16 @@ impl Promise {
         };
 
         let (state, handled) = {
-            let promise = promise
-                .downcast_ref::<Self>()
-                .expect("IsPromise(promise) is false");
+            let promise = promise.borrow_mut();
+            let promise = promise.data();
             (promise.state.clone(), promise.handled)
         };
 
         match state {
             // 9. If promise.[[PromiseState]] is pending, then
             PromiseState::Pending => {
-                let mut promise = promise
-                    .downcast_mut::<Self>()
-                    .expect("IsPromise(promise) is false");
+                let mut promise = promise.borrow_mut();
+                let promise = promise.data_mut();
                 //   a. Append fulfillReaction as the last element of the List that is promise.[[PromiseFulfillReactions]].
                 promise.fulfill_reactions.push(fulfill_reaction);
 
@@ -1901,14 +2268,11 @@ impl Promise {
                 context
                     .job_executor()
                     .enqueue_job(reject_job.into(), context);
-
-                // 12. Set promise.[[PromiseIsHandled]] to true.
-                promise
-                    .downcast_mut::<Self>()
-                    .expect("IsPromise(promise) is false")
-                    .handled = true;
             }
         }
+
+        // 12. Set promise.[[PromiseIsHandled]] to true.
+        promise.borrow_mut().data_mut().handled = true;
 
         // 13. If resultCapability is undefined, then
         //   a. Return undefined.
@@ -1949,7 +2313,7 @@ impl Promise {
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-createresolvingfunctions
     pub(crate) fn create_resolving_functions(
-        promise: &JsObject,
+        promise: &JsObject<Promise>,
         context: &mut Context,
     ) -> ResolvingFunctions {
         /// `TriggerPromiseReactions ( reactions, argument )`
@@ -1994,10 +2358,9 @@ impl Promise {
         /// # Panics
         ///
         /// Panics if `Promise` is not pending.
-        fn fulfill_promise(promise: &JsObject, value: JsValue, context: &mut Context) {
-            let mut promise = promise
-                .downcast_mut::<Promise>()
-                .expect("IsPromise(promise) is false");
+        fn fulfill_promise(promise: &JsObject<Promise>, value: JsValue, context: &mut Context) {
+            let mut promise = promise.borrow_mut();
+            let promise = promise.data_mut();
 
             // 1. Assert: The value of promise.[[PromiseState]] is pending.
             assert!(
@@ -2037,11 +2400,10 @@ impl Promise {
         /// # Panics
         ///
         /// Panics if `Promise` is not pending.
-        fn reject_promise(promise: &JsObject, reason: JsValue, context: &mut Context) {
+        fn reject_promise(promise: &JsObject<Promise>, reason: JsValue, context: &mut Context) {
             let handled = {
-                let mut promise = promise
-                    .downcast_mut::<Promise>()
-                    .expect("IsPromise(promise) is false");
+                let mut promise = promise.borrow_mut();
+                let promise = promise.data_mut();
 
                 // 1. Assert: The value of promise.[[PromiseState]] is pending.
                 assert!(
@@ -2111,7 +2473,7 @@ impl Promise {
                         //   a. Let selfResolutionError be a newly created TypeError object.
                         let self_resolution_error = JsNativeError::typ()
                             .with_message("SameValue(resolution, promise) is true")
-                            .to_opaque(context);
+                            .into_opaque(context);
 
                         //   b. Perform RejectPromise(promise, selfResolutionError).
                         reject_promise(&promise, self_resolution_error.into(), context);
@@ -2134,7 +2496,7 @@ impl Promise {
                         // 10. If then is an abrupt completion, then
                         Err(e) => {
                             //   a. Perform RejectPromise(promise, then.[[Value]]).
-                            reject_promise(&promise, e.to_opaque(context), context);
+                            reject_promise(&promise, e.into_opaque(context)?, context);
 
                             //   b. Return undefined.
                             return Ok(JsValue::undefined());
@@ -2266,15 +2628,15 @@ fn new_promise_reaction_job(
                 }
             },
             //   e. Else, let handlerResult be Completion(HostCallJobCallback(handler, undefined, « argument »)).
-            Some(handler) => context
-                .host_hooks()
-                .call_job_callback(
-                    handler,
-                    &JsValue::undefined(),
-                    std::slice::from_ref(&argument),
-                    context,
-                )
-                .map_err(|e| e.to_opaque(context)),
+            Some(handler) => match context.host_hooks().call_job_callback(
+                &handler,
+                &JsValue::undefined(),
+                std::slice::from_ref(&argument),
+                context,
+            ) {
+                Ok(v) => Ok(v),
+                Err(e) => Err(e.into_opaque(context)?),
+            },
         };
 
         match promise_capability {
@@ -2322,7 +2684,7 @@ fn new_promise_reaction_job(
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-newpromiseresolvethenablejob
 fn new_promise_resolve_thenable_job(
-    promise_to_resolve: JsObject,
+    promise_to_resolve: JsObject<Promise>,
     thenable: JsValue,
     then: JobCallback,
     context: &mut Context,
@@ -2345,7 +2707,7 @@ fn new_promise_resolve_thenable_job(
 
         //    b. Let thenCallResult be Completion(HostCallJobCallback(then, thenable, « resolvingFunctions.[[Resolve]], resolvingFunctions.[[Reject]] »)).
         let then_call_result = context.host_hooks().call_job_callback(
-            then,
+            &then,
             &thenable,
             &[
                 resolving_functions.resolve.clone().into(),
@@ -2356,7 +2718,7 @@ fn new_promise_resolve_thenable_job(
 
         //    c. If thenCallResult is an abrupt completion, then
         if let Err(value) = then_call_result {
-            let value = value.to_opaque(context);
+            let value = value.into_opaque(context)?;
             //    i. Return ? Call(resolvingFunctions.[[Reject]], undefined, « thenCallResult.[[Value]] »).
             return resolving_functions
                 .reject
@@ -2369,4 +2731,45 @@ fn new_promise_resolve_thenable_job(
 
     // 6. Return the Record { [[Job]]: job, [[Realm]]: thenRealm }.
     PromiseJob::with_realm(job, realm)
+}
+
+#[cfg(feature = "experimental")]
+/// Variant for the `PerformPromiseAllKeyed` algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyedVariant {
+    /// `Promise.allKeyed` — resolves when all promises resolve.
+    All,
+    /// `Promise.allSettledKeyed` — resolves when all promises settle.
+    AllSettled,
+}
+
+#[cfg(feature = "experimental")]
+/// `CreateKeyedPromiseCombinatorResultObject ( keys, values )`
+///
+/// Creates a null-prototype object with data properties mapping keys to values.
+///
+/// More information:
+///  - [TC39 proposal spec][spec]
+///
+/// [spec]: https://tc39.es/proposal-await-dictionary/#sec-createkeyedpromisecombinatorresultobject
+fn create_keyed_result_object(
+    keys: &[PropertyKey],
+    values: &[JsValue],
+    context: &mut Context,
+) -> JsObject {
+    // 1. Assert: The number of elements in keys is the same as the number of elements in values.
+    debug_assert_eq!(keys.len(), values.len());
+
+    // 2. Let obj be OrdinaryObjectCreate(null).
+    let obj = JsObject::with_null_proto();
+
+    // 3. For each integer i such that 0 ≤ i < the number of elements in keys, in ascending order, do
+    for (key, value) in keys.iter().zip(values.iter()) {
+        // a. Perform ! CreateDataPropertyOrThrow(obj, keys[i], values[i]).
+        obj.create_data_property_or_throw(key.clone(), value.clone(), context)
+            .expect("cannot fail per spec");
+    }
+
+    // 4. Return obj.
+    obj
 }
