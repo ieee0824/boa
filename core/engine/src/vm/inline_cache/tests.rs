@@ -465,3 +465,51 @@ fn test_megamorphic_inline_cache() -> JsResult<()> {
 
     Ok(())
 }
+
+/// Regression test: a warmed prototype-property inline cache must not return a
+/// stale slot after the prototype's storage is reindexed.
+///
+/// A cacheable prototype-property slot indexes into the *prototype's* storage,
+/// but the cache entry's receiver shape does not observe prototype mutations.
+/// Deleting an earlier property from the prototype compacts its storage and
+/// shifts the target property's slot index down, while the receiver's shape is
+/// unchanged. Without the prototype-shape guard the warm call site keeps
+/// hitting with the stale slot index and resolves to a different property
+/// (originally observed as core-js poisoning `String.prototype` method calls).
+#[test]
+fn prototype_property_inline_cache_survives_prototype_reindex() -> JsResult<()> {
+    let context = &mut Context::default();
+
+    let result = context.eval(Source::from_bytes(
+        r"
+        var proto = {};
+        proto.a = 10;
+        proto.b = 20;
+        proto.target = 42;
+        proto.c = 99;
+        proto.d = 88;
+        var o = Object.create(proto);
+        function read(x) { return x.target; }
+        // Warm the inline cache for the `target` prototype-property load; the
+        // slot caches index 2 into the prototype's storage.
+        read(o);
+        read(o);
+        read(o);
+        if (read(o) !== 42) { throw new Error('warmup should read 42'); }
+        // Reindex the prototype: deleting `a` then `b` compacts storage so that
+        // `target` moves to index 0 and index 2 now holds `d` (== 88). The
+        // receiver `o`'s shape is unaffected.
+        delete proto.a;
+        delete proto.b;
+        read(o)
+        ",
+    ))?;
+
+    assert_eq!(
+        result.as_number(),
+        Some(42.0),
+        "prototype inline cache returned a stale slot after the prototype was reindexed"
+    );
+
+    Ok(())
+}
