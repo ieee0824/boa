@@ -614,6 +614,60 @@ impl JsValue {
         }
     }
 
+    /// Resolves a property lookup on this value without materializing a wrapper
+    /// object for a primitive.
+    ///
+    /// [`Self::to_object`] allocates a fresh wrapper on every call, so a bare
+    /// `"abc".length` costs a GC allocation that is garbage immediately. This
+    /// returns the same answer the wrapper would have given, by exploiting how
+    /// little the wrappers actually hold:
+    ///
+    /// - Every primitive wrapper except `String`'s is created with **no own
+    ///   properties**, so the lookup can start straight at the intrinsic
+    ///   prototype.
+    /// - A `String` wrapper's own properties are exactly `length` plus the
+    ///   canonical indices, which its exotic `[[GetOwnProperty]]` derives from the
+    ///   string. Both are answered here directly.
+    ///
+    /// `null` and `undefined` return [`PrimitiveLookup::NotPrimitive`] so the
+    /// caller still raises the `TypeError` that `to_object` would have.
+    ///
+    /// The receiver passed on to the prototype lookup must remain the primitive
+    /// itself: `OrdinaryGet` forwards the receiver to accessors, so a getter on
+    /// `String.prototype` sees the same `this` it would have through a wrapper.
+    pub(crate) fn primitive_property_lookup(
+        &self,
+        key: &PropertyKey,
+        context: &mut Context,
+    ) -> PrimitiveLookup {
+        let intrinsics = || context.intrinsics().constructors();
+        match self.variant() {
+            JsVariant::String(string) => {
+                if let PropertyKey::Index(index) = key {
+                    let index = index.get() as usize;
+                    return PrimitiveLookup::Value(
+                        string
+                            .get(index..=index)
+                            .map_or_else(JsValue::undefined, JsValue::from),
+                    );
+                }
+                if matches!(key, PropertyKey::String(name) if name == &js_string!("length")) {
+                    return PrimitiveLookup::Value(string.len().into());
+                }
+                PrimitiveLookup::Prototype(intrinsics().string().prototype())
+            }
+            JsVariant::Boolean(_) => PrimitiveLookup::Prototype(intrinsics().boolean().prototype()),
+            JsVariant::Integer32(_) | JsVariant::Float64(_) => {
+                PrimitiveLookup::Prototype(intrinsics().number().prototype())
+            }
+            JsVariant::Symbol(_) => PrimitiveLookup::Prototype(intrinsics().symbol().prototype()),
+            JsVariant::BigInt(_) => PrimitiveLookup::Prototype(intrinsics().bigint().prototype()),
+            JsVariant::Undefined | JsVariant::Null | JsVariant::Object(_) => {
+                PrimitiveLookup::NotPrimitive
+            }
+        }
+    }
+
     /// Converts the value to a `PropertyKey`, that can be used as a key for properties.
     ///
     /// See <https://tc39.es/ecma262/#sec-topropertykey>
@@ -1258,4 +1312,17 @@ impl From<Numeric> for JsValue {
             Numeric::BigInt(bigint) => Self::new(bigint),
         }
     }
+}
+
+/// Where a property lookup on a primitive should continue.
+///
+/// See [`JsValue::primitive_property_lookup`].
+#[derive(Debug, Clone)]
+pub(crate) enum PrimitiveLookup {
+    /// The wrapper would have answered from its own properties; this is the value.
+    Value(JsValue),
+    /// The lookup continues on this prototype, with the primitive as the receiver.
+    Prototype(JsObject),
+    /// Not a primitive, or a value that must still fail in `to_object`.
+    NotPrimitive,
 }

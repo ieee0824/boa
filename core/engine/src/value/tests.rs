@@ -1628,3 +1628,112 @@ mod js_value_macro {
         );
     }
 }
+
+/// Property access on a primitive skips materializing its wrapper
+/// (`JsValue::primitive_property_lookup`). Everything a wrapper would have
+/// answered must still be answered identically, including the cases where the
+/// wrapper's own `this` or a prototype accessor is observable.
+#[test]
+fn primitive_property_access_matches_wrapper_semantics() {
+    run_test_actions([
+        // String own properties: length and canonical indices.
+        TestAction::assert_eq("'abc'.length", 3),
+        TestAction::assert_eq("''.length", 0),
+        TestAction::assert_eq("'日本'.length", 2),
+        TestAction::assert_eq("'abc'[0]", js_string!("a")),
+        TestAction::assert_eq("'abc'[2]", js_string!("c")),
+        TestAction::assert("'abc'[3] === undefined"),
+        TestAction::assert("'abc'[-1] === undefined"),
+        TestAction::assert_eq("'abc'['1']", js_string!("b")),
+        // A non-index, non-length key resolves on String.prototype.
+        TestAction::assert_eq("'abc'.charCodeAt(1)", 98),
+        TestAction::assert_eq("'abc'.at(-1)", js_string!("c")),
+        TestAction::assert("typeof 'abc'.toUpperCase === 'function'"),
+        // Reached through Object.prototype, two prototypes up.
+        TestAction::assert("'abc'.hasOwnProperty('length')"),
+        // The receiver stays the primitive, so a built-in that unwraps `this`
+        // sees the string rather than a wrapper.
+        TestAction::assert_eq("'abc'.valueOf()", js_string!("abc")),
+        TestAction::assert_eq("'abc'.toString()", js_string!("abc")),
+        TestAction::assert_eq(
+            "Object.prototype.toString.call('abc')",
+            js_string!("[object String]"),
+        ),
+        // Other primitives have no own properties, so every key resolves on
+        // their intrinsic prototype.
+        TestAction::assert_eq("(5).toFixed(2)", js_string!("5.00")),
+        TestAction::assert_eq("(255).toString(16)", js_string!("ff")),
+        TestAction::assert_eq("(1.5).valueOf()", 1.5),
+        TestAction::assert_eq("true.toString()", js_string!("true")),
+        TestAction::assert("true.valueOf() === true"),
+        TestAction::assert_eq("10n.toString()", js_string!("10")),
+        // A prototype accessor must receive the primitive as its `this`.
+        TestAction::assert_eq(
+            "Symbol('tag').description",
+            js_string!("tag"),
+        ),
+        TestAction::assert_eq(
+            "Symbol('tag').toString()",
+            js_string!("Symbol(tag)"),
+        ),
+        // A user accessor or method installed on the prototype receives the
+        // primitive, and `OrdinaryCallBindThis` decides what it observes: a
+        // non-strict function has its `this` coerced at call time while a strict
+        // one keeps the primitive. Both values were confirmed against
+        // SpiderMonkey, since the coercion happening at call time rather than at
+        // lookup time is easy to get backwards.
+        TestAction::run(
+            "Object.defineProperty(String.prototype, 'sloppyGetter', {
+                get() { return typeof this; },
+                configurable: true,
+             });
+             Object.defineProperty(String.prototype, 'strictGetter', {
+                get() { 'use strict'; return typeof this; },
+                configurable: true,
+             });
+             String.prototype.sloppyMethod = function () { return typeof this; };
+             String.prototype.strictMethod = function () { 'use strict'; return typeof this; };",
+        ),
+        TestAction::assert_eq("'abc'.sloppyGetter", js_string!("object")),
+        TestAction::assert_eq("'abc'.strictGetter", js_string!("string")),
+        TestAction::assert_eq("'abc'.sloppyMethod()", js_string!("object")),
+        TestAction::assert_eq("'abc'.strictMethod()", js_string!("string")),
+        TestAction::run(
+            "delete String.prototype.sloppyGetter;
+             delete String.prototype.strictGetter;
+             delete String.prototype.sloppyMethod;
+             delete String.prototype.strictMethod;",
+        ),
+        // A property added to the prototype after the call site warmed up must
+        // still be found, so the inline cache cannot go stale on the prototype.
+        TestAction::run("globalThis.warm = () => 'abc'.lateAdded;"),
+        TestAction::assert("warm() === undefined"),
+        TestAction::run("String.prototype.lateAdded = 7;"),
+        TestAction::assert_eq("warm()", 7),
+        TestAction::run("delete String.prototype.lateAdded;"),
+        TestAction::assert("warm() === undefined"),
+    ]);
+}
+
+/// `null` and `undefined` must keep failing exactly as `to_object` did, rather
+/// than being absorbed by the primitive fast path.
+#[test]
+fn nullish_property_access_still_throws() {
+    run_test_actions([
+        TestAction::assert_native_error(
+            "null.foo",
+            crate::JsNativeErrorKind::Type,
+            "cannot convert 'null' or 'undefined' to object",
+        ),
+        TestAction::assert_native_error(
+            "undefined.foo",
+            crate::JsNativeErrorKind::Type,
+            "cannot convert 'null' or 'undefined' to object",
+        ),
+        TestAction::assert_native_error(
+            "const key = 'foo'; null[key]",
+            crate::JsNativeErrorKind::Type,
+            "cannot convert 'null' or 'undefined' to object",
+        ),
+    ]);
+}

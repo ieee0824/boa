@@ -1,9 +1,34 @@
 use crate::{
-    Context, JsResult,
+    Context, JsObject, JsResult,
     object::{internal_methods::InternalMethodPropertyContext, shape::slot::SlotAttributes},
     property::PropertyKey,
+    value::PrimitiveLookup,
     vm::opcode::{Operation, VaryingOperand},
 };
+
+/// Resolves what a property lookup on a **non-object** receiver should run
+/// against, without materializing the receiver's wrapper (see
+/// [`crate::JsValue::primitive_property_lookup`]).
+///
+/// Callers must take the object case themselves, so that the far more common
+/// object receiver keeps its original code path and pays nothing for this.
+fn primitive_lookup_target(
+    receiver: &crate::JsValue,
+    key: &PropertyKey,
+    context: &mut Context,
+) -> JsResult<LookupTarget> {
+    Ok(match receiver.primitive_property_lookup(key, context) {
+        PrimitiveLookup::Value(value) => LookupTarget::Resolved(value),
+        PrimitiveLookup::Prototype(prototype) => LookupTarget::Object(prototype),
+        // `null`/`undefined`: let `to_object` raise the TypeError.
+        PrimitiveLookup::NotPrimitive => LookupTarget::Object(receiver.to_object(context)?),
+    })
+}
+
+enum LookupTarget {
+    Object(JsObject),
+    Resolved(crate::JsValue),
+}
 
 /// `GetPropertyByName` implements the Opcode Operation for `Opcode::GetPropertyByName`
 ///
@@ -24,8 +49,25 @@ impl GetPropertyByName {
         context: &mut Context,
     ) -> JsResult<()> {
         let receiver = context.vm.get_register(receiver.into()).clone();
-        let object = context.vm.get_register(value.into()).clone();
-        let object = object.to_object(context)?;
+        let value = context.vm.get_register(value.into()).clone();
+        // The object case is deliberately first and self-contained: building the
+        // `PropertyKey` is only needed to answer a primitive, and the inline
+        // cache below usually hits without one.
+        let object = if let Some(object) = value.as_object() {
+            object.clone()
+        } else {
+            let key: PropertyKey = context.vm.frame().code_block().ic[usize::from(index)]
+                .name
+                .clone()
+                .into();
+            match primitive_lookup_target(&value, &key, context)? {
+                LookupTarget::Resolved(value) => {
+                    context.vm.set_register(dst.into(), value);
+                    return Ok(());
+                }
+                LookupTarget::Object(object) => object,
+            }
+        };
 
         let ic = &context.vm.frame().code_block().ic[usize::from(index)];
         let object_borrowed = object.borrow();
@@ -97,8 +139,18 @@ impl GetPropertyByValue {
     ) -> JsResult<()> {
         let key = context.vm.get_register(key.into()).clone();
         let object = context.vm.get_register(object.into()).clone();
-        let object = object.to_object(context)?;
         let key = key.to_property_key(context)?;
+        let object = if let Some(object) = object.as_object() {
+            object.clone()
+        } else {
+            match primitive_lookup_target(&object, &key, context)? {
+                LookupTarget::Resolved(value) => {
+                    context.vm.set_register(dst.into(), value);
+                    return Ok(());
+                }
+                LookupTarget::Object(object) => object,
+            }
+        };
 
         // Fast Path
         if object.is_array()
@@ -151,8 +203,19 @@ impl GetPropertyByValuePush {
     ) -> JsResult<()> {
         let key_value = context.vm.get_register(key.into()).clone();
         let object = context.vm.get_register(object.into()).clone();
-        let object = object.to_object(context)?;
         let key_value = key_value.to_property_key(context)?;
+        let object = if let Some(object) = object.as_object() {
+            object.clone()
+        } else {
+            match primitive_lookup_target(&object, &key_value, context)? {
+                LookupTarget::Resolved(value) => {
+                    context.vm.set_register(key.into(), key_value.into());
+                    context.vm.set_register(dst.into(), value);
+                    return Ok(());
+                }
+                LookupTarget::Object(object) => object,
+            }
+        };
 
         // Fast Path
         if object.is_array()
