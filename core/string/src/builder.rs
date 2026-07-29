@@ -368,7 +368,10 @@ impl<D: Copy> JsStringBuilder<D> {
         // meaning we can write to its pointed memory.
         unsafe {
             inner.as_ptr().write(RawJsString {
-                tagged_len: TaggedLen::new(len, latin1),
+                tagged_len: Cell::new(TaggedLen::new(len, latin1)),
+                // The shrink above made the allocation exactly `len` chars, so the
+                // built string carries no slack.
+                capacity: Cell::new(len),
                 refcount: Cell::new(1),
                 data: [0; 0],
             });

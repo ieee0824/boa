@@ -32,7 +32,7 @@ pub use crate::{
 };
 use std::fmt::Write;
 use std::{
-    alloc::{Layout, alloc, dealloc},
+    alloc::{Layout, LayoutError, alloc, dealloc},
     cell::Cell,
     convert::Infallible,
     hash::{Hash, Hasher},
@@ -189,21 +189,72 @@ impl TaggedLen {
 }
 
 /// The raw representation of a [`JsString`] in the heap.
+///
+/// `capacity` is how many characters the allocation can hold and `tagged_len` is
+/// how many it currently holds; the two are equal for every string built by
+/// concatenation or conversion. They are kept apart so that a string can be
+/// appended to in place without reallocating, which is only sound when the
+/// allocation is larger than the contents.
+///
+/// Both are mutable through a [`Cell`] because appending updates them, and an
+/// append reaches this value through a shared reference — the same reason
+/// `refcount` is a [`Cell`]. Mutating either is only sound with an exclusive
+/// claim on the allocation, which is what a `refcount` of 1 establishes.
 #[repr(C)]
 #[allow(missing_debug_implementations)]
 pub struct RawJsString {
-    tagged_len: TaggedLen,
+    tagged_len: Cell<TaggedLen>,
+    capacity: Cell<usize>,
     refcount: Cell<usize>,
     data: [u8; 0],
 }
 
 impl RawJsString {
-    const fn is_latin1(&self) -> bool {
-        self.tagged_len.is_latin1()
+    fn is_latin1(&self) -> bool {
+        self.tagged_len.get().is_latin1()
     }
 
-    const fn len(&self) -> usize {
-        self.tagged_len.len()
+    fn len(&self) -> usize {
+        self.tagged_len.get().len()
+    }
+
+    fn capacity(&self) -> usize {
+        let capacity = self.capacity.get();
+        debug_assert!(capacity >= self.len(), "capacity must cover the contents");
+        capacity
+    }
+
+    /// The layout of an allocation holding `capacity` characters.
+    ///
+    /// The single place this is computed, because an allocation freed under a
+    /// different layout than it was made with is undefined behaviour rather than
+    /// merely wasted memory. Deriving it from the length instead of the capacity
+    /// is exactly that mistake, and `tests` pins the two apart so the mistake
+    /// cannot be reintroduced quietly.
+    fn layout(capacity: usize, latin1: bool) -> Result<Layout, LayoutError> {
+        let data = if latin1 {
+            Layout::array::<u8>(capacity)
+        } else {
+            Layout::array::<u16>(capacity)
+        }?;
+
+        let (layout, offset) = Layout::new::<Self>().extend(data)?;
+        debug_assert_eq!(offset, DATA_OFFSET);
+
+        Ok(layout.pad_to_align())
+    }
+
+    /// The layout this allocation was made with.
+    ///
+    /// # Safety
+    ///
+    /// The allocation must have been made by [`JsString::try_allocate_inner`],
+    /// which is what guarantees the layout is representable.
+    unsafe fn current_layout(&self) -> Layout {
+        // SAFETY:
+        // `try_allocate_inner` already computed this exact layout successfully for
+        // this capacity and encoding, so it cannot fail here.
+        unsafe { Self::layout(self.capacity(), self.is_latin1()).unwrap_unchecked() }
     }
 }
 
@@ -559,7 +610,7 @@ impl JsString {
         // - Unwrapped heap ptr is always a valid heap allocated RawJsString.
         // - Length of a heap allocated string always contains the correct size of the string.
         unsafe {
-            let tagged_len = (*ptr).tagged_len;
+            let tagged_len = (*ptr).tagged_len.get();
             let len = tagged_len.len();
             let is_latin1 = tagged_len.is_latin1();
             let ptr = (&raw const (*ptr).data).cast::<u8>();
@@ -675,16 +726,29 @@ impl JsString {
         str_len: usize,
         latin1: bool,
     ) -> Result<NonNull<RawJsString>, Option<Layout>> {
-        let (layout, offset) = if latin1 {
-            Layout::array::<u8>(str_len)
-        } else {
-            Layout::array::<u16>(str_len)
-        }
-        .and_then(|arr| Layout::new::<RawJsString>().extend(arr))
-        .map(|(layout, offset)| (layout.pad_to_align(), offset))
-        .map_err(|_| None)?;
+        Self::try_allocate_inner_with_capacity(str_len, str_len, latin1)
+    }
 
-        debug_assert_eq!(offset, DATA_OFFSET);
+    /// Allocates a new [`RawJsString`] able to hold `capacity` chars, of which the
+    /// first `str_len` will be initialized by the caller.
+    ///
+    /// The allocation is described by `capacity`, so a `capacity` larger than
+    /// `str_len` leaves room for [`JsString`] to be appended to in place later. The
+    /// chars in `str_len..capacity` are left uninitialized and must not be read
+    /// before they are written.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(None)` on integer overflows `usize::MAX`.
+    /// Returns `Err(Some(Layout))` on allocation error.
+    fn try_allocate_inner_with_capacity(
+        str_len: usize,
+        capacity: usize,
+        latin1: bool,
+    ) -> Result<NonNull<RawJsString>, Option<Layout>> {
+        debug_assert!(capacity >= str_len);
+
+        let layout = RawJsString::layout(capacity, latin1).map_err(|_| None)?;
 
         #[allow(clippy::cast_ptr_alignment)]
         // SAFETY:
@@ -703,7 +767,8 @@ impl JsString {
         unsafe {
             // Write the first part, the `RawJsString`.
             inner.as_ptr().write(RawJsString {
-                tagged_len: TaggedLen::new(str_len, latin1),
+                tagged_len: Cell::new(TaggedLen::new(str_len, latin1)),
+                capacity: Cell::new(capacity),
                 refcount: Cell::new(1),
                 data: [0; 0],
             });
@@ -714,13 +779,13 @@ impl JsString {
             // SAFETY:
             // - `inner` must be a valid pointer, since it comes from a `NonNull`,
             // meaning we can safely dereference it to `RawJsString`.
-            // - `offset` should point us to the beginning of the array,
+            // - `DATA_OFFSET` should point us to the beginning of the array,
             // and since we requested an `RawJsString` layout with a trailing
-            // `[u16; str_len]`, the memory of the array must be in the `usize`
+            // `[u16; capacity]`, the memory of the array must be in the `usize`
             // range for the allocation to succeed.
             unsafe {
                 ptr::eq(
-                    inner.cast::<u8>().add(offset).cast(),
+                    inner.cast::<u8>().add(DATA_OFFSET).cast(),
                     (*inner).data.as_mut_ptr(),
                 )
             }
@@ -781,6 +846,85 @@ impl JsString {
         let rc = unsafe { self.ptr.as_ref().refcount.get() };
         Some(rc)
     }
+
+    /// Gets the number of chars this string's allocation can hold, which is at
+    /// least its length.
+    ///
+    /// Returns [`None`] for a static string, which has no allocation to describe.
+    #[inline]
+    #[must_use]
+    pub fn capacity(&self) -> Option<usize> {
+        if self.is_static() {
+            return None;
+        }
+
+        // SAFETY:
+        // `NonNull` and the constructions of `JsString` guarantee that `inner` is always valid.
+        let capacity = unsafe { self.ptr.as_ref().capacity() };
+        Some(capacity)
+    }
+
+    /// The layout of this string's allocation, or [`None`] for a static string.
+    ///
+    /// Used by [`Drop`], and asserted against [`RawJsString::layout`] in `tests`,
+    /// so that a change deriving the layout from the length instead of the capacity
+    /// fails a test rather than corrupting the heap.
+    fn allocation_layout(&self) -> Option<Layout> {
+        if self.is_static() {
+            return None;
+        }
+
+        // SAFETY:
+        // `NonNull` and the constructions of `JsString` guarantee that `inner` is
+        // always valid, and a non-static string is always allocated by
+        // `try_allocate_inner_with_capacity`.
+        Some(unsafe { self.ptr.as_ref().current_layout() })
+    }
+
+    /// Creates a new [`JsString`] holding `string`, in an allocation able to hold
+    /// `capacity` chars.
+    ///
+    /// The slack beyond `string.len()` lets the string be appended to in place
+    /// later, which is what makes repeated appending cheaper than concatenating.
+    /// Prefer [`JsString::from`] when the string will not grow: the slack is not
+    /// reclaimed until the string is dropped.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is smaller than `string.len()`, or if the allocation
+    /// fails.
+    #[must_use]
+    pub fn with_capacity_from(string: JsStr<'_>, capacity: usize) -> Self {
+        assert!(
+            capacity >= string.len(),
+            "capacity must be able to hold the string"
+        );
+
+        let latin1 = string.is_latin1();
+        let ptr = match Self::try_allocate_inner_with_capacity(string.len(), capacity, latin1) {
+            Ok(ptr) => ptr,
+            Err(None) => alloc_overflow(),
+            Err(Some(layout)) => std::alloc::handle_alloc_error(layout),
+        };
+
+        // SAFETY: `try_allocate_inner_with_capacity` guarantees that `ptr` is valid,
+        // and that it has room for at least `string.len()` chars of `string`'s
+        // encoding.
+        unsafe {
+            let data = (&raw mut (*ptr.as_ptr()).data).cast::<u8>();
+            match string.variant() {
+                JsStrVariant::Latin1(s) => {
+                    ptr::copy_nonoverlapping(s.as_ptr(), data, s.len());
+                }
+                JsStrVariant::Utf16(s) => {
+                    #[allow(clippy::cast_ptr_alignment)]
+                    ptr::copy_nonoverlapping(s.as_ptr(), data.cast::<u16>(), s.len());
+                }
+            }
+
+            Self { ptr }
+        }
+    }
 }
 
 impl Clone for JsString {
@@ -828,24 +972,12 @@ impl Drop for JsString {
             return;
         }
 
-        // SAFETY:
-        // All the checks for the validity of the layout have already been made on `alloc_inner`,
-        // so we can skip the unwrap.
-        let layout = unsafe {
-            if inner.is_latin1() {
-                Layout::for_value(inner)
-                    .extend(Layout::array::<u8>(inner.len()).unwrap_unchecked())
-                    .unwrap_unchecked()
-                    .0
-                    .pad_to_align()
-            } else {
-                Layout::for_value(inner)
-                    .extend(Layout::array::<u16>(inner.len()).unwrap_unchecked())
-                    .unwrap_unchecked()
-                    .0
-                    .pad_to_align()
-            }
-        };
+        // The layout must come from the capacity rather than the length: the two
+        // differ for a string that has room to be appended to, and freeing under a
+        // layout the allocation was not made with is undefined behaviour.
+        let layout = self
+            .allocation_layout()
+            .expect("a static string returned above");
 
         // SAFETY:
         // If refcount is 0 and we call drop, that means this is the last `JsString` which

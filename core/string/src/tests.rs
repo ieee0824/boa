@@ -3,7 +3,7 @@
 use std::hash::{BuildHasher, BuildHasherDefault, Hash};
 
 use crate::{
-    CommonJsStringBuilder, JsStr, JsString, Latin1JsStringBuilder, StaticJsStrings,
+    CommonJsStringBuilder, JsStr, JsString, Latin1JsStringBuilder, RawJsString, StaticJsStrings,
     Utf16JsStringBuilder,
 };
 
@@ -468,4 +468,159 @@ fn common_js_string_builder() {
         js_string.to_std_string().unwrap_or_default(),
         "Déjà vu2024年5月21日🎹"
     );
+}
+
+
+/// The header is on every heap-allocated string, so a field added to it is paid
+/// for by the whole program. Pinned so that growing it is a deliberate act with a
+/// measurement attached rather than a side effect of an unrelated change.
+#[test]
+fn raw_js_string_header_size_is_pinned() {
+    assert_eq!(size_of::<RawJsString>(), 3 * size_of::<usize>());
+    assert_eq!(align_of::<RawJsString>(), align_of::<usize>());
+    assert_eq!(crate::DATA_OFFSET, 3 * size_of::<usize>());
+}
+
+/// Exact allocations keep reporting a capacity equal to their length, which is
+/// what every existing caller produces.
+#[test]
+fn exact_allocations_have_capacity_equal_to_length() {
+    for string in [
+        JsString::from("abc"),
+        JsString::from("a longer latin1 string, still exact"),
+        JsString::from(JsStr::utf16(&[0x41, 0x0100, 0x42])),
+    ] {
+        assert_eq!(string.capacity(), Some(string.len()));
+    }
+}
+
+/// Static strings have no allocation to describe, so they report no capacity —
+/// the same convention `refcount` already uses.
+#[test]
+fn static_strings_report_no_capacity() {
+    let static_string = StaticJsStrings::EMPTY_STRING;
+    assert!(static_string.is_static());
+    assert_eq!(static_string.capacity(), None);
+    assert_eq!(static_string.refcount(), None);
+}
+
+/// The point of the whole change: a string whose allocation is larger than its
+/// contents still behaves as a string of its length.
+#[test]
+fn over_allocated_strings_behave_as_their_length() {
+    let latin1 = JsString::with_capacity_from(JsStr::latin1(b"abc"), 64);
+    assert_eq!(latin1.len(), 3);
+    assert_eq!(latin1.capacity(), Some(64));
+    assert_eq!(latin1, JsString::from("abc"));
+    assert_eq!(latin1.to_std_string_escaped(), "abc");
+    assert_eq!(latin1.get_expect(1), 0x62);
+    assert_eq!(latin1.as_str().len(), 3);
+    assert!(latin1.as_str().is_latin1());
+
+    let utf16 = JsString::with_capacity_from(JsStr::utf16(&[0x41, 0x0100]), 32);
+    assert_eq!(utf16.len(), 2);
+    assert_eq!(utf16.capacity(), Some(32));
+    assert_eq!(utf16, JsString::from(JsStr::utf16(&[0x41, 0x0100])));
+    assert_eq!(utf16.get_expect(1), 0x0100);
+    assert!(!utf16.as_str().is_latin1());
+}
+
+/// Hashing and ordering read the contents, so the slack must not leak into them.
+#[test]
+fn over_allocated_strings_hash_and_compare_by_contents() {
+    let slack = JsString::with_capacity_from(JsStr::latin1(b"abc"), 64);
+    let exact = JsString::from("abc");
+    assert_eq!(hash_value(&slack), hash_value(&exact));
+    assert_eq!(slack.cmp(&exact), std::cmp::Ordering::Equal);
+
+    let longer = JsString::with_capacity_from(JsStr::latin1(b"abd"), 64);
+    assert_ne!(slack, longer);
+    assert_eq!(slack.cmp(&longer), std::cmp::Ordering::Less);
+}
+
+/// `Drop` must hand back the layout the allocation was made with, not the one its
+/// contents imply. Miri is unavailable on this toolchain, so rather than trying to
+/// observe the deallocation this locks the layout computation that both sides use:
+/// a regression that reverts `Drop` to deriving the layout from the length would
+/// make these differ.
+#[test]
+fn deallocation_layout_follows_capacity_not_length() {
+    for (contents, capacity) in [
+        (JsStr::latin1(b"abc"), 64usize),
+        (JsStr::latin1(b"abc"), 3),
+        (JsStr::utf16(&[0x41, 0x0100]), 32),
+        (JsStr::utf16(&[0x41, 0x0100]), 2),
+    ] {
+        let string = JsString::with_capacity_from(contents, capacity);
+        let observed = string.allocation_layout().expect("not static");
+        let expected = RawJsString::layout(capacity, contents.is_latin1()).expect("valid layout");
+        assert_eq!(observed, expected);
+
+        // The length-derived layout is only the same one when there is no slack,
+        // so this is what tells the two computations apart.
+        let from_length = RawJsString::layout(contents.len(), contents.is_latin1()).unwrap();
+        if capacity == contents.len() {
+            assert_eq!(observed, from_length);
+        } else {
+            assert_ne!(observed, from_length);
+        }
+    }
+}
+
+/// Cloning shares the allocation, so the clone reports the same slack and the
+/// contents survive the original being dropped.
+#[test]
+fn cloning_an_over_allocated_string_shares_its_allocation() {
+    let original = JsString::with_capacity_from(JsStr::latin1(b"abc"), 64);
+    let clone = original.clone();
+    assert_eq!(original.refcount(), Some(2));
+    assert_eq!(clone.capacity(), Some(64));
+
+    drop(original);
+    assert_eq!(clone.refcount(), Some(1));
+    assert_eq!(clone.to_std_string_escaped(), "abc");
+    assert_eq!(clone.capacity(), Some(64));
+}
+
+/// Concatenating from an over-allocated operand must not copy the slack in.
+#[test]
+fn concatenating_an_over_allocated_string_uses_only_its_contents() {
+    let slack = JsString::with_capacity_from(JsStr::latin1(b"abc"), 64);
+    let joined = JsString::concat(slack.as_str(), JsStr::latin1(b"de"));
+    assert_eq!(joined.to_std_string_escaped(), "abcde");
+    assert_eq!(joined.len(), 5);
+    assert_eq!(joined.capacity(), Some(5));
+}
+
+/// The builder shrinks to fit before writing the header, which this change leaves
+/// alone: its output stays exact.
+#[test]
+fn builder_output_is_still_exact() {
+    let mut builder = Latin1JsStringBuilder::new();
+    builder.extend_from_slice(b"abc");
+    let built = builder.build().expect("latin1 contents build");
+    assert_eq!(built.len(), 3);
+    assert_eq!(built.capacity(), Some(3));
+    assert_eq!(built, JsString::from("abc"));
+
+    // The builder grows geometrically, so this one really did have slack to shed.
+    let mut grown = Utf16JsStringBuilder::new();
+    for i in 0..40u16 {
+        grown.push(0x0100 + i);
+    }
+    let grown = grown.build();
+    assert_eq!(grown.len(), 40);
+    assert_eq!(grown.capacity(), Some(40));
+}
+
+/// A zero-length allocation with slack is still a valid empty string, and cannot
+/// be confused with the static empty string.
+#[test]
+fn empty_contents_with_slack_stay_empty() {
+    let empty = JsString::with_capacity_from(JsStr::latin1(b""), 16);
+    assert_eq!(empty.len(), 0);
+    assert_eq!(empty.capacity(), Some(16));
+    assert!(!empty.is_static());
+    assert_eq!(empty, JsString::default());
+    assert_eq!(empty.to_std_string_escaped(), "");
 }
