@@ -27,13 +27,17 @@ use crate::{
 /// ECMAScript's [**Script Record**][spec].
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-script-records
-#[derive(Clone, Trace, Finalize)]
+#[derive(Clone)]
 pub struct Script {
     inner: Rooted<Inner>,
 }
 
+/// A script reference stored inside a traced garbage-collected value.
+///
+/// Use [`Script::to_edge`] before placing a script in a native-function capture,
+/// and [`Self::root`] when an external owner is needed again.
 #[derive(Clone, Trace, Finalize)]
-pub(crate) struct ScriptEdge {
+pub struct ScriptEdge {
     inner: GcEdge<Inner>,
 }
 
@@ -70,7 +74,9 @@ struct Inner {
 }
 
 impl Script {
-    pub(crate) fn to_edge(&self) -> ScriptEdge {
+    /// Creates an unregistered script edge suitable for traced heap storage.
+    #[must_use]
+    pub fn to_edge(&self) -> ScriptEdge {
         ScriptEdge {
             inner: self.inner.clone().into_edge(),
         }
@@ -265,9 +271,45 @@ impl Script {
 }
 
 impl ScriptEdge {
-    pub(crate) fn to_rooted(&self) -> Script {
+    /// Creates an explicitly registered external script owner.
+    #[must_use]
+    pub fn root(&self) -> Script {
         Script {
             inner: self.inner.clone().root(),
         }
+    }
+
+    pub(crate) fn to_rooted(&self) -> Script {
+        self.root()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Script;
+    use crate::{Context, JsValue, NativeFunction, Source};
+
+    #[test]
+    fn native_capture_keeps_script_alive_across_collection() {
+        let mut context = Context::default();
+        let script = Script::parse(Source::from_bytes("1 + 1"), None, &mut context)
+            .expect("script should parse");
+
+        let callback = NativeFunction::from_copy_closure_with_captures(
+            |_, _, script, _| {
+                let script = script.root();
+                assert!(script.path().is_none());
+                Ok(JsValue::undefined())
+            },
+            script.to_edge(),
+        )
+        .to_js_function(context.realm());
+
+        drop(script);
+        boa_gc::force_collect();
+
+        callback
+            .call(&JsValue::undefined(), &[], &mut context)
+            .expect("captured script should survive collection");
     }
 }
