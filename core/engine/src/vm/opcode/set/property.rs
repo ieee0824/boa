@@ -36,7 +36,7 @@ impl SetPropertyByName {
         let ic = &context.vm.frame().code_block().ic[usize::from(index)];
 
         let object_borrowed = object.borrow();
-        if let Some((shape, slot)) = ic.match_or_reset(object_borrowed.shape()) {
+        if let Some((shape, slot)) = ic.match_or_reset(object_borrowed.shape_edge()) {
             let slot_index = slot.index as usize;
 
             if slot.attributes.is_accessor_descriptor() {
@@ -86,7 +86,7 @@ impl SetPropertyByName {
         if succeeded && slot.is_cachable() {
             let ic = &context.vm.frame().code_block.ic[usize::from(index)];
             let object_borrowed = object.borrow();
-            let shape = object_borrowed.shape();
+            let shape = object_borrowed.shape_edge();
             ic.set(shape, slot);
         }
 

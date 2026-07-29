@@ -60,7 +60,7 @@ impl GetNameGlobal {
             let ic = &context.vm.frame().code_block().ic[usize::from(ic_index)];
 
             let object_borrowed = object.borrow();
-            if let Some((shape, slot)) = ic.match_or_reset(object_borrowed.shape()) {
+            if let Some((shape, slot)) = ic.match_or_reset(object_borrowed.shape_edge()) {
                 let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
                     let prototype = shape.prototype().expect("prototype should have value");
                     let prototype = prototype.borrow();
@@ -98,7 +98,7 @@ impl GetNameGlobal {
             if slot.is_cachable() {
                 let ic = &context.vm.frame().code_block.ic[usize::from(ic_index)];
                 let object_borrowed = object.borrow();
-                let shape = object_borrowed.shape();
+                let shape = object_borrowed.shape_edge();
                 ic.set(shape, slot);
             }
 

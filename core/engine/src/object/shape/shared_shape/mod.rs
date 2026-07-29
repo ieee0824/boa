@@ -7,7 +7,7 @@ mod tests;
 use std::{collections::hash_map::RandomState, hash::Hash};
 
 use bitflags::bitflags;
-use boa_gc::{Finalize, Gc, Trace, WeakGc, empty_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGc, empty_trace};
 use indexmap::IndexMap;
 
 use crate::{JsObject, object::JsPrototype, property::PropertyKey};
@@ -86,7 +86,8 @@ unsafe impl Trace for ShapeFlags {
 
 /// The internal representation of a [`SharedShape`].
 #[derive(Debug, Trace, Finalize)]
-struct Inner {
+#[doc(hidden)]
+pub struct Inner {
     /// See [`ForwardTransition`].
     forward_transitions: ForwardTransition,
 
@@ -104,7 +105,7 @@ struct Inner {
     /// The previous shape in the transition chain.
     ///
     /// [`None`] if it is the root shape.
-    previous: Option<SharedShape>,
+    previous: Option<SharedShape<GcEdge<Inner>>>,
 
     /// How many transitions have happened from the root node.
     transition_count: u16,
@@ -115,11 +116,49 @@ struct Inner {
 
 /// Represents a shared object shape.
 #[derive(Debug, Trace, Finalize, Clone)]
-pub struct SharedShape {
-    inner: Gc<Inner>,
+pub struct SharedShape<H = Rooted<Inner>> {
+    inner: H,
 }
 
 impl SharedShape {
+    pub(crate) fn into_edge(self) -> SharedShape<GcEdge<Inner>> {
+        SharedShape {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+
+    fn new(inner: Inner) -> Self {
+        Self {
+            inner: Rooted::new(inner),
+        }
+    }
+
+    /// Create a root [`SharedShape`].
+    #[must_use]
+    pub(crate) fn root() -> Self {
+        Self::new(Inner {
+            forward_transitions: ForwardTransition::default(),
+            prototype: None,
+            property_count: 0,
+            // Most of the time the root shape initiates with between 1-4 properties.
+            property_table: PropertyTable::with_capacity(4),
+            previous: None,
+            flags: ShapeFlags::default(),
+            transition_count: 0,
+        })
+    }
+}
+
+impl<H> SharedShape<H>
+where
+    H: super::ShapeGcHandle<Inner>,
+{
+    pub(crate) fn root_handle(&self) -> SharedShape {
+        SharedShape {
+            inner: self.inner.clone_rooted(),
+        }
+    }
+
     fn property_table(&self) -> &PropertyTable {
         &self.inner.property_table
     }
@@ -138,8 +177,8 @@ impl SharedShape {
     }
     /// Getter for the previous field.
     #[must_use]
-    pub fn previous(&self) -> Option<&Self> {
-        self.inner.previous.as_ref()
+    pub fn previous(&self) -> Option<SharedShape> {
+        self.inner.previous.as_ref().map(SharedShape::root_handle)
     }
     /// Get the prototype of the shape.
     #[must_use]
@@ -169,33 +208,13 @@ impl SharedShape {
         self.inner.prototype.as_ref() == Some(prototype)
     }
 
-    /// Create a new [`SharedShape`].
-    fn new(inner: Inner) -> Self {
-        Self {
-            inner: Gc::new(inner),
-        }
-    }
-
-    /// Create a root [`SharedShape`].
-    #[must_use]
-    pub(crate) fn root() -> Self {
-        Self::new(Inner {
-            forward_transitions: ForwardTransition::default(),
-            prototype: None,
-            property_count: 0,
-            // Most of the time the root shape initiates with between 1-4 properties.
-            property_table: PropertyTable::with_capacity(4),
-            previous: None,
-            flags: ShapeFlags::default(),
-            transition_count: 0,
-        })
-    }
-
     /// Create a [`SharedShape`] change prototype transition.
-    pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> Self {
+    pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> SharedShape {
         if let Some(shape) = self.forward_transitions().get_prototype(&prototype) {
             if let Some(inner) = shape.upgrade() {
-                return Self { inner };
+                return SharedShape {
+                    inner: Rooted::from_gc(inner),
+                };
             }
 
             self.forward_transitions().prune_prototype_transitions();
@@ -205,11 +224,11 @@ impl SharedShape {
             prototype: prototype.clone(),
             property_table: self.property_table().clone(),
             property_count: self.property_count(),
-            previous: Some(self.clone()),
+            previous: Some(self.root_handle().into_edge()),
             transition_count: self.transition_count() + 1,
             flags: ShapeFlags::prototype_transition_from(self.flags()),
         };
-        let new_shape = Self::new(new_inner_shape);
+        let new_shape = SharedShape::new(new_inner_shape);
 
         self.forward_transitions()
             .insert_prototype(prototype, &new_shape.inner);
@@ -218,11 +237,13 @@ impl SharedShape {
     }
 
     /// Create a [`SharedShape`] insert property transition.
-    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
+    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> SharedShape {
         // Check if we have already created such a transition, if so use it!
         if let Some(shape) = self.forward_transitions().get_property(&key) {
             if let Some(inner) = shape.upgrade() {
-                return Self { inner };
+                return SharedShape {
+                    inner: Rooted::from_gc(inner),
+                };
             }
 
             self.forward_transitions().prune_property_transitions();
@@ -238,11 +259,11 @@ impl SharedShape {
             forward_transitions: ForwardTransition::default(),
             property_table,
             property_count: self.property_count() + 1,
-            previous: Some(self.clone()),
+            previous: Some(self.root_handle().into_edge()),
             transition_count: self.transition_count() + 1,
             flags: ShapeFlags::insert_property_transition_from(self.flags()),
         };
-        let new_shape = Self::new(new_inner_shape);
+        let new_shape = SharedShape::new(new_inner_shape);
 
         self.forward_transitions()
             .insert_property(key, &new_shape.inner);
@@ -254,7 +275,7 @@ impl SharedShape {
     pub(crate) fn change_attributes_transition(
         &self,
         key: TransitionKey,
-    ) -> ChangeTransition<Self> {
+    ) -> ChangeTransition<SharedShape> {
         let slot = self.property_table().get_expect(&key.property_key);
 
         // Check if we have already created such a transition, if so use it!
@@ -271,7 +292,9 @@ impl SharedShape {
                 };
 
                 return ChangeTransition {
-                    shape: Self { inner },
+                    shape: SharedShape {
+                        inner: Rooted::from_gc(inner),
+                    },
                     action,
                 };
             }
@@ -288,11 +311,11 @@ impl SharedShape {
                 prototype: self.prototype(),
                 property_table,
                 property_count: self.property_count(),
-                previous: Some(self.clone()),
+                previous: Some(self.root_handle().into_edge()),
                 transition_count: self.transition_count() + 1,
                 flags: ShapeFlags::configure_property_transition_from(self.flags()),
             };
-            let shape = Self::new(inner_shape);
+            let shape = SharedShape::new(inner_shape);
 
             self.forward_transitions()
                 .insert_property(key, &shape.inner);
@@ -366,7 +389,7 @@ impl SharedShape {
         &self,
         key: &PropertyKey,
     ) -> (
-        Self,
+        SharedShape,
         Option<JsPrototype>,
         IndexMap<PropertyKey, SlotAttributes>,
     ) {
@@ -374,7 +397,7 @@ impl SharedShape {
         let mut transitions: IndexMap<PropertyKey, SlotAttributes, RandomState> =
             IndexMap::default();
 
-        let mut current = Some(self);
+        let mut current = Some(self.root_handle());
         let base = loop {
             let Some(current_shape) = current else {
                 unreachable!("The chain should have insert transition type!")
@@ -395,10 +418,10 @@ impl SharedShape {
 
             if current_shape.flags().is_insert_transition_type() && &current_property_key == key {
                 let base = if let Some(base) = current_shape.previous() {
-                    base.clone()
+                    base
                 } else {
                     // It's the root, because it doesn't have previous.
-                    current_shape.clone()
+                    current_shape.root_handle()
                 };
                 break base;
             }
@@ -419,7 +442,7 @@ impl SharedShape {
     }
 
     /// Remove a property from [`SharedShape`], returning the new [`SharedShape`].
-    pub(crate) fn remove_property_transition(&self, key: &PropertyKey) -> Self {
+    pub(crate) fn remove_property_transition(&self, key: &PropertyKey) -> SharedShape {
         let (mut base, prototype, transitions) = self.rollback_before(key);
 
         // Apply prototype transition, if it was found.
@@ -474,7 +497,7 @@ impl SharedShape {
 
     /// Return location in memory of the [`SharedShape`].
     pub(crate) fn to_addr_usize(&self) -> usize {
-        let ptr: *const _ = self.inner.as_ref();
+        let ptr: *const _ = &raw const *self.inner;
         ptr as usize
     }
 }
@@ -504,15 +527,19 @@ impl WeakSharedShape {
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<SharedShape> {
         Some(SharedShape {
-            inner: self.inner.upgrade()?,
+            inner: Rooted::from_gc(self.inner.upgrade()?),
         })
     }
 }
 
-impl From<&SharedShape> for WeakSharedShape {
-    fn from(value: &SharedShape) -> Self {
+impl<H> From<&SharedShape<H>> for WeakSharedShape
+where
+    H: super::ShapeGcHandle<Inner>,
+{
+    fn from(value: &SharedShape<H>) -> Self {
+        let rooted = value.inner.clone_rooted();
         WeakSharedShape {
-            inner: WeakGc::new(&value.inner),
+            inner: WeakGc::new(rooted.as_gc()),
         }
     }
 }

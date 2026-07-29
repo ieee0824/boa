@@ -12,7 +12,9 @@ pub(crate) use unique_shape::UniqueShape;
 
 use std::fmt::Debug;
 
-use boa_gc::{Finalize, Trace};
+use std::ops::Deref;
+
+use boa_gc::{Finalize, GcEdge, Rooted, Trace};
 
 use crate::property::PropertyKey;
 
@@ -23,6 +25,23 @@ use self::{
 };
 
 use super::JsPrototype;
+
+#[doc(hidden)]
+pub trait ShapeGcHandle<T: Trace + 'static>: Deref<Target = T> {
+    fn clone_rooted(&self) -> Rooted<T>;
+}
+
+impl<T: Trace> ShapeGcHandle<T> for Rooted<T> {
+    fn clone_rooted(&self) -> Rooted<T> {
+        self.clone()
+    }
+}
+
+impl<T: Trace> ShapeGcHandle<T> for GcEdge<T> {
+    fn clone_rooted(&self) -> Rooted<T> {
+        self.clone().root()
+    }
+}
 
 /// Action to be performed after a property attribute change
 //
@@ -57,15 +76,33 @@ pub(crate) struct ChangeTransition<T> {
 
 /// The internal representation of [`Shape`].
 #[derive(Debug, Trace, Finalize, Clone)]
-enum Inner {
-    Unique(UniqueShape),
-    Shared(SharedShape),
+enum Inner<U = Rooted<unique_shape::Inner>, S = Rooted<shared_shape::Inner>> {
+    Unique(UniqueShape<U>),
+    Shared(SharedShape<S>),
 }
 
 /// Represents the shape of an object.
 #[derive(Debug, Trace, Finalize, Clone)]
-pub struct Shape {
-    inner: Inner,
+pub struct Shape<U = Rooted<unique_shape::Inner>, S = Rooted<shared_shape::Inner>> {
+    inner: Inner<U, S>,
+}
+
+pub(crate) type ShapeEdge = Shape<GcEdge<unique_shape::Inner>, GcEdge<shared_shape::Inner>>;
+
+impl Default for ShapeEdge {
+    fn default() -> Self {
+        Shape::default().into_edge()
+    }
+}
+
+impl ShapeEdge {
+    pub(crate) fn root(&self) -> Shape {
+        let inner = match &self.inner {
+            Inner::Unique(shape) => Inner::Unique(shape.root_handle()),
+            Inner::Shared(shape) => Inner::Shared(shape.root_handle()),
+        };
+        Shape { inner }
+    }
 }
 
 impl Default for Shape {
@@ -82,6 +119,20 @@ impl Shape {
     /// NOTE: This only applies to [`SharedShape`].
     const TRANSITION_COUNT_MAX: u16 = 1024;
 
+    pub(crate) fn into_edge(self) -> ShapeEdge {
+        let inner = match &self.inner {
+            Inner::Unique(shape) => Inner::Unique(shape.clone().into_edge()),
+            Inner::Shared(shape) => Inner::Shared(shape.clone().into_edge()),
+        };
+        Shape { inner }
+    }
+}
+
+impl<U, S> Shape<U, S>
+where
+    U: ShapeGcHandle<unique_shape::Inner>,
+    S: ShapeGcHandle<shared_shape::Inner>,
+{
     /// Returns `true` if it's a shared shape, `false` otherwise.
     #[inline]
     #[must_use]
@@ -96,7 +147,7 @@ impl Shape {
         matches!(self.inner, Inner::Unique(_))
     }
 
-    pub(crate) const fn as_unique(&self) -> Option<&UniqueShape> {
+    pub(crate) const fn as_unique(&self) -> Option<&UniqueShape<U>> {
         if let Inner::Unique(shape) = &self.inner {
             return Some(shape);
         }
@@ -106,11 +157,11 @@ impl Shape {
     /// Create an insert property transitions returning the new transitioned [`Shape`].
     ///
     /// NOTE: This assumes that there is no property with the given key!
-    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
+    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Shape {
         match &self.inner {
             Inner::Shared(shape) => {
                 let shape = shape.insert_property_transition(key);
-                if shape.transition_count() >= Self::TRANSITION_COUNT_MAX {
+                if shape.transition_count() >= Shape::TRANSITION_COUNT_MAX {
                     return shape.to_unique().into();
                 }
                 shape.into()
@@ -126,12 +177,12 @@ impl Shape {
     pub(crate) fn change_attributes_transition(
         &self,
         key: TransitionKey,
-    ) -> ChangeTransition<Self> {
+    ) -> ChangeTransition<Shape> {
         match &self.inner {
             Inner::Shared(shape) => {
                 let change_transition = shape.change_attributes_transition(key);
                 let shape =
-                    if change_transition.shape.transition_count() >= Self::TRANSITION_COUNT_MAX {
+                    if change_transition.shape.transition_count() >= Shape::TRANSITION_COUNT_MAX {
                         change_transition.shape.to_unique().into()
                     } else {
                         change_transition.shape.into()
@@ -148,11 +199,11 @@ impl Shape {
     /// Remove a property property from the [`Shape`] returning the new transitioned [`Shape`].
     ///
     /// NOTE: This assumes that there already is a property with the given key!
-    pub(crate) fn remove_property_transition(&self, key: &PropertyKey) -> Self {
+    pub(crate) fn remove_property_transition(&self, key: &PropertyKey) -> Shape {
         match &self.inner {
             Inner::Shared(shape) => {
                 let shape = shape.remove_property_transition(key);
-                if shape.transition_count() >= Self::TRANSITION_COUNT_MAX {
+                if shape.transition_count() >= Shape::TRANSITION_COUNT_MAX {
                     return shape.to_unique().into();
                 }
                 shape.into()
@@ -162,11 +213,11 @@ impl Shape {
     }
 
     /// Create a prototype transitions returning the new transitioned [`Shape`].
-    pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> Self {
+    pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> Shape {
         match &self.inner {
             Inner::Shared(shape) => {
                 let shape = shape.change_prototype_transition(prototype);
-                if shape.transition_count() >= Self::TRANSITION_COUNT_MAX {
+                if shape.transition_count() >= Shape::TRANSITION_COUNT_MAX {
                     return shape.to_unique().into();
                 }
                 shape.into()
@@ -266,8 +317,12 @@ impl WeakShape {
     }
 }
 
-impl From<&Shape> for WeakShape {
-    fn from(value: &Shape) -> Self {
+impl<U, S> From<&Shape<U, S>> for WeakShape
+where
+    U: ShapeGcHandle<unique_shape::Inner>,
+    S: ShapeGcHandle<shared_shape::Inner>,
+{
+    fn from(value: &Shape<U, S>) -> Self {
         match &value.inner {
             Inner::Shared(shape) => WeakShape::Shared(shape.into()),
             Inner::Unique(shape) => WeakShape::Unique(shape.into()),
