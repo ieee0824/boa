@@ -624,3 +624,137 @@ fn empty_contents_with_slack_stay_empty() {
     assert_eq!(empty, JsString::default());
     assert_eq!(empty.to_std_string_escaped(), "");
 }
+
+
+/// The append path must produce exactly what concatenation would, or the
+/// optimization is observable from JavaScript.
+#[test]
+fn appending_in_place_matches_concatenation() {
+    let cases: &[(JsStr<'_>, JsStr<'_>)] = &[
+        (JsStr::latin1(b"abc"), JsStr::latin1(b"de")),
+        (JsStr::latin1(b""), JsStr::latin1(b"de")),
+        (JsStr::latin1(b"abc"), JsStr::latin1(b"")),
+        (JsStr::utf16(&[0x41, 0x0100]), JsStr::utf16(&[0x42])),
+        // A utf16 buffer absorbing latin1 has to widen as it writes.
+        (JsStr::utf16(&[0x41, 0x0100]), JsStr::latin1(b"de")),
+        (JsStr::utf16(&[]), JsStr::latin1(b"de")),
+    ];
+
+    for &(prefix, suffix) in cases {
+        let expected = JsString::concat(prefix, suffix);
+        // Give it room so the append does not have to grow, and give it none so
+        // that it does; both must agree with concatenation.
+        for capacity in [prefix.len(), prefix.len() + suffix.len(), 128] {
+            let target = JsString::with_capacity_from(prefix, capacity);
+            let appended = target.try_append(suffix).expect("sole owner may append");
+            assert_eq!(appended, expected, "capacity {capacity}");
+            assert_eq!(appended.len(), expected.len());
+            assert_eq!(
+                appended.as_str().is_latin1(),
+                expected.as_str().is_latin1(),
+                "capacity {capacity}"
+            );
+        }
+    }
+}
+
+/// A latin1 buffer cannot absorb utf16 without rewriting what is already in it,
+/// which is the copy this path exists to avoid, so it declines.
+#[test]
+fn appending_utf16_to_latin1_declines() {
+    let target = JsString::with_capacity_from(JsStr::latin1(b"abc"), 128);
+    let refused = target
+        .try_append(JsStr::utf16(&[0x0100]))
+        .expect_err("latin1 cannot absorb utf16 in place");
+    assert_eq!(refused, JsString::from("abc"));
+    assert_eq!(refused.capacity(), Some(128));
+}
+
+/// The invariant the whole path rests on: a string anyone else can see is never
+/// mutated. Getting this wrong would make `t` change when `s` is appended to.
+#[test]
+fn appending_declines_while_the_string_is_shared() {
+    let target = JsString::with_capacity_from(JsStr::latin1(b"abc"), 128);
+    let observer = target.clone();
+    assert_eq!(target.refcount(), Some(2));
+
+    let refused = target
+        .try_append(JsStr::latin1(b"de"))
+        .expect_err("a shared string must not be mutated");
+    assert_eq!(refused, JsString::from("abc"));
+    assert_eq!(observer, JsString::from("abc"));
+
+    // Once the observer is gone the same string is eligible.
+    drop(observer);
+    assert_eq!(refused.refcount(), Some(1));
+    let appended = refused.try_append(JsStr::latin1(b"de")).expect("sole owner");
+    assert_eq!(appended, JsString::from("abcde"));
+}
+
+/// Static strings have no allocation to grow, so they decline.
+#[test]
+fn appending_to_a_static_string_declines() {
+    let refused = StaticJsStrings::EMPTY_STRING
+        .try_append(JsStr::latin1(b"de"))
+        .expect_err("a static string has no allocation to grow");
+    assert!(refused.is_static());
+    assert_eq!(refused, JsString::default());
+}
+
+/// Appending must reuse the allocation when there is room, and grow geometrically
+/// when there is not — that is what turns repeated appending from quadratic into
+/// amortized-linear work.
+#[test]
+fn appending_reuses_the_allocation_and_grows_geometrically() {
+    let mut string = JsString::with_capacity_from(JsStr::latin1(b"ab"), 8);
+    let mut capacities = vec![string.capacity().unwrap()];
+
+    for _ in 0..6 {
+        string = string.try_append(JsStr::latin1(b"cd")).expect("sole owner");
+        capacities.push(string.capacity().unwrap());
+    }
+
+    assert_eq!(string.len(), 14);
+    assert_eq!(string.to_std_string_escaped(), "abcdcdcdcdcdcd");
+
+    // 8 chars of room absorbs the first three appends without reallocating, then
+    // the capacity doubles rather than growing by the appended amount.
+    assert_eq!(capacities, vec![8, 8, 8, 8, 16, 16, 16]);
+}
+
+/// Reading an appended string must not see the uninitialized slack beyond it.
+#[test]
+fn appended_strings_expose_only_their_contents() {
+    let string = JsString::with_capacity_from(JsStr::latin1(b"ab"), 64)
+        .try_append(JsStr::latin1(b"cd"))
+        .expect("sole owner");
+    assert_eq!(string.len(), 4);
+    assert_eq!(string.capacity(), Some(64));
+    assert_eq!(string.as_str().len(), 4);
+    assert_eq!(string.to_std_string_escaped(), "abcd");
+    assert_eq!(hash_value(&string), hash_value(&JsString::from("abcd")));
+    assert_eq!(string, JsString::from("abcd"));
+
+    // And concatenating from it must not drag the slack along either.
+    let joined = JsString::concat(string.as_str(), JsStr::latin1(b"ef"));
+    assert_eq!(joined.to_std_string_escaped(), "abcdef");
+    assert_eq!(joined.capacity(), Some(6));
+}
+
+/// Appending repeatedly must stay correct over a length that crosses several
+/// growth steps, which is where an off-by-one in the write offset would show.
+#[test]
+fn appending_many_times_matches_a_reference_string() {
+    let mut appended = JsString::from("x");
+    let mut expected = String::from("x");
+    for i in 0..200u32 {
+        let piece = format!("{}", i % 10);
+        appended = match appended.try_append(JsStr::latin1(piece.as_bytes())) {
+            Ok(appended) => appended,
+            Err(target) => JsString::concat(target.as_str(), JsStr::latin1(piece.as_bytes())),
+        };
+        expected.push_str(&piece);
+    }
+    assert_eq!(appended.to_std_string_escaped(), expected);
+    assert_eq!(appended.len(), expected.len());
+}

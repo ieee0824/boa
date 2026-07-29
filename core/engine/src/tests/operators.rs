@@ -689,3 +689,361 @@ mod in_operator {
         )]);
     }
 }
+
+
+/// Pins the observable behaviour of `+=` on strings.
+///
+/// Written ahead of making `+=` append into the string's own allocation rather than
+/// building a new one (issue #319). Every case here is one that an in-place append
+/// could plausibly break — a second holder seeing its contents change, a register
+/// left cleared by a throwing operand, an encoding switch — and each is written to
+/// be indistinguishable from concatenation, so it holds either way.
+mod string_append {
+    use super::{TestAction, run_test_actions};
+    use boa_macros::js_str;
+    use indoc::indoc;
+
+    #[test]
+    fn repeated_appending_builds_the_same_string() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "";
+                    for (var i = 0; i < 40; i++) { s += i % 10; }
+                      return s;
+                    })()
+                "#},
+                js_str!("0123456789012345678901234567890123456789"),
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var t = "";
+                    for (var i = 0; i < 40; i++) { t += i % 10; }
+                      return t.length;
+                    })()
+                "#},
+                40,
+            ),
+        ]);
+    }
+
+    /// The invariant the whole path rests on. If the append mutated a string
+    /// another binding could see, `held` would grow along with `s`.
+    #[test]
+    fn appending_does_not_disturb_another_binding() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                    var held = s;
+                    s += "ef";
+                      return held;
+                    })()
+                "#},
+                js_str!("abcd"),
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s2 = "ab";
+                    s2 += "cd";
+                    var held2 = s2;
+                    s2 += "ef";
+                      return s2;
+                    })()
+                "#},
+                js_str!("abcdef"),
+            ),
+            // Held in an object property rather than a binding.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s3 = "ab";
+                    s3 += "cd";
+                    var box3 = { value: s3 };
+                    s3 += "ef";
+                      return box3.value;
+                    })()
+                "#},
+                js_str!("abcd"),
+            ),
+            // Held in an array element.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s4 = "ab";
+                    s4 += "cd";
+                    var seen = [];
+                    for (var i = 0; i < 5; i++) { seen.push(s4); s4 += "x"; }
+                      return seen.join("|");
+                    })()
+                "#},
+                js_str!("abcd|abcdx|abcdxx|abcdxxx|abcdxxxx"),
+            ),
+            // Captured by a closure.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s5 = "ab";
+                    s5 += "cd";
+                    var read = ((captured) => () => captured)(s5);
+                    s5 += "ef";
+                      return read();
+                    })()
+                "#},
+                js_str!("abcd"),
+            ),
+        ]);
+    }
+
+    /// `s += s` reads the same register it writes.
+    #[test]
+    fn appending_a_string_to_itself() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += s;
+                    s += s;
+                      return s;
+                    })()
+                "#},
+                js_str!("abababab"),
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var a = "ab";
+                    a += "cd";
+                    var b = a;
+                    a += b;
+                      return a;
+                    })()
+                "#},
+                js_str!("abcdabcd"),
+            ),
+        ]);
+    }
+
+    /// Latin1 and UTF-16 storage differ, and a Latin1 buffer cannot absorb UTF-16
+    /// without rewriting what is already in it.
+    #[test]
+    fn appending_across_encodings() {
+        run_test_actions([
+            // Latin1 grown by UTF-16.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                    s += "\u0100";
+                      return s;
+                    })()
+                "#},
+                js_str!("abcd\u{0100}"),
+            ),
+            // UTF-16 grown by Latin1.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "\u0100";
+                    s += "\u0101";
+                    s += "ab";
+                      return s;
+                    })()
+                "#},
+                js_str!("\u{0100}\u{0101}ab"),
+            ),
+            // Alternating, repeatedly, so the storage flips more than once.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "";
+                    for (var i = 0; i < 20; i++) { s += (i % 2 ? "a" : "\u0100"); }
+                      return s.length;
+                    })()
+                "#},
+                20,
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var t = "";
+                    for (var i = 0; i < 20; i++) { t += (i % 2 ? "a" : "\u0100"); }
+                      return t.charCodeAt(0) + "," + t.charCodeAt(1);
+                    })()
+                "#},
+                js_str!("256,97"),
+            ),
+            // Surrogate pairs must survive being appended and read back.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "a";
+                    s += "\u{1F600}";
+                    s += "b";
+                      return s.length + ":" + s.codePointAt(1).toString(16);
+                    })()
+                "#},
+                js_str!("4:1f600"),
+            ),
+        ]);
+    }
+
+    /// An appended string has to behave like any other string everywhere it is
+    /// read, not just when printed.
+    #[test]
+    fn appended_strings_are_ordinary_strings() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                      return s === "abcd";
+                    })()
+                "#},
+                true,
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                      return JSON.stringify({ [s]: s });
+                    })()
+                "#},
+                js_str!(r#"{"abcd":"abcd"}"#),
+            ),
+            // As a property key, which goes through interning and hashing.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                    var o = {};
+                    o[s] = 1;
+                      return o.abcd;
+                    })()
+                "#},
+                1,
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                      return [s.length, s[1], s.charCodeAt(3), s.indexOf("cd"), s.slice(1, 3)].join(",");
+                    })()
+                "#},
+                js_str!("4,b,100,2,bc"),
+            ),
+            // Map keys hash the contents.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                    var m = new Map([["abcd", "hit"]]);
+                      return m.get(s);
+                    })()
+                "#},
+                js_str!("hit"),
+            ),
+        ]);
+    }
+
+    /// The append path is only entered for string + string, because anything else
+    /// can throw partway through. If a throwing right-hand side left the register
+    /// cleared, `s` would read as `undefined` after the catch instead of keeping
+    /// its value.
+    #[test]
+    fn a_throwing_operand_leaves_the_target_intact() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                    try { s += { toString() { throw new Error("no"); } }; } catch (e) {}
+                      return s;
+                    })()
+                "#},
+                js_str!("abcd"),
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += "cd";
+                    try { s += Symbol("nope"); } catch (e) {}
+                      return s;
+                    })()
+                "#},
+                js_str!("abcd"),
+            ),
+            // A valueOf that returns a string still has to work, just not through
+            // the fast path.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var s = "ab";
+                    s += { toString() { return "cd"; } };
+                      return s;
+                    })()
+                "#},
+                js_str!("abcd"),
+            ),
+        ]);
+    }
+
+    /// `+` where the destination is not the left operand must not be treated as an
+    /// append: the left operand is still live afterwards.
+    #[test]
+    fn plain_concatenation_leaves_both_operands_alone() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var a = "ab";
+                    a += "cd";
+                    var b = a + "ef";
+                      return a + "/" + b;
+                    })()
+                "#},
+                js_str!("abcd/abcdef"),
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                    var a = "ab";
+                    a += "cd";
+                    var parts = [a + "1", a + "2", a + "3"];
+                      return parts.join(",") + "/" + a;
+                    })()
+                "#},
+                js_str!("abcd1,abcd2,abcd3/abcd"),
+            ),
+        ]);
+    }
+
+    /// Numbers and other non-strings keep their existing `+` behaviour.
+    #[test]
+    fn non_string_addition_is_unchanged() {
+        run_test_actions([
+            TestAction::assert_eq("var n = 1; n += 2; n", 3),
+            TestAction::assert_eq("var m = 1; m += 0.5; m", 1.5),
+            TestAction::assert_eq("var sn = 1; sn += 'a'; sn", js_str!("1a")),
+            TestAction::assert_eq("var t = 'a'; t += 1; t", js_str!("a1")),
+            TestAction::assert_eq("var u = 'a'; u += null; u", js_str!("anull")),
+            TestAction::assert_eq("var v = 'a'; v += undefined; v", js_str!("aundefined")),
+            TestAction::assert_eq("var w = 'a'; w += [1, 2]; w", js_str!("a1,2")),
+            TestAction::assert("var x = 1n; x += 2n; x === 3n"),
+        ]);
+    }
+}

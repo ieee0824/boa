@@ -32,7 +32,7 @@ pub use crate::{
 };
 use std::fmt::Write;
 use std::{
-    alloc::{Layout, LayoutError, alloc, dealloc},
+    alloc::{Layout, LayoutError, alloc, dealloc, realloc},
     cell::Cell,
     convert::Infallible,
     hash::{Hash, Hasher},
@@ -879,6 +879,139 @@ impl JsString {
         // always valid, and a non-static string is always allocated by
         // `try_allocate_inner_with_capacity`.
         Some(unsafe { self.ptr.as_ref().current_layout() })
+    }
+
+    /// The smallest capacity worth allocating for a string that is being appended
+    /// to, matching [`JsStringBuilder`]'s floor: below this the header dominates
+    /// and the reallocations are not worth counting.
+    ///
+    /// [`JsStringBuilder`]: crate::builder::Latin1JsStringBuilder
+    const MIN_APPEND_CAPACITY: usize = 8;
+
+    /// Appends `suffix` to this string in place, returning the longer string.
+    ///
+    /// Repeated `s += x` otherwise costs a fresh allocation and a copy of the whole
+    /// prefix every time, which is quadratic in the length built. Appending into
+    /// spare capacity makes it amortized-linear, growing the allocation
+    /// geometrically the way [`Vec`] does.
+    ///
+    /// This mutates a string in place, which is only sound with an exclusive claim
+    /// on the allocation, so the conditions are checked here rather than promised
+    /// by callers. When any of them does not hold the string is returned untouched
+    /// and the caller must concatenate instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(self)` when the string cannot be appended to in place:
+    ///
+    /// - it is static, and so has no allocation of its own to grow;
+    /// - another [`JsString`] shares the allocation, and would observe the
+    ///   mutation as its own contents changing;
+    /// - it is Latin1 and `suffix` is UTF-16, which would mean widening everything
+    ///   already stored — the copy this exists to avoid.
+    #[must_use = "the appended string is returned, `self` is left unchanged only on `Err`"]
+    pub fn try_append(self, suffix: JsStr<'_>) -> Result<Self, Self> {
+        // A static string's allocation is not ours, and a shared one is not ours
+        // alone. `refcount` returning 1 is what establishes that no other holder
+        // can observe the contents changing, or be left with a stale pointer if the
+        // allocation moves.
+        if self.refcount() != Some(1) {
+            return Err(self);
+        }
+
+        // SAFETY: A string with a refcount is a live heap allocation.
+        let inner = unsafe { self.ptr.as_ref() };
+        let latin1 = inner.is_latin1();
+
+        if latin1 && !suffix.is_latin1() {
+            return Err(self);
+        }
+
+        let len = inner.len();
+        let capacity = inner.capacity();
+        let Some(appended_len) = len.checked_add(suffix.len()) else {
+            alloc_overflow()
+        };
+
+        let ptr = if appended_len > capacity {
+            // Growing by the appended amount alone would make repeated appending
+            // quadratic again, so double instead. Same policy as `JsStringBuilder`.
+            let grown = capacity
+                .checked_mul(2)
+                .map_or(appended_len, |doubled| doubled.max(appended_len))
+                .max(Self::MIN_APPEND_CAPACITY);
+
+            let old_layout = RawJsString::layout(capacity, latin1).unwrap_or_else(|_| {
+                unreachable!("the current allocation was made under this layout")
+            });
+            let Ok(new_layout) = RawJsString::layout(grown, latin1) else {
+                alloc_overflow()
+            };
+
+            let ptr = self.into_raw();
+
+            // SAFETY:
+            // - `ptr` came from `try_allocate_inner_with_capacity` under
+            //   `old_layout`, and `into_raw` transferred its ownership here, so no
+            //   other holder can be left with the old address.
+            // - `new_layout` is larger than `old_layout` and non-zero.
+            let reallocated = unsafe { realloc(ptr.as_ptr().cast(), old_layout, new_layout.size()) };
+
+            let Some(reallocated) = NonNull::new(reallocated.cast::<RawJsString>()) else {
+                std::alloc::handle_alloc_error(new_layout)
+            };
+
+            // The allocator hands back whole layout, so take the padding as usable
+            // capacity rather than leaving it to be reallocated over later.
+            let usable = (new_layout.size() - DATA_OFFSET) / if latin1 { 1 } else { 2 };
+
+            // SAFETY: `realloc` returned a live allocation of `new_layout`, and the
+            // header it carried over is still intact.
+            unsafe { reallocated.as_ref() }.capacity.set(usable);
+
+            reallocated
+        } else {
+            self.into_raw()
+        };
+
+        // SAFETY:
+        // - `ptr` is a live allocation with room for `appended_len` chars of this
+        //   string's encoding, either because it already had the capacity or
+        //   because it was just grown to it.
+        // - `data + len` is the first uninitialized char, and `suffix` cannot
+        //   overlap it: `suffix` is borrowed from another allocation, or from this
+        //   one before `realloc`, in which case `realloc` copied it away.
+        // - The Latin1-into-UTF-16 case widens as it writes, so each char is
+        //   written to its own slot.
+        unsafe {
+            let data = (&raw mut (*ptr.as_ptr()).data).cast::<u8>();
+
+            match (latin1, suffix.variant()) {
+                (true, JsStrVariant::Latin1(s)) => {
+                    ptr::copy_nonoverlapping(s.as_ptr(), data.add(len), s.len());
+                }
+                (false, JsStrVariant::Utf16(s)) => {
+                    #[allow(clippy::cast_ptr_alignment)]
+                    ptr::copy_nonoverlapping(s.as_ptr(), data.cast::<u16>().add(len), s.len());
+                }
+                (false, JsStrVariant::Latin1(s)) => {
+                    #[allow(clippy::cast_ptr_alignment)]
+                    let data = data.cast::<u16>().add(len);
+                    for (i, byte) in s.iter().enumerate() {
+                        data.add(i).write(u16::from(*byte));
+                    }
+                }
+                (true, JsStrVariant::Utf16(_)) => {
+                    unreachable!("declined above: latin1 cannot absorb utf16 in place")
+                }
+            }
+
+            (*ptr.as_ptr())
+                .tagged_len
+                .set(TaggedLen::new(appended_len, latin1));
+
+            Ok(Self { ptr })
+        }
     }
 
     /// Creates a new [`JsString`] holding `string`, in an allocation able to hold
