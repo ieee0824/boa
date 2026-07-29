@@ -9,7 +9,7 @@ use boa_engine::{
     },
     property::Attribute,
 };
-use boa_gc::{Gc, GcRefCell};
+use boa_gc::{GcRefCell, Rooted};
 
 fn main() -> JsResult<()> {
     // We create a new `Context` to create a new Javascript executor.
@@ -92,7 +92,7 @@ fn main() -> JsResult<()> {
 
     // forEach
     let array = JsUint8Array::from_iter(vec![1, 2, 3, 4, 5], context)?;
-    let num_to_modify = Gc::new(GcRefCell::new(0u8));
+    let num_to_modify = Rooted::new(GcRefCell::new(0u8));
 
     let js_function = FunctionObjectBuilder::new(
         context.realm(),
@@ -108,7 +108,7 @@ fn main() -> JsResult<()> {
                 *captures.borrow_mut() += element;
                 Ok(JsValue::undefined())
             },
-            Gc::clone(&num_to_modify),
+            num_to_modify.clone().into_edge(),
         ),
     )
     .build();
