@@ -1,4 +1,4 @@
-use boa_gc::{Finalize, Gc, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, Rooted, Trace};
 
 use crate::{Context, JsResult, JsValue};
 
@@ -48,7 +48,12 @@ where
 /// **Undefined Behaviour**.
 #[derive(Clone, Trace, Finalize)]
 pub(crate) struct NativeCoroutine {
-    inner: Gc<dyn TraceableCoroutine>,
+    inner: Rooted<dyn TraceableCoroutine>,
+}
+
+#[derive(Clone, Trace, Finalize)]
+pub(crate) struct NativeCoroutineEdge {
+    inner: GcEdge<dyn TraceableCoroutine>,
 }
 
 impl std::fmt::Debug for NativeCoroutine {
@@ -91,14 +96,51 @@ impl NativeCoroutine {
         // meaning this is safe.
         unsafe {
             Self {
-                inner: Gc::from_raw(ptr),
+                inner: Rooted::from_gc(Gc::from_raw(ptr)),
             }
         }
     }
 
-    /// Calls this `NativeCoroutine`, forwarding the arguments to the corresponding function.
+    pub(crate) fn to_edge(&self) -> NativeCoroutineEdge {
+        NativeCoroutineEdge {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+}
+
+impl NativeCoroutineEdge {
     #[inline]
     pub(crate) fn call(&self, result: JsResult<JsValue>, context: &mut Context) -> CoroutineState {
         self.inner.call(result, context)
+    }
+
+    pub(crate) fn to_rooted(&self) -> NativeCoroutine {
+        NativeCoroutine {
+            inner: self.inner.clone().root(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CoroutineState, NativeCoroutine};
+    use crate::{Context, JsValue};
+
+    #[test]
+    fn native_coroutine_survives_collection_before_heap_storage() {
+        let coroutine = NativeCoroutine::from_copy_closure_with_captures(
+            |result, (), _| CoroutineState::Yielded(result.expect("normal completion")),
+            (),
+        );
+
+        boa_gc::force_collect();
+
+        let CoroutineState::Yielded(value) = coroutine
+            .to_edge()
+            .call(Ok(JsValue::new(42)), &mut Context::default())
+        else {
+            panic!("coroutine should yield");
+        };
+        assert_eq!(value, JsValue::new(42));
     }
 }

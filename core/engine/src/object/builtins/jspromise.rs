@@ -1235,7 +1235,7 @@ impl JsPromise {
                         continuation.call(Ok(args.get_or_undefined(0).clone()), context)
                     {
                         JsPromise::resolve(value, context)
-                            .await_native(continuation.clone(), context);
+                            .await_native(continuation.to_rooted(), context);
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
@@ -1253,7 +1253,7 @@ impl JsPromise {
                     // f. Return undefined.
                     Ok(JsValue::undefined())
                 },
-                (continuation.clone(), Cell::new(Some(gen_ctx))),
+                (continuation.to_edge(), Cell::new(Some(gen_ctx))),
             ),
         )
         .name(js_string!())
@@ -1299,7 +1299,7 @@ impl JsPromise {
                         )
                     {
                         JsPromise::resolve(value, context)
-                            .await_native(continuation.clone(), context);
+                            .await_native(continuation.to_rooted(), context);
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
@@ -1315,7 +1315,7 @@ impl JsPromise {
 
                     Ok(JsValue::undefined())
                 },
-                (continuation, Cell::new(Some(gen_ctx))),
+                (continuation.to_edge(), Cell::new(Some(gen_ctx))),
             ),
         )
         .name(js_string!())
