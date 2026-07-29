@@ -9,7 +9,7 @@ use crate::{
     builtins::promise::{PromiseCapability, ResolvingFunctions},
     environments::EnvironmentStack,
     module::ModuleEdge,
-    object::JsFunction,
+    object::{JsFunction, JsFunctionEdge},
     realm::Realm,
     script::{Script, ScriptEdge},
 };
@@ -239,11 +239,11 @@ impl Stack {
             .map_or_else(JsValue::undefined, Into::into);
         self.stack[frame.promise_capability_resolve_register_index()] = promise_capability
             .map(PromiseCapability::resolve)
-            .cloned()
+            .map(JsFunctionEdge::root)
             .map_or_else(JsValue::undefined, Into::into);
         self.stack[frame.promise_capability_reject_register_index()] = promise_capability
             .map(PromiseCapability::reject)
-            .cloned()
+            .map(JsFunctionEdge::root)
             .map_or_else(JsValue::undefined, Into::into);
     }
 
@@ -274,7 +274,7 @@ impl Stack {
 
         Some(PromiseCapability {
             promise,
-            functions: ResolvingFunctions { resolve, reject },
+            functions: ResolvingFunctions { resolve, reject }.into_edge(),
         })
     }
 

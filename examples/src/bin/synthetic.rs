@@ -150,6 +150,9 @@ fn create_operations_module(context: &mut Context) -> Module {
     .name("sqrt")
     .build();
 
+    let functions: (JsValue, JsValue, JsValue, JsValue, JsValue) =
+        (sum.into(), sub.into(), mult.into(), div.into(), sqrt.into());
+
     Module::synthetic(
         // Make sure to list all exports beforehand.
         &[
@@ -164,14 +167,14 @@ fn create_operations_module(context: &mut Context) -> Module {
         SyntheticModuleInitializer::from_copy_closure_with_captures(
             |module, fns, _| {
                 println!("Running initializer!");
-                module.set_export(&js_string!("sum"), fns.0.clone().into())?;
-                module.set_export(&js_string!("sub"), fns.1.clone().into())?;
-                module.set_export(&js_string!("mult"), fns.2.clone().into())?;
-                module.set_export(&js_string!("div"), fns.3.clone().into())?;
-                module.set_export(&js_string!("sqrt"), fns.4.clone().into())?;
+                module.set_export(&js_string!("sum"), fns.0.clone())?;
+                module.set_export(&js_string!("sub"), fns.1.clone())?;
+                module.set_export(&js_string!("mult"), fns.2.clone())?;
+                module.set_export(&js_string!("div"), fns.3.clone())?;
+                module.set_export(&js_string!("sqrt"), fns.4.clone())?;
                 Ok(())
             },
-            (sum, sub, mult, div, sqrt),
+            functions,
         ),
         None,
         None,

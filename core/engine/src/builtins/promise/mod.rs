@@ -16,7 +16,7 @@ use crate::{
     js_string,
     native_function::NativeFunction,
     object::{
-        CONSTRUCTOR, FunctionObjectBuilder, JsFunction, JsObject,
+        CONSTRUCTOR, FunctionObjectBuilder, JsFunction, JsFunctionEdge, JsObject,
         internal_methods::get_prototype_from_constructor,
     },
     property::Attribute,
@@ -121,12 +121,19 @@ pub struct ResolvingFunctions {
     pub reject: JsFunction,
 }
 
-// Manually implementing `Trace` to allow destructuring.
-unsafe impl Trace for ResolvingFunctions {
-    custom_trace!(this, mark, {
-        mark(&this.resolve);
-        mark(&this.reject);
-    });
+#[derive(Debug, Clone, Trace, Finalize)]
+pub(crate) struct ResolvingFunctionsEdge {
+    pub(crate) resolve: JsFunctionEdge,
+    pub(crate) reject: JsFunctionEdge,
+}
+
+impl ResolvingFunctions {
+    pub(crate) fn into_edge(self) -> ResolvingFunctionsEdge {
+        ResolvingFunctionsEdge {
+            resolve: self.resolve.into_edge(),
+            reject: self.reject.into_edge(),
+        }
+    }
 }
 
 // ==================== Private API ====================
@@ -173,7 +180,7 @@ pub(crate) struct PromiseCapability {
     pub(crate) promise: JsObject,
 
     /// The resolving functions,
-    pub(crate) functions: ResolvingFunctions,
+    pub(crate) functions: ResolvingFunctionsEdge,
 }
 
 // SAFETY: manually implementing `Trace` to allow destructuring.
@@ -312,7 +319,7 @@ impl PromiseCapability {
         // 10. Return promiseCapability.
         Ok(Self {
             promise,
-            functions: ResolvingFunctions { resolve, reject },
+            functions: ResolvingFunctions { resolve, reject }.into_edge(),
         })
     }
 
@@ -322,12 +329,12 @@ impl PromiseCapability {
     }
 
     /// Returns the resolve function.
-    pub(crate) const fn resolve(&self) -> &JsFunction {
+    pub(crate) const fn resolve(&self) -> &JsFunctionEdge {
         &self.functions.resolve
     }
 
     /// Returns the reject function.
-    pub(crate) const fn reject(&self) -> &JsFunction {
+    pub(crate) const fn reject(&self) -> &JsFunctionEdge {
         &self.functions.reject
     }
 }
@@ -535,10 +542,7 @@ impl Promise {
         })?;
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
-        let PromiseCapability {
-            promise,
-            functions: ResolvingFunctions { resolve, reject },
-        } = PromiseCapability::new(&c, context)?;
+        let capability = PromiseCapability::new(&c, context)?;
 
         // 3. Let obj be OrdinaryObjectCreate(%Object.prototype%).
         // 4. Perform ! CreateDataPropertyOrThrow(obj, "promise", promiseCapability.[[Promise]]).
@@ -546,7 +550,11 @@ impl Promise {
         // 6. Perform ! CreateDataPropertyOrThrow(obj, "reject", promiseCapability.[[Reject]]).
         let obj = context.intrinsics().templates().with_resolvers().create(
             OrdinaryObject,
-            vec![promise.into(), resolve.into(), reject.into()],
+            vec![
+                capability.promise.clone().into(),
+                capability.functions.resolve.root().into(),
+                capability.functions.reject.root().into(),
+            ],
         );
 
         // 7. Return obj.
@@ -636,7 +644,7 @@ impl Promise {
             already_called: Rc<Cell<bool>>,
             index: usize,
             values: GcEdge<GcRefCell<Vec<JsValue>>>,
-            capability_resolve: JsFunction,
+            capability_resolve: JsFunctionEdge,
             #[unsafe_ignore_trace]
             remaining_elements_count: Rc<Cell<i32>>,
         }
@@ -737,7 +745,7 @@ impl Promise {
                 js_string!("then"),
                 &[
                     on_fulfilled.into(),
-                    result_capability.functions.reject.clone().into(),
+                    result_capability.functions.reject.root().into(),
                 ],
                 context,
             )?;
@@ -851,7 +859,7 @@ impl Promise {
             already_called: Rc<Cell<bool>>,
             index: usize,
             values: GcEdge<GcRefCell<Vec<JsValue>>>,
-            capability: JsFunction,
+            capability: JsFunctionEdge,
             #[unsafe_ignore_trace]
             remaining_elements: Rc<Cell<i32>>,
         }
@@ -1174,7 +1182,7 @@ impl Promise {
             already_called: Rc<Cell<bool>>,
             index: usize,
             errors: GcEdge<GcRefCell<Vec<JsValue>>>,
-            capability_reject: JsFunction,
+            capability_reject: JsFunctionEdge,
             #[unsafe_ignore_trace]
             remaining_elements_count: Rc<Cell<i32>>,
         }
@@ -1283,7 +1291,7 @@ impl Promise {
             next_promise.invoke(
                 js_string!("then"),
                 &[
-                    result_capability.functions.resolve.clone().into(),
+                    result_capability.functions.resolve.root().into(),
                     on_rejected.into(),
                 ],
                 context,
@@ -1414,8 +1422,8 @@ impl Promise {
             next_promise.invoke(
                 js_string!("then"),
                 &[
-                    result_capability.functions.resolve.clone().into(),
-                    result_capability.functions.reject.clone().into(),
+                    result_capability.functions.resolve.root().into(),
+                    result_capability.functions.reject.root().into(),
                 ],
                 context,
             )?;
@@ -1633,7 +1641,7 @@ impl Promise {
         /// Capture object for the `thenFinallyClosure` abstract closure.
         #[derive(Debug, Trace, Finalize)]
         struct FinallyCaptures {
-            on_finally: JsFunction,
+            on_finally: JsFunctionEdge,
             c: JsObject,
         }
 
@@ -1679,7 +1687,7 @@ impl Promise {
                     promise.invoke(js_string!("then"), &[value_thunk.into()], context)
                 },
                 FinallyCaptures {
-                    on_finally: on_finally.clone(),
+                    on_finally: on_finally.clone().into_edge(),
                     c: c.clone(),
                 },
             ),
@@ -1729,7 +1737,10 @@ impl Promise {
                     // v. Return ? Invoke(promise, "then", « thrower »).
                     promise.invoke(js_string!("then"), &[thrower.into()], context)
                 },
-                FinallyCaptures { on_finally, c },
+                FinallyCaptures {
+                    on_finally: on_finally.into_edge(),
+                    c,
+                },
             ),
         );
 
@@ -2293,7 +2304,7 @@ fn new_promise_reaction_job(
                 // g. Assert: promiseCapability is a PromiseCapability Record.
                 let PromiseCapability {
                     promise: _,
-                    functions: ResolvingFunctions { resolve, reject },
+                    functions: ResolvingFunctionsEdge { resolve, reject },
                 } = &promise_capability_record;
 
                 match handler_result {

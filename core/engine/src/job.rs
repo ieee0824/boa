@@ -34,7 +34,7 @@ use crate::context::time::{JsDuration, JsInstant};
 use crate::sys::time;
 use crate::{
     Context, JsResult, JsValue,
-    object::{JsFunction, NativeObject},
+    object::{JsFunction, JsFunctionEdge, NativeObject},
     realm::Realm,
 };
 use boa_gc::{Finalize, Trace};
@@ -449,7 +449,7 @@ impl PromiseJob {
 /// [spec]: https://tc39.es/ecma262/#sec-jobcallback-records
 #[derive(Trace, Finalize)]
 pub struct JobCallback {
-    callback: JsFunction,
+    callback: JsFunctionEdge,
     host_defined: Box<dyn NativeObject>,
 }
 
@@ -467,7 +467,7 @@ impl JobCallback {
     #[inline]
     pub fn new<T: NativeObject>(callback: JsFunction, host_defined: T) -> Self {
         Self {
-            callback,
+            callback: callback.into_edge(),
             host_defined: Box::new(host_defined),
         }
     }
@@ -475,8 +475,8 @@ impl JobCallback {
     /// Gets the inner callback of the job.
     #[inline]
     #[must_use]
-    pub const fn callback(&self) -> &JsFunction {
-        &self.callback
+    pub fn callback(&self) -> JsFunction {
+        self.callback.root()
     }
 
     /// Gets a reference to the host defined additional field as an [`NativeObject`] trait object.

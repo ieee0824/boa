@@ -26,7 +26,7 @@ use crate::{
     js_error, js_string,
     native_function::NativeFunctionObject,
     object::{
-        JsData, JsFunction, JsObject, PrivateElement, PrivateName,
+        JsData, JsFunction, JsFunctionEdge, JsObject, PrivateElement, PrivateName,
         internal_methods::{
             CallValue, InternalMethodCallContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
             get_prototype_from_constructor,
@@ -139,12 +139,12 @@ impl ConstructorKind {
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-classfielddefinition-record-specification-type
 #[derive(Clone, Debug, Finalize)]
-pub enum ClassFieldDefinition {
+pub(crate) enum ClassFieldDefinition {
     /// A class field definition with a `string` or `symbol` as a name.
-    Public(PropertyKey, JsFunction, Option<PropertyKey>),
+    Public(PropertyKey, JsFunctionEdge, Option<PropertyKey>),
 
     /// A class field definition with a private name.
-    Private(PrivateName, JsFunction),
+    Private(PrivateName, JsFunctionEdge),
 }
 
 unsafe impl Trace for ClassFieldDefinition {
@@ -272,13 +272,17 @@ impl OrdinaryFunction {
         value: JsFunction,
         function_name: Option<PropertyKey>,
     ) {
-        self.fields
-            .push(ClassFieldDefinition::Public(key, value, function_name));
+        self.fields.push(ClassFieldDefinition::Public(
+            key,
+            value.into_edge(),
+            function_name,
+        ));
     }
 
     /// Pushes a private value to the `[[Fields]]` internal slot if present.
     pub(crate) fn push_field_private(&mut self, name: PrivateName, value: JsFunction) {
-        self.fields.push(ClassFieldDefinition::Private(name, value));
+        self.fields
+            .push(ClassFieldDefinition::Private(name, value.into_edge()));
     }
 
     /// Returns the values of the `[[PrivateMethods]]` internal slot.

@@ -7,7 +7,7 @@ use crate::{
     builtins::{Array, OrdinaryObject, iterable::IteratorPrototypes, uri::UriFunctions},
     js_string,
     object::{
-        CONSTRUCTOR, JsFunction, JsObject, Object, PROTOTYPE,
+        CONSTRUCTOR, JsFunction, JsFunctionEdge, JsObject, Object, PROTOTYPE,
         internal_methods::immutable_prototype::IMMUTABLE_PROTOTYPE_EXOTIC_INTERNAL_METHODS,
         shape::{RootShape, shared_shape::template::ObjectTemplate},
     },
@@ -72,14 +72,14 @@ impl Intrinsics {
 /// Stores a constructor (such as `Object`) and its corresponding prototype.
 #[derive(Debug, Trace, Finalize, Clone)]
 pub struct StandardConstructor {
-    constructor: JsFunction,
+    constructor: JsFunctionEdge,
     prototype: JsObject,
 }
 
 impl Default for StandardConstructor {
     fn default() -> Self {
         Self {
-            constructor: JsFunction::empty_intrinsic_function(true),
+            constructor: JsFunction::empty_intrinsic_function(true).into_edge(),
             prototype: JsObject::with_null_proto(),
         }
     }
@@ -89,7 +89,7 @@ impl StandardConstructor {
     /// Creates a new `StandardConstructor` from the constructor and the prototype.
     pub(crate) fn new(constructor: JsFunction, prototype: JsObject) -> Self {
         Self {
-            constructor,
+            constructor: constructor.into_edge(),
             prototype,
         }
     }
@@ -97,7 +97,7 @@ impl StandardConstructor {
     /// Build a constructor with a defined prototype.
     fn with_prototype(prototype: JsObject) -> Self {
         Self {
-            constructor: JsFunction::empty_intrinsic_function(true),
+            constructor: JsFunction::empty_intrinsic_function(true).into_edge(),
             prototype,
         }
     }
@@ -117,7 +117,7 @@ impl StandardConstructor {
     #[inline]
     #[must_use]
     pub fn constructor(&self) -> JsObject {
-        self.constructor.clone().into()
+        self.constructor.object()
     }
 }
 
@@ -215,7 +215,7 @@ impl Default for StandardConstructors {
             proxy: StandardConstructor::default(),
             date: StandardConstructor::default(),
             function: StandardConstructor {
-                constructor: JsFunction::empty_intrinsic_function(true),
+                constructor: JsFunction::empty_intrinsic_function(true).into_edge(),
                 prototype: JsFunction::empty_intrinsic_function(false).into(),
             },
             async_function: StandardConstructor::default(),
@@ -1064,13 +1064,13 @@ pub struct IntrinsicObjects {
     json: JsObject,
 
     /// [`%ThrowTypeError%`](https://tc39.es/ecma262/#sec-%throwtypeerror%)
-    throw_type_error: JsFunction,
+    throw_type_error: JsFunctionEdge,
 
     /// [`%Array.prototype.values%`](https://tc39.es/ecma262/#sec-array.prototype.values)
-    array_prototype_values: JsFunction,
+    array_prototype_values: JsFunctionEdge,
 
     /// [`%Array.prototype.toString%`](https://tc39.es/ecma262/#sec-array.prototype.tostring)
-    array_prototype_to_string: JsFunction,
+    array_prototype_to_string: JsFunctionEdge,
 
     /// Cached iterator prototypes.
     iterator_prototypes: IteratorPrototypes,
@@ -1085,30 +1085,30 @@ pub struct IntrinsicObjects {
     atomics: JsObject,
 
     /// [`%eval%`](https://tc39.es/ecma262/#sec-eval-x)
-    eval: JsFunction,
+    eval: JsFunctionEdge,
 
     /// URI related functions
     uri_functions: UriFunctions,
 
     /// [`%isFinite%`](https://tc39.es/ecma262/#sec-isfinite-number)
-    is_finite: JsFunction,
+    is_finite: JsFunctionEdge,
 
     /// [`%isNaN%`](https://tc39.es/ecma262/#sec-isnan-number)
-    is_nan: JsFunction,
+    is_nan: JsFunctionEdge,
 
     /// [`%parseFloat%`](https://tc39.es/ecma262/#sec-parsefloat-string)
-    parse_float: JsFunction,
+    parse_float: JsFunctionEdge,
 
     /// [`%parseInt%`](https://tc39.es/ecma262/#sec-parseint-string-radix)
-    parse_int: JsFunction,
+    parse_int: JsFunctionEdge,
 
     /// [`%escape%`](https://tc39.es/ecma262/#sec-escape-string)
     #[cfg(feature = "annex-b")]
-    escape: JsFunction,
+    escape: JsFunctionEdge,
 
     /// [`%unescape%`](https://tc39.es/ecma262/#sec-unescape-string)
     #[cfg(feature = "annex-b")]
-    unescape: JsFunction,
+    unescape: JsFunctionEdge,
 
     /// [`%Intl%`](https://tc39.es/ecma402/#intl-object)
     #[cfg(feature = "intl")]
@@ -1141,23 +1141,23 @@ impl IntrinsicObjects {
             reflect: JsObject::with_null_proto(),
             math: JsObject::with_null_proto(),
             json: JsObject::with_null_proto(),
-            throw_type_error: JsFunction::empty_intrinsic_function(false),
-            array_prototype_values: JsFunction::empty_intrinsic_function(false),
-            array_prototype_to_string: JsFunction::empty_intrinsic_function(false),
+            throw_type_error: JsFunction::empty_intrinsic_function(false).into_edge(),
+            array_prototype_values: JsFunction::empty_intrinsic_function(false).into_edge(),
+            array_prototype_to_string: JsFunction::empty_intrinsic_function(false).into_edge(),
             iterator_prototypes: IteratorPrototypes::default(),
             generator: JsObject::with_null_proto(),
             async_generator: JsObject::with_null_proto(),
             atomics: JsObject::with_null_proto(),
-            eval: JsFunction::empty_intrinsic_function(false),
+            eval: JsFunction::empty_intrinsic_function(false).into_edge(),
             uri_functions: UriFunctions::default(),
-            is_finite: JsFunction::empty_intrinsic_function(false),
-            is_nan: JsFunction::empty_intrinsic_function(false),
-            parse_float: JsFunction::empty_intrinsic_function(false),
-            parse_int: JsFunction::empty_intrinsic_function(false),
+            is_finite: JsFunction::empty_intrinsic_function(false).into_edge(),
+            is_nan: JsFunction::empty_intrinsic_function(false).into_edge(),
+            parse_float: JsFunction::empty_intrinsic_function(false).into_edge(),
+            parse_int: JsFunction::empty_intrinsic_function(false).into_edge(),
             #[cfg(feature = "annex-b")]
-            escape: JsFunction::empty_intrinsic_function(false),
+            escape: JsFunction::empty_intrinsic_function(false).into_edge(),
             #[cfg(feature = "annex-b")]
-            unescape: JsFunction::empty_intrinsic_function(false),
+            unescape: JsFunction::empty_intrinsic_function(false).into_edge(),
             #[cfg(feature = "intl")]
             intl: JsObject::new_unique(None, Intl::new()?),
             #[cfg(feature = "intl")]
@@ -1175,7 +1175,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn throw_type_error(&self) -> JsFunction {
-        self.throw_type_error.clone()
+        self.throw_type_error.root()
     }
 
     /// Gets the [`%Array.prototype.values%`][spec] intrinsic function.
@@ -1184,7 +1184,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn array_prototype_values(&self) -> JsFunction {
-        self.array_prototype_values.clone()
+        self.array_prototype_values.root()
     }
 
     /// Gets the [`%Array.prototype.toString%`][spec] intrinsic function.
@@ -1193,7 +1193,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn array_prototype_to_string(&self) -> JsFunction {
-        self.array_prototype_to_string.clone()
+        self.array_prototype_to_string.root()
     }
 
     /// Gets the cached iterator prototypes.
@@ -1236,7 +1236,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn eval(&self) -> JsFunction {
-        self.eval.clone()
+        self.eval.root()
     }
 
     /// Gets the URI intrinsic functions.
@@ -1279,7 +1279,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn is_finite(&self) -> JsFunction {
-        self.is_finite.clone()
+        self.is_finite.root()
     }
 
     /// Gets the [`%isNaN%`][spec] intrinsic function.
@@ -1288,7 +1288,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn is_nan(&self) -> JsFunction {
-        self.is_nan.clone()
+        self.is_nan.root()
     }
 
     /// Gets the [`%parseFloat%`][spec] intrinsic function.
@@ -1297,7 +1297,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn parse_float(&self) -> JsFunction {
-        self.parse_float.clone()
+        self.parse_float.root()
     }
 
     /// Gets the [`%parseInt%`][spec] intrinsic function.
@@ -1306,7 +1306,7 @@ impl IntrinsicObjects {
     #[inline]
     #[must_use]
     pub fn parse_int(&self) -> JsFunction {
-        self.parse_int.clone()
+        self.parse_int.root()
     }
 
     /// Gets the [`%escape%`][spec] intrinsic function.
@@ -1316,7 +1316,7 @@ impl IntrinsicObjects {
     #[cfg(feature = "annex-b")]
     #[inline]
     pub fn escape(&self) -> JsFunction {
-        self.escape.clone()
+        self.escape.root()
     }
 
     /// Gets the [`%unescape%`][spec] intrinsic function.
@@ -1326,7 +1326,7 @@ impl IntrinsicObjects {
     #[cfg(feature = "annex-b")]
     #[inline]
     pub fn unescape(&self) -> JsFunction {
-        self.unescape.clone()
+        self.unescape.root()
     }
 
     /// Gets the [`%Intl%`][spec] intrinsic object.

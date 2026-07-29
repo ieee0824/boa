@@ -24,7 +24,7 @@ use crate::{
     Context, JsArgs, JsNativeError, JsResult, JsString, JsValue,
     context::intrinsics::Intrinsics,
     js_string,
-    object::{JsFunction, JsObject},
+    object::{JsFunction, JsFunctionEdge, JsObject},
     realm::Realm,
     string::{CodePoint, StaticJsStrings},
 };
@@ -35,44 +35,44 @@ use crate::{
 #[derive(Debug, Trace, Finalize)]
 pub struct UriFunctions {
     /// %decodeURI%
-    decode_uri: JsFunction,
+    decode_uri: JsFunctionEdge,
 
     /// %decodeURI%
-    decode_uri_component: JsFunction,
+    decode_uri_component: JsFunctionEdge,
 
     /// %encodeURI%
-    encode_uri: JsFunction,
+    encode_uri: JsFunctionEdge,
 
     /// %encodeURIcomponent%
-    encode_uri_component: JsFunction,
+    encode_uri_component: JsFunctionEdge,
 }
 
 impl Default for UriFunctions {
     fn default() -> Self {
         Self {
-            decode_uri: JsFunction::empty_intrinsic_function(false),
-            decode_uri_component: JsFunction::empty_intrinsic_function(false),
-            encode_uri: JsFunction::empty_intrinsic_function(false),
-            encode_uri_component: JsFunction::empty_intrinsic_function(false),
+            decode_uri: JsFunction::empty_intrinsic_function(false).into_edge(),
+            decode_uri_component: JsFunction::empty_intrinsic_function(false).into_edge(),
+            encode_uri: JsFunction::empty_intrinsic_function(false).into_edge(),
+            encode_uri_component: JsFunction::empty_intrinsic_function(false).into_edge(),
         }
     }
 }
 
 impl UriFunctions {
     pub(crate) fn decode_uri(&self) -> JsFunction {
-        self.decode_uri.clone()
+        self.decode_uri.root()
     }
 
     pub(crate) fn decode_uri_component(&self) -> JsFunction {
-        self.decode_uri_component.clone()
+        self.decode_uri_component.root()
     }
 
     pub(crate) fn encode_uri(&self) -> JsFunction {
-        self.encode_uri.clone()
+        self.encode_uri.root()
     }
 
     pub(crate) fn encode_uri_component(&self) -> JsFunction {
-        self.encode_uri_component.clone()
+        self.encode_uri_component.root()
     }
 }
 
