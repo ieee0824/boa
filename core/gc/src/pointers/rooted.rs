@@ -94,18 +94,3 @@ impl<T: Trace + ?Sized + fmt::Debug> fmt::Debug for Rooted<T> {
 }
 
 impl<T: Trace + ?Sized> Finalize for Rooted<T> {}
-
-// SAFETY: This compatibility implementation delegates to the valid Gc handle.
-unsafe impl<T: Trace + ?Sized> Trace for Rooted<T> {
-    unsafe fn trace(&self, tracer: &mut crate::Tracer) {
-        unsafe { self.inner.trace(tracer) };
-    }
-
-    unsafe fn trace_non_roots(&self) {
-        unsafe { self.inner.trace_non_roots() };
-    }
-
-    fn run_finalizer(&self) {
-        self.inner.run_finalizer();
-    }
-}
