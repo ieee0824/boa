@@ -23,7 +23,7 @@ use crate::{
 };
 use boa_gc::{Finalize, Trace};
 
-type NativeWeakMap = boa_gc::WeakMap<ErasedVTableObject, JsValue>;
+type NativeWeakMap = boa_gc::WeakMapEdge<ErasedVTableObject, JsValue>;
 
 #[derive(Debug, Trace, Finalize)]
 pub(crate) struct WeakMap;
