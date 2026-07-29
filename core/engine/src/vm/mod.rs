@@ -761,7 +761,7 @@ impl Context {
         }
 
         // Inject realm before crossing the function boundry
-        let err = err.inject_realm(self.realm().clone());
+        let err = err.inject_realm(self.realm());
 
         self.vm.pending_exception = Some(err);
         self.handle_throw()

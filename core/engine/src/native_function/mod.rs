@@ -414,7 +414,7 @@ pub(crate) fn native_function_call(
     } else {
         function.call(&this, &args, context)
     }
-    .map_err(|err| err.inject_realm(context.realm().clone()));
+    .map_err(|err| err.inject_realm(context.realm()));
 
     context.vm.native_active_function = None;
     context.swap_realm(&mut realm);
@@ -474,7 +474,7 @@ fn native_function_construct(
 
     let result = function
         .call(&new_target, &args, context)
-        .map_err(|err| err.inject_realm(context.realm().clone()))
+        .map_err(|err| err.inject_realm(context.realm()))
         .and_then(|v| match v.variant() {
             JsVariant::Object(o) => Ok(o.clone()),
             val => {
