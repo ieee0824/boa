@@ -3,27 +3,27 @@ use std::any::TypeId;
 use boa_macros::{Finalize, Trace};
 
 use super::run_test;
-use crate::{Gc, GcBox, GcErased, force_collect, test::Harness};
+use crate::{Gc, GcBox, GcErased, GcErasedEdge, Rooted, force_collect, test::Harness};
 
 #[test]
 fn erased_gc() {
     run_test(|| {
         let value = vec![1, 2, 3];
-        let gc = Gc::new(value.clone());
+        let gc = Rooted::new(value.clone());
 
-        assert_eq!(Gc::type_id(&gc), TypeId::of::<Vec<i32>>());
+        assert_eq!(Gc::type_id(gc.as_gc()), TypeId::of::<Vec<i32>>());
 
         let erased = GcErased::new(gc.clone());
 
         assert_eq!(erased.type_id(), TypeId::of::<Vec<i32>>());
         assert!(erased.is::<Vec<i32>>());
 
-        assert_eq!(erased.clone().downcast::<i32>(), None);
+        assert!(erased.clone().downcast::<i32>().is_none());
 
         let gc_from_erased = erased.downcast::<Vec<i32>>().unwrap();
         assert_eq!(**gc_from_erased, value);
 
-        assert!(Gc::ptr_eq(&gc, &gc_from_erased));
+        assert!(Gc::ptr_eq(gc.as_gc(), gc_from_erased.as_gc()));
     });
 }
 
@@ -32,19 +32,19 @@ fn nested_erased_gc() {
     #[derive(Debug, Trace, Finalize)]
     struct List {
         value: i32,
-        next: Option<GcErased>,
+        next: Option<GcErasedEdge>,
     }
 
     run_test(|| {
-        let mut root = GcErased::new(Gc::new(List {
+        let mut root = GcErased::new(Rooted::new(List {
             value: 0,
             next: None,
         }));
 
         for value in 1..100 {
-            root = GcErased::new(Gc::new(List {
+            root = GcErased::new(Rooted::new(List {
                 value,
-                next: Some(root),
+                next: Some(root.into_edge()),
             }));
         }
 
@@ -52,7 +52,7 @@ fn nested_erased_gc() {
         force_collect();
         Harness::assert_exact_bytes_allocated(100 * size_of::<GcBox<List>>());
 
-        let mut head = root.downcast::<List>();
+        let mut head = root.into_edge().downcast::<List>();
         for value in (0..100).rev() {
             let head_unwrap = head.as_ref().unwrap();
 
@@ -61,7 +61,7 @@ fn nested_erased_gc() {
             head = head_unwrap
                 .next
                 .clone()
-                .and_then(GcErased::downcast::<List>);
+                .and_then(GcErasedEdge::downcast::<List>);
         }
     });
 }

@@ -1,3 +1,4 @@
+use super::{GcEdge, Rooted};
 use crate::{
     Allocator, Ephemeron, GcErasedPointer, Tracer, WeakGc, custom_trace, finalizer_safe,
     internals::{EphemeronBox, GcBox, VTable},
@@ -47,53 +48,63 @@ impl Drop for NonTraceable {
     }
 }
 
-/// A type erased [`Gc<T>`] pointer type.
+/// A type-erased, explicitly registered GC root.
 #[repr(transparent)]
 pub struct GcErased {
-    inner: Gc<NonTraceable>,
+    inner: Rooted<NonTraceable>,
 }
 
 impl GcErased {
-    /// Convert a [`Gc<T>`] into a type erased [`GcErased`].
+    /// Converts an explicitly rooted handle into a type-erased root.
     #[inline]
     #[must_use]
-    pub fn new<T: Trace>(gc: Gc<T>) -> Self {
-        let inner_ptr = gc.inner_ptr;
-        std::mem::forget(gc);
-
+    pub fn new<T: Trace>(root: Rooted<T>) -> Self {
+        let inner_ptr = Rooted::into_raw(root).cast();
+        // SAFETY: Type erasure preserves the allocation and its vtable. The raw
+        // pointer came from `Rooted::into_raw` and is reconstructed exactly once.
         Self {
-            inner: Gc {
-                inner_ptr: inner_ptr.cast(),
-                marker: PhantomData,
-            },
+            inner: unsafe { Rooted::from_raw(inner_ptr) },
         }
     }
 
     /// Returns `true` if the two [`GcErased`]s point to the same allocation.
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        Gc::ptr_eq(&this.inner, &other.inner)
+        Gc::ptr_eq(this.inner.as_gc(), other.inner.as_gc())
     }
 
     /// Returns the [`TypeId`] of the inner type.
     #[inline]
     #[must_use]
     pub fn type_id(&self) -> TypeId {
-        Gc::type_id(&self.inner)
+        Gc::type_id(self.inner.as_gc())
     }
 
     /// Returns true if the inner type is the same as `T`.
     #[inline]
     #[must_use]
     pub fn is<T: Trace + 'static>(&self) -> bool {
-        Gc::is::<T>(&self.inner)
+        Gc::is::<T>(self.inner.as_gc())
     }
 
-    /// Returns [`Some`] `Gc<T>` if it is of type `T`, or [`None`] if it isn’t.
+    /// Converts this external root into an unregistered type-erased heap edge.
+    #[must_use]
+    pub fn into_edge(self) -> GcErasedEdge {
+        GcErasedEdge {
+            inner: self.inner.into_edge(),
+        }
+    }
+
+    /// Returns a typed root if the allocation contains `T`.
     #[inline]
     #[must_use]
-    pub fn downcast<T: Trace + 'static>(self) -> Option<Gc<T>> {
-        Gc::downcast::<T>(self.inner)
+    pub fn downcast<T: Trace + 'static>(self) -> Option<Rooted<T>> {
+        if !self.is::<T>() {
+            return None;
+        }
+        // SAFETY: The type id was checked above, and the raw pointer is
+        // reconstructed exactly once after consuming the erased root.
+        Some(unsafe { self.downcast_unchecked::<T>() })
     }
 
     /// Downcast the inner value of type `T`.
@@ -103,9 +114,10 @@ impl GcErased {
     /// The caller must ensure that the cast is valid.
     #[inline]
     #[must_use]
-    pub unsafe fn downcast_unchecked<T: Trace + 'static>(self) -> Gc<T> {
-        // SAFETY: It's the callers responsibility to make sure this is valid.
-        unsafe { Gc::cast_unchecked::<T>(self.inner) }
+    pub unsafe fn downcast_unchecked<T: Trace + 'static>(self) -> Rooted<T> {
+        let inner_ptr = Rooted::into_raw(self.inner).cast();
+        // SAFETY: Forwarded from this function's contract.
+        unsafe { Rooted::from_raw(inner_ptr) }
     }
 
     /// Returns reference to the inner value of type `T`.
@@ -117,7 +129,7 @@ impl GcErased {
     #[must_use]
     pub unsafe fn downcast_ref_unchecked<T: Trace + 'static>(&self) -> &Gc<T> {
         // SAFETY: It's the callers responsibility to make sure this is valid.
-        unsafe { Gc::cast_ref_unchecked::<T>(&self.inner) }
+        unsafe { Gc::cast_ref_unchecked::<T>(self.inner.as_gc()) }
     }
 }
 
@@ -125,8 +137,99 @@ impl Debug for GcErased {
     #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcErased")
-            .field("inner", &self.inner.inner_ptr)
+            .field("inner", &self.inner.as_gc().inner_ptr)
             .finish()
+    }
+}
+
+/// A type-erased GC edge stored inside traced heap data.
+#[repr(transparent)]
+pub struct GcErasedEdge {
+    inner: GcEdge<NonTraceable>,
+}
+
+impl GcErasedEdge {
+    /// Converts a typed heap edge into a type-erased edge.
+    #[inline]
+    #[must_use]
+    pub fn new<T: Trace>(edge: GcEdge<T>) -> Self {
+        let inner_ptr = GcEdge::into_raw(edge).cast();
+        // SAFETY: Type erasure preserves the allocation and its vtable. The raw
+        // pointer came from `GcEdge::into_raw` and is reconstructed exactly once.
+        Self {
+            inner: unsafe { GcEdge::from_raw(inner_ptr) },
+        }
+    }
+
+    /// Returns `true` if two erased edges point to the same allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        Gc::ptr_eq(this.inner.as_gc(), other.inner.as_gc())
+    }
+
+    /// Returns the allocation's concrete type id.
+    #[must_use]
+    pub fn type_id(&self) -> TypeId {
+        Gc::type_id(self.inner.as_gc())
+    }
+
+    /// Returns whether the allocation contains `T`.
+    #[must_use]
+    pub fn is<T: Trace + 'static>(&self) -> bool {
+        Gc::is::<T>(self.inner.as_gc())
+    }
+
+    /// Promotes this edge into an explicitly registered type-erased root.
+    #[must_use]
+    pub fn root(self) -> GcErased {
+        GcErased {
+            inner: self.inner.root(),
+        }
+    }
+
+    /// Returns a typed edge if the allocation contains `T`.
+    #[must_use]
+    pub fn downcast<T: Trace + 'static>(self) -> Option<GcEdge<T>> {
+        if !self.is::<T>() {
+            return None;
+        }
+        // SAFETY: The type id was checked above.
+        Some(unsafe { self.downcast_unchecked::<T>() })
+    }
+
+    /// Downcasts this edge without checking its concrete type.
+    ///
+    /// # Safety
+    /// The caller must ensure the allocation contains `T`.
+    #[must_use]
+    pub unsafe fn downcast_unchecked<T: Trace + 'static>(self) -> GcEdge<T> {
+        let inner_ptr = GcEdge::into_raw(self.inner).cast();
+        // SAFETY: Forwarded from this function's contract.
+        unsafe { GcEdge::from_raw(inner_ptr) }
+    }
+}
+
+impl Debug for GcErasedEdge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GcErasedEdge")
+            .field("inner", &self.inner.as_gc().inner_ptr)
+            .finish()
+    }
+}
+
+impl Finalize for GcErasedEdge {}
+
+unsafe impl Trace for GcErasedEdge {
+    custom_trace!(this, mark, {
+        mark(&this.inner);
+    });
+}
+
+impl Clone for GcErasedEdge {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
     }
 }
 
