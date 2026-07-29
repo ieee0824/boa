@@ -12,7 +12,7 @@ pub use ephemeron::{Ephemeron, EphemeronEdge};
 pub use gc::{Gc, GcErased, GcErasedEdge};
 pub use rooted::Rooted;
 pub use weak::{WeakGc, WeakGcEdge};
-pub use weak_map::WeakMap;
+pub use weak_map::{WeakMap, WeakMapEdge};
 
 pub(crate) use gc::NonTraceable;
 pub(crate) use weak_map::RawWeakMap;

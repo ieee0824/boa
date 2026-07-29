@@ -38,7 +38,7 @@ pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
 pub use pointers::{
     Ephemeron, EphemeronEdge, Gc, GcEdge, GcErased, GcErasedEdge, Rooted, WeakGc, WeakGcEdge,
-    WeakMap,
+    WeakMap, WeakMapEdge,
 };
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
@@ -282,9 +282,9 @@ impl Allocator {
 
     fn alloc_weak_map<K: Trace + ?Sized, V: Trace + Clone>() -> WeakMap<K, V> {
         let weak_map = WeakMap {
-            inner: Gc::new(GcRefCell::new(RawWeakMap::new())),
+            inner: Rooted::new(GcRefCell::new(RawWeakMap::new())),
         };
-        let weak = WeakGc::from_edge(WeakGcEdge::new_gc(&weak_map.inner));
+        let weak = WeakGc::new(&weak_map.inner);
 
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();

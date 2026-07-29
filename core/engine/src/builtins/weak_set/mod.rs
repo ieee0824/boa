@@ -22,7 +22,7 @@ use boa_gc::{Finalize, Trace};
 
 use super::iterable::IteratorHint;
 
-type NativeWeakSet = boa_gc::WeakMap<ErasedVTableObject, ()>;
+type NativeWeakSet = boa_gc::WeakMapEdge<ErasedVTableObject, ()>;
 
 #[derive(Debug, Trace, Finalize)]
 pub(crate) struct WeakSet;

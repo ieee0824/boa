@@ -6,13 +6,84 @@ use hashbrown::{
     hash_table::{Entry as RawEntry, Iter as RawIter},
 };
 
-use crate::{Allocator, EphemeronEdge, Finalize, Gc, GcRefCell, Rooted, Trace, custom_trace};
+use crate::{
+    Allocator, EphemeronEdge, Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace, custom_trace,
+};
 use std::{fmt, hash::BuildHasher, marker::PhantomData};
 
 /// A map that holds weak references to its keys and is traced by the garbage collector.
-#[derive(Clone, Debug, Default, Finalize)]
+#[derive(Clone, Debug, Finalize)]
 pub struct WeakMap<K: Trace + ?Sized + 'static, V: Trace + 'static> {
-    pub(crate) inner: Gc<GcRefCell<RawWeakMap<K, V>>>,
+    pub(crate) inner: Rooted<GcRefCell<RawWeakMap<K, V>>>,
+}
+
+impl<K: Trace + ?Sized, V: Trace> WeakMap<K, V> {
+    /// Converts this external map root into a heap edge.
+    #[must_use]
+    pub fn into_edge(self) -> WeakMapEdge<K, V> {
+        WeakMapEdge {
+            inner: self.inner.into_edge(),
+        }
+    }
+}
+
+/// A weak map stored as an edge inside the traced heap.
+#[derive(Clone, Debug, Finalize)]
+pub struct WeakMapEdge<K: Trace + ?Sized + 'static, V: Trace + 'static> {
+    pub(crate) inner: GcEdge<GcRefCell<RawWeakMap<K, V>>>,
+}
+
+unsafe impl<K: Trace + ?Sized + 'static, V: Trace + 'static> Trace for WeakMapEdge<K, V> {
+    custom_trace!(this, mark, {
+        mark(&this.inner);
+    });
+}
+
+impl<K: Trace + ?Sized, V: Trace + Clone> WeakMapEdge<K, V> {
+    /// Creates a weak map edge for storage inside a traced allocation.
+    #[must_use]
+    #[inline]
+    pub fn new() -> Self {
+        WeakMap::new().into_edge()
+    }
+
+    /// Inserts a key-value pair into the map.
+    #[inline]
+    pub fn insert(&mut self, key: &Rooted<K>, value: V) {
+        self.inner.borrow_mut().insert(key.as_gc(), value);
+    }
+
+    /// Removes a key from the map, returning its previous value.
+    #[inline]
+    pub fn remove(&mut self, key: &Rooted<K>) -> Option<V> {
+        self.inner.borrow_mut().remove(key.as_gc())
+    }
+
+    /// Returns whether the map contains the specified key.
+    #[must_use]
+    #[inline]
+    pub fn contains_key(&self, key: &Rooted<K>) -> bool {
+        self.inner.borrow().contains_key(key.as_gc())
+    }
+
+    /// Returns the value corresponding to the key.
+    #[must_use]
+    #[inline]
+    pub fn get(&self, key: &Rooted<K>) -> Option<V> {
+        self.inner.borrow().get(key.as_gc())
+    }
+}
+
+impl<K: Trace + ?Sized, V: Trace + Clone> Default for WeakMap<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<K: Trace + ?Sized, V: Trace + Clone> Default for WeakMapEdge<K, V> {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 unsafe impl<K: Trace + ?Sized + 'static, V: Trace + 'static> Trace for WeakMap<K, V> {

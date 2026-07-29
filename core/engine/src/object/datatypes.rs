@@ -14,7 +14,7 @@ use std::{
     sync::atomic,
 };
 
-use boa_gc::{EphemeronEdge, Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge, WeakMap};
+use boa_gc::{EphemeronEdge, Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge, WeakMapEdge};
 
 use super::internal_methods::{InternalObjectMethods, ORDINARY_INTERNAL_METHODS};
 
@@ -211,7 +211,7 @@ impl<T: Trace + ?Sized, V: Trace> JsData for EphemeronEdge<T, V> {}
 
 impl<T: Trace + ?Sized> JsData for GcRefCell<T> {}
 
-impl<K: Trace + ?Sized, V: Trace> JsData for WeakMap<K, V> {}
+impl<K: Trace + ?Sized, V: Trace> JsData for WeakMapEdge<K, V> {}
 
 /// Wrapper type to enforce consistent alignment for all [`JsData`] types.
 ///
