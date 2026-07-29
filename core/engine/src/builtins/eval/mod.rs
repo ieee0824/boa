@@ -236,7 +236,7 @@ impl Eval {
                 (e.0, e.1)
             } else {
                 (
-                    Rooted::from_gc(context.realm().environment().clone()),
+                    context.realm().environment(),
                     context.realm().scope().clone(),
                 )
             };

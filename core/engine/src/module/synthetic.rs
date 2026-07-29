@@ -356,7 +356,7 @@ impl SyntheticModule {
 
         let cb = Rooted::new(compiler.finish());
 
-        let mut envs = EnvironmentStack::new(Rooted::from_gc(global_env));
+        let mut envs = EnvironmentStack::new(global_env);
         envs.push_module(module_scope);
 
         for locator in exports {
