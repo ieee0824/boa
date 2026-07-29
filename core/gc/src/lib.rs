@@ -27,6 +27,7 @@ use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashMap,
     mem,
     ptr::NonNull,
 };
@@ -35,13 +36,23 @@ pub use crate::trace::{Finalize, Trace, Tracer};
 pub use boa_macros::{Finalize, Trace};
 pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
-pub use pointers::{Ephemeron, Gc, GcErased, WeakGc, WeakMap};
+pub use pointers::{Ephemeron, Gc, GcErased, Rooted, WeakGc, WeakMap};
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
 type ErasedWeakMapBoxPointer = NonNull<dyn ErasedWeakMapBox>;
 
+#[derive(Debug, Clone, Copy)]
+struct RootEntry {
+    // Read by the marker after the compatibility migration is complete. Tests
+    // exercise it now so registration cannot silently drift from the handle.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pointer: GcErasedPointer,
+    handles: usize,
+}
+
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
+thread_local!(static GC_ROOTS: RefCell<HashMap<usize, RootEntry>> = RefCell::new(HashMap::new()));
 thread_local!(static BOA_GC: RefCell<BoaGc> = RefCell::new( BoaGc {
     config: GcConfig::default(),
     runtime: GcRuntimeData::default(),
@@ -49,6 +60,36 @@ thread_local!(static BOA_GC: RefCell<BoaGc> = RefCell::new( BoaGc {
     weaks: Vec::default(),
     weak_maps: Vec::default(),
 }));
+
+fn register_root(pointer: GcErasedPointer) {
+    GC_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        let key = pointer.as_ptr().addr();
+        roots
+            .entry(key)
+            .and_modify(|entry| entry.handles += 1)
+            .or_insert(RootEntry { pointer, handles: 1 });
+    });
+}
+
+fn unregister_root(pointer: GcErasedPointer) {
+    GC_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        let key = pointer.as_ptr().addr();
+        let entry = roots
+            .get_mut(&key)
+            .expect("attempted to unregister an unknown GC root");
+        entry.handles -= 1;
+        if entry.handles == 0 {
+            roots.remove(&key);
+        }
+    });
+}
+
+#[cfg(test)]
+fn registered_roots() -> Vec<RootEntry> {
+    GC_ROOTS.with(|roots| roots.borrow().values().copied().collect())
+}
 
 #[derive(Debug, Clone, Copy)]
 struct GcConfig {
