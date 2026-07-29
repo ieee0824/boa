@@ -1,11 +1,11 @@
-use boa_macros::{Finalize, Trace};
+use boa_macros::Finalize;
 
 use super::SharedShape;
 
 /// This is a wrapper around [`SharedShape`] that ensures it's root shape.
 ///
 /// Represent the root shape that [`SharedShape`] transitions start from.
-#[derive(Debug, Clone, Trace, Finalize)]
+#[derive(Debug, Clone, Finalize)]
 pub struct RootShape {
     shape: SharedShape,
 }

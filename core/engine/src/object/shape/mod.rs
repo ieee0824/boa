@@ -14,7 +14,7 @@ use std::fmt::Debug;
 
 use std::ops::Deref;
 
-use boa_gc::{Finalize, GcEdge, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
 
 use crate::property::PropertyKey;
 
@@ -75,19 +75,34 @@ pub(crate) struct ChangeTransition<T> {
 }
 
 /// The internal representation of [`Shape`].
-#[derive(Debug, Trace, Finalize, Clone)]
+#[derive(Debug, Finalize, Clone)]
 enum Inner<U = Rooted<unique_shape::Inner>, S = Rooted<shared_shape::Inner>> {
     Unique(UniqueShape<U>),
     Shared(SharedShape<S>),
 }
 
 /// Represents the shape of an object.
-#[derive(Debug, Trace, Finalize, Clone)]
+#[derive(Debug, Finalize, Clone)]
 pub struct Shape<U = Rooted<unique_shape::Inner>, S = Rooted<shared_shape::Inner>> {
     inner: Inner<U, S>,
 }
 
 pub(crate) type ShapeEdge = Shape<GcEdge<unique_shape::Inner>, GcEdge<shared_shape::Inner>>;
+
+unsafe impl Trace for Inner<GcEdge<unique_shape::Inner>, GcEdge<shared_shape::Inner>> {
+    custom_trace!(this, mark, {
+        match this {
+            Self::Unique(shape) => mark(shape),
+            Self::Shared(shape) => mark(shape),
+        }
+    });
+}
+
+unsafe impl Trace for ShapeEdge {
+    custom_trace!(this, mark, {
+        mark(&this.inner);
+    });
+}
 
 impl Default for ShapeEdge {
     fn default() -> Self {

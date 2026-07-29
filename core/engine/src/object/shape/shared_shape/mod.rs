@@ -7,7 +7,7 @@ mod tests;
 use std::{collections::hash_map::RandomState, hash::Hash};
 
 use bitflags::bitflags;
-use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGcEdge, empty_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGcEdge, custom_trace, empty_trace};
 use indexmap::IndexMap;
 
 use crate::{JsObject, object::JsPrototype, property::PropertyKey};
@@ -115,9 +115,15 @@ pub struct Inner {
 }
 
 /// Represents a shared object shape.
-#[derive(Debug, Trace, Finalize, Clone)]
+#[derive(Debug, Finalize, Clone)]
 pub struct SharedShape<H = Rooted<Inner>> {
     inner: H,
+}
+
+unsafe impl Trace for SharedShape<GcEdge<Inner>> {
+    custom_trace!(this, mark, {
+        mark(&this.inner);
+    });
 }
 
 impl SharedShape {
