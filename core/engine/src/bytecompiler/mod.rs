@@ -49,7 +49,7 @@ use boa_ast::{
     property::MethodDefinitionKind,
     scope::{BindingLocator, BindingLocatorError, FunctionScopes, IdentifierReference, Scope},
 };
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_interner::{Interner, Sym};
 use boa_macros::js_str;
 use rustc_hash::FxHashMap;
@@ -740,9 +740,10 @@ impl<'ctx> ByteCompiler<'ctx> {
 
     #[inline]
     #[must_use]
-    pub(crate) fn push_function_to_constants(&mut self, function: Gc<CodeBlock>) -> u32 {
+    pub(crate) fn push_function_to_constants(&mut self, function: Rooted<CodeBlock>) -> u32 {
         let index = self.constants.len() as u32;
-        self.constants.push(Constant::Function(function.into()));
+        self.constants
+            .push(Constant::Function(function.into_edge()));
         index
     }
 

@@ -9,7 +9,7 @@ use boa_ast::{
     function::{FormalParameterList, FunctionBody},
     scope::{FunctionScopes, Scope},
 };
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_interner::Interner;
 
 /// `FunctionCompiler` is used to compile AST functions to bytecode.
@@ -122,7 +122,7 @@ impl FunctionCompiler {
         scopes: &FunctionScopes,
         contains_direct_eval: bool,
         interner: &mut Interner,
-    ) -> Gc<CodeBlock> {
+    ) -> Rooted<CodeBlock> {
         self.strict = self.strict || body.strict();
 
         let length = parameters.length();
@@ -231,6 +231,6 @@ impl FunctionCompiler {
 
         let code = compiler.finish();
 
-        Gc::new(code)
+        Rooted::new(code)
     }
 }

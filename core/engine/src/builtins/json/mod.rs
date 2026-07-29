@@ -34,7 +34,7 @@ use crate::{
     value::IntegerOrInfinity,
     vm::{CallFrame, CallFrameFlags, source_info::SourcePath},
 };
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
@@ -133,14 +133,14 @@ impl Json {
                 SourcePath::Json,
             );
             compiler.compile_statement_list(script.statements(), true, false);
-            Gc::new(compiler.finish())
+            Rooted::new(compiler.finish())
         };
 
         let realm = context.realm().clone();
 
         let env_fp = context.vm.environments.len() as u32;
         context.vm.push_frame_with_stack(
-            CallFrame::new(code_block, None, context.vm.environments.clone(), realm)
+            CallFrame::new_rooted(code_block, None, context.vm.environments.clone(), realm)
                 .with_env_fp(env_fp)
                 .with_flags(CallFrameFlags::EXIT_EARLY),
             JsValue::undefined(),

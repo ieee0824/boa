@@ -12,7 +12,7 @@ use crate::{
     realm::Realm,
     script::Script,
 };
-use boa_gc::{Finalize, Gc, Trace, custom_trace};
+use boa_gc::{Finalize, Rooted, Trace, custom_trace};
 use shadow_stack::ShadowStack;
 use std::{future::Future, ops::ControlFlow, pin::Pin, task};
 
@@ -417,8 +417,8 @@ impl Vm {
     pub(crate) fn new(realm: Realm) -> Self {
         Self {
             frames: Vec::with_capacity(16),
-            frame: CallFrame::new(
-                Gc::new(CodeBlock::new(JsString::default(), 0, true)),
+            frame: CallFrame::new_rooted(
+                Rooted::new(CodeBlock::new(JsString::default(), 0, true)),
                 None,
                 EnvironmentStack::new(realm.environment().clone()),
                 realm.clone(),

@@ -673,8 +673,7 @@ impl BuiltInFunctionObject {
             );
 
         let environments = context.vm.environments.pop_to_global();
-        let function_object =
-            crate::vm::create_function_object(Rooted::from_gc(code), prototype, context);
+        let function_object = crate::vm::create_function_object(code, prototype, context);
         context.vm.environments.extend(environments);
 
         Ok(function_object)
