@@ -285,7 +285,10 @@ impl Stack {
 
     /// Get the async generator object for the given frame.
     #[track_caller]
-    pub(crate) fn async_generator_object<H, E>(&self, frame: &CallFrame<H, E>) -> Option<JsObject>
+    pub(crate) fn async_generator_object<H, E, R>(
+        &self,
+        frame: &CallFrame<H, E, R>,
+    ) -> Option<JsObject>
     where
         H: std::ops::Deref<Target = CodeBlock>,
     {
