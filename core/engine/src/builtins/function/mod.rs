@@ -214,9 +214,9 @@ impl JsData for OrdinaryFunction {
 impl OrdinaryFunction {
     pub(crate) fn new(
         code: Rooted<CodeBlock>,
-        environments: EnvironmentStack,
+        environments: &EnvironmentStack,
         script_or_module: Option<ActiveRunnable>,
-        realm: Realm,
+        realm: &Realm,
     ) -> Self {
         Self {
             code: code.into_edge(),

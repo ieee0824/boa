@@ -1190,7 +1190,7 @@ impl JsPromise {
     #[cfg(feature = "experimental")]
     pub(crate) fn await_native(
         &self,
-        continuation: crate::native_function::NativeCoroutine,
+        continuation: &crate::native_function::NativeCoroutine,
         context: &mut Context,
     ) {
         use crate::{
@@ -1235,11 +1235,11 @@ impl JsPromise {
                         continuation.call(Ok(args.get_or_undefined(0).clone()), context)
                     {
                         JsPromise::resolve(value, context)
-                            .await_native(continuation.to_rooted(), context);
+                            .await_native(&continuation.to_rooted(), context);
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    r#gen.call_frame = context.vm.pop_frame().map(|frame| frame.into_edge());
+                    r#gen.call_frame = context.vm.pop_frame().map(crate::vm::CallFrame::into_edge);
                     assert!(r#gen.call_frame.is_some());
 
                     if let Some(async_generator) = async_generator {
@@ -1299,11 +1299,11 @@ impl JsPromise {
                         )
                     {
                         JsPromise::resolve(value, context)
-                            .await_native(continuation.to_rooted(), context);
+                            .await_native(&continuation.to_rooted(), context);
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    r#gen.call_frame = context.vm.pop_frame().map(|frame| frame.into_edge());
+                    r#gen.call_frame = context.vm.pop_frame().map(crate::vm::CallFrame::into_edge);
                     assert!(r#gen.call_frame.is_some());
 
                     if let Some(async_generator) = async_generator {

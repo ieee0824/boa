@@ -610,6 +610,7 @@ struct VersionedStats {
     es13: Statistics,
     es14: Statistics,
     es15: Statistics,
+    es16: Statistics,
 }
 
 impl<'de> Deserialize<'de> for VersionedStats {
@@ -632,6 +633,8 @@ impl<'de> Deserialize<'de> for VersionedStats {
             es14: Option<Statistics>,
             #[serde(default)]
             es15: Option<Statistics>,
+            #[serde(default)]
+            es16: Option<Statistics>,
         }
 
         let inner = Inner::deserialize(deserializer)?;
@@ -648,9 +651,11 @@ impl<'de> Deserialize<'de> for VersionedStats {
             es13,
             es14,
             es15,
+            es16,
         } = inner;
         let es14 = es14.unwrap_or(es13);
         let es15 = es15.unwrap_or(es14);
+        let es16 = es16.unwrap_or(es15);
 
         Ok(Self {
             es5,
@@ -664,6 +669,7 @@ impl<'de> Deserialize<'de> for VersionedStats {
             es13,
             es14,
             es15,
+            es16,
         })
     }
 }
@@ -694,6 +700,7 @@ impl VersionedStats {
             SpecEdition::ES13 => self.es13,
             SpecEdition::ES14 => self.es14,
             SpecEdition::ES15 => self.es15,
+            SpecEdition::ES16 => self.es16,
             SpecEdition::ESNext => return None,
         };
         Some(stats)
@@ -714,6 +721,7 @@ impl VersionedStats {
             SpecEdition::ES13 => &mut self.es13,
             SpecEdition::ES14 => &mut self.es14,
             SpecEdition::ES15 => &mut self.es15,
+            SpecEdition::ES16 => &mut self.es16,
             SpecEdition::ESNext => return None,
         };
         Some(stats)
@@ -736,6 +744,7 @@ impl Add for VersionedStats {
             es13: self.es13 + rhs.es13,
             es14: self.es14 + rhs.es14,
             es15: self.es15 + rhs.es15,
+            es16: self.es16 + rhs.es16,
         }
     }
 }
@@ -753,6 +762,7 @@ impl AddAssign for VersionedStats {
         self.es13 += rhs.es13;
         self.es14 += rhs.es14;
         self.es15 += rhs.es15;
+        self.es16 += rhs.es16;
     }
 }
 
