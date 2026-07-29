@@ -33,7 +33,7 @@ use crate::{
         },
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
-    realm::Realm,
+    realm::{Realm, RealmEdge},
     string::StaticJsStrings,
     symbol::JsSymbol,
     value::IntegerOrInfinity,
@@ -181,7 +181,7 @@ pub struct OrdinaryFunction {
     pub(crate) script_or_module: Option<ActiveRunnable>,
 
     /// The [`Realm`] the function is defined in.
-    pub(crate) realm: Realm,
+    pub(crate) realm: RealmEdge,
 
     /// The `[[Fields]]` internal slot.
     fields: ThinVec<ClassFieldDefinition>,
@@ -223,7 +223,7 @@ impl OrdinaryFunction {
             environments: environments.to_edges(),
             home_object: None,
             script_or_module,
-            realm,
+            realm: realm.to_edge(),
             fields: ThinVec::default(),
             private_methods: ThinVec::default(),
         }
@@ -293,8 +293,8 @@ impl OrdinaryFunction {
 
     /// Gets the `Realm` from where this function originates.
     #[must_use]
-    pub const fn realm(&self) -> &Realm {
-        &self.realm
+    pub fn realm(&self) -> Realm {
+        self.realm.to_rooted()
     }
 
     /// Checks if this function is an ordinary function.

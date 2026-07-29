@@ -817,7 +817,7 @@ impl JsObject {
     /// [spec]: https://tc39.es/ecma262/#sec-getfunctionrealm
     pub(crate) fn get_function_realm(&self, context: &mut Context) -> JsResult<Realm> {
         if let Some(fun) = self.downcast_ref::<OrdinaryFunction>() {
-            return Ok(fun.realm().clone());
+            return Ok(fun.realm());
         }
 
         if let Some(f) = self.downcast_ref::<NativeFunctionObject>() {
