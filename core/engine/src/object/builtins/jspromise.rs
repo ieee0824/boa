@@ -1405,3 +1405,31 @@ impl Future for JsFuture {
         task::Poll::Pending
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::JsPromise;
+    use crate::{Context, JsValue};
+
+    #[test]
+    fn js_future_state_survives_forced_collection() {
+        let mut context = Context::default();
+        let (promise, resolvers) = JsPromise::new_pending(&mut context);
+        let future = promise.into_js_future(&mut context);
+
+        // The Rust future is the external owner of the shared state. The
+        // resolving functions retain only heap edges to the same allocation.
+        boa_gc::force_collect();
+
+        resolvers
+            .resolve
+            .call(&JsValue::undefined(), &[42.into()], &mut context)
+            .expect("resolving a native promise must succeed");
+        context.run_jobs().expect("promise jobs must complete");
+
+        assert_eq!(
+            futures_lite::future::block_on(future).expect("the promise must fulfill"),
+            JsValue::from(42)
+        );
+    }
+}
