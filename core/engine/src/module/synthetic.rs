@@ -264,7 +264,7 @@ impl SyntheticModule {
     }
 
     /// Creates a new synthetic module.
-    pub(super) fn new(names: FxHashSet<JsString>, eval_steps: SyntheticModuleInitializer) -> Self {
+    pub(super) fn new(names: FxHashSet<JsString>, eval_steps: &SyntheticModuleInitializer) -> Self {
         Self {
             export_names: names,
             eval_steps: eval_steps.to_edge(),

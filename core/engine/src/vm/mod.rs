@@ -583,7 +583,7 @@ impl Context {
             )
         };
 
-        println!("{}", &**frame.code_block());
+        println!("{}", **frame.code_block());
         println!(
             "{msg:-^width$}",
             width = Self::COLUMN_WIDTH * Self::NUMBER_OF_COLUMNS - 10

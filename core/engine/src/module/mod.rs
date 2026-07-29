@@ -190,6 +190,7 @@ impl Module {
     ///
     /// [spec]: https://tc39.es/proposal-json-modules/#sec-createsyntheticmodule
     #[inline]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn synthetic(
         export_names: &[JsString],
         evaluation_steps: SyntheticModuleInitializer,
@@ -199,7 +200,7 @@ impl Module {
     ) -> Self {
         let names = export_names.iter().cloned().collect();
         let realm = realm.unwrap_or_else(|| context.realm().clone());
-        let synth = SyntheticModule::new(names, evaluation_steps);
+        let synth = SyntheticModule::new(names, &evaluation_steps);
 
         Self {
             inner: Gc::new(ModuleRepr {

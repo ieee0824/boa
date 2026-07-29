@@ -1073,9 +1073,9 @@ pub(crate) fn create_function_object(
     let is_generator = code.is_generator();
     let function = OrdinaryFunction::new(
         code,
-        context.vm.environments.clone(),
+        &context.vm.environments,
         script_or_module,
-        context.realm().clone(),
+        context.realm(),
     );
 
     let templates = context.intrinsics().templates();
@@ -1145,9 +1145,9 @@ pub(crate) fn create_function_object_fast(
     let has_prototype_property = code.has_prototype_property();
     let function = OrdinaryFunction::new(
         code,
-        context.vm.environments.clone(),
+        &context.vm.environments,
         script_or_module,
-        context.realm().clone(),
+        context.realm(),
     );
 
     if is_generator {
