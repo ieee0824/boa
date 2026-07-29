@@ -700,6 +700,7 @@ mod in_operator {
 /// be indistinguishable from concatenation, so it holds either way.
 mod string_append {
     use super::{TestAction, run_test_actions};
+    use crate::{Context, Source};
     use boa_macros::js_str;
     use indoc::indoc;
 
@@ -1044,6 +1045,226 @@ mod string_append {
             TestAction::assert_eq("var v = 'a'; v += undefined; v", js_str!("aundefined")),
             TestAction::assert_eq("var w = 'a'; w += [1, 2]; w", js_str!("a1,2")),
             TestAction::assert("var x = 1n; x += 2n; x === 3n"),
+        ]);
+    }
+
+    /// `s += expr` must read `s` *before* evaluating `expr`, and the in-place append
+    /// clears the binding's register, so an `expr` that assigns to `s` is where this
+    /// breaks first.
+    #[test]
+    fn the_target_is_read_before_the_right_hand_side_runs() {
+        run_test_actions([
+            // The assignment inside the right-hand side is overwritten by the
+            // compound assignment, but the value added must be the *old* one.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "a";
+                      s += (s = "b", "c");
+                      return s;
+                    })()
+                "#},
+                js_str!("ac"),
+            ),
+            // Same, with the target long enough to have been built by appending.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "";
+                      for (var i = 0; i < 20; i++) { s += "ab"; }
+                      s += (s = "clobbered", "!");
+                      return s.length + ":" + s.slice(-3);
+                    })()
+                "#},
+                js_str!("41:ab!"),
+            ),
+            // The right-hand side assigning a non-string must not matter either.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "a";
+                      s += (s = 5, "c");
+                      return s;
+                    })()
+                "#},
+                js_str!("ac"),
+            ),
+            // Reading the target from inside the right-hand side sees its old value.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "a";
+                      s += (function () { return s; })();
+                      return s;
+                    })()
+                "#},
+                js_str!("aa"),
+            ),
+        ]);
+    }
+
+    /// A non-string right-hand side goes through `ToPrimitive`, which runs user code
+    /// that can read the target. The binding must still hold its value at that point,
+    /// so the append path's register clearing must not have happened yet.
+    #[test]
+    fn a_coercing_right_hand_side_still_sees_the_target() {
+        run_test_actions([
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "a";
+                      s += { toString() { return String(s); } };
+                      return s;
+                    })()
+                "#},
+                js_str!("aa"),
+            ),
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "ab";
+                      s += "cd";
+                      s += { valueOf() { return s.length; } };
+                      return s;
+                    })()
+                "#},
+                js_str!("abcd4"),
+            ),
+        ]);
+    }
+
+    /// Every test above is written to be indistinguishable from concatenation, which
+    /// means none of them can tell whether the append path ran at all — in an earlier
+    /// revision they all passed while it never fired once. This one can: the append
+    /// path grows the allocation geometrically, so a string it built carries slack,
+    /// while `concat` always allocates exactly.
+    #[test]
+    fn the_in_place_path_is_actually_taken() {
+        let mut context = Context::default();
+
+        let built = context
+            .eval(Source::from_bytes(
+                r"(function () {
+                    var s = '';
+                    for (var i = 0; i < 40; i++) { s += 'ab'; }
+                    return s;
+                })()",
+            ))
+            .expect("appending in a loop should evaluate")
+            .as_string()
+            .expect("the loop returns a string");
+
+        assert_eq!(built.len(), 80);
+        assert!(
+            built.capacity().expect("not static") > built.len(),
+            "a string built by appending should carry the slack its growth left \
+             behind, but capacity {:?} equals its length {}, which is what \
+             concatenation produces — the append path was not taken",
+            built.capacity(),
+            built.len(),
+        );
+
+        // The opposite direction, so the assertion above is known to tell the two
+        // apart: concatenating into a fresh binding allocates exactly.
+        let concatenated = context
+            .eval(Source::from_bytes(
+                r"(function () {
+                    var a = 'ab';
+                    var b = a + 'cd';
+                    return b;
+                })()",
+            ))
+            .expect("concatenation should evaluate")
+            .as_string()
+            .expect("a string");
+
+        assert_eq!(concatenated.capacity(), Some(concatenated.len()));
+    }
+
+    /// A string another holder can see must be copied instead, observed through the
+    /// allocation rather than the contents.
+    #[test]
+    fn a_shared_string_is_copied_rather_than_appended_to() {
+        let mut context = Context::default();
+
+        let held = context
+            .eval(Source::from_bytes(
+                r"(function () {
+                    var s = 'ab';
+                    for (var i = 0; i < 40; i++) { s += 'cd'; }
+                    globalThis.held = s;
+                    s += 'ef';
+                    return globalThis.held;
+                })()",
+            ))
+            .expect("should evaluate")
+            .as_string()
+            .expect("a string");
+
+        // `held` was captured before the final append, so it must still be the
+        // shorter string: the append cannot have written into its allocation.
+        assert_eq!(held.len(), 82);
+        assert!(held.to_std_string_escaped().ends_with("cd"));
+    }
+
+    /// The binding kinds differ in where the value lives, and only a register-held
+    /// local can take the append path. All of them must produce the same string.
+    #[test]
+    fn every_binding_kind_builds_the_same_string() {
+        run_test_actions([
+            // `var` in a function: a register local.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () { var s = ""; for (var i = 0; i < 8; i++) { s += "ab"; } return s; })()
+                "#},
+                js_str!("abababababababab"),
+            ),
+            // `let` in a block.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () { let s = ""; for (let i = 0; i < 8; i++) { s += "ab"; } return s; })()
+                "#},
+                js_str!("abababababababab"),
+            ),
+            // A parameter.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function (s) { for (var i = 0; i < 8; i++) { s += "ab"; } return s; })("")
+                "#},
+                js_str!("abababababababab"),
+            ),
+            // Captured by a closure, so the binding cannot be a plain register.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var s = "";
+                      var add = function () { s += "ab"; };
+                      for (var i = 0; i < 8; i++) { add(); }
+                      return s;
+                    })()
+                "#},
+                js_str!("abababababababab"),
+            ),
+            // A global.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    globalThis.g = "";
+                    for (var gi = 0; gi < 8; gi++) { globalThis.g += "ab"; }
+                    globalThis.g
+                "#},
+                js_str!("abababababababab"),
+            ),
+            // An object property, which is a different access path entirely.
+            TestAction::assert_eq(
+                indoc! {r#"
+                    (function () {
+                      var o = { s: "" };
+                      for (var i = 0; i < 8; i++) { o.s += "ab"; }
+                      return o.s;
+                    })()
+                "#},
+                js_str!("abababababababab"),
+            ),
         ]);
     }
 }

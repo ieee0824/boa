@@ -2092,8 +2092,21 @@ generate_opcodes! {
     /// [spec]: https://tc39.es/ecma262/#sec-createglobalvarbinding
     CreateGlobalVarBinding { configurable: VaryingOperand, name_index: VaryingOperand },
 
-    /// Reserved [`Opcode`].
-    Reserved1 => Reserved,
+    /// Binary `+` operator for a compound assignment whose target is a local held in
+    /// a register.
+    ///
+    /// Same result as [`Opcode::Add`] with `value` as both an operand and the
+    /// destination, but also told which register the target binding lives in, which
+    /// lets the string case drop that second reference before extending the string in
+    /// place. See the opcode's implementation for why that is needed.
+    ///
+    /// Placed here, in a reserved slot rather than next to `Add`, so that every
+    /// existing opcode keeps its number.
+    ///
+    /// - Registers
+    ///   - Input: value, rhs, local
+    ///   - Output: value
+    AddAssignLocal { local: VaryingOperand, value: VaryingOperand, rhs: VaryingOperand },
     /// Reserved [`Opcode`].
     Reserved2 => Reserved,
     /// Reserved [`Opcode`].

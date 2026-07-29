@@ -1,5 +1,7 @@
 use crate::{
-    bytecompiler::{Access, BindingAccessOpcode, ByteCompiler, Label, Register, ToJsString},
+    bytecompiler::{
+        Access, BindingAccessOpcode, BindingKind, ByteCompiler, Label, Register, ToJsString,
+    },
     vm::opcode::BindingOpcode,
 };
 use boa_ast::{
@@ -37,10 +39,14 @@ impl ByteCompiler<'_> {
                 AssignOp::BoolAnd | AssignOp::BoolOr | AssignOp::Coalesce
             );
 
+            // The register the target binding lives in, when it lives in one. Only
+            // `+=` uses it, and only to reach `AddAssignLocal`: see that opcode for
+            // why appending to a string needs to know about the second holder.
             let emit = |compiler: &mut Self,
                         dst: &Register,
                         expr: &Expression,
-                        op: AssignOp|
+                        op: AssignOp,
+                        local: Option<u32>|
              -> Option<Label> {
                 if short_circuit {
                     let next = compiler.next_opcode_location();
@@ -62,11 +68,21 @@ impl ByteCompiler<'_> {
                     let rhs = compiler.register_allocator.alloc();
                     compiler.compile_expr(expr, &rhs);
                     match op {
-                        AssignOp::Add => compiler.bytecode.emit_add(
-                            dst.variable(),
-                            dst.variable(),
-                            rhs.variable(),
-                        ),
+                        AssignOp::Add => {
+                            if let Some(local) = local {
+                                compiler.bytecode.emit_add_assign_local(
+                                    local.into(),
+                                    dst.variable(),
+                                    rhs.variable(),
+                                );
+                            } else {
+                                compiler.bytecode.emit_add(
+                                    dst.variable(),
+                                    dst.variable(),
+                                    rhs.variable(),
+                                );
+                            }
+                        }
                         AssignOp::Sub => compiler.bytecode.emit_sub(
                             dst.variable(),
                             dst.variable(),
@@ -151,7 +167,14 @@ impl ByteCompiler<'_> {
                         );
                     }
 
-                    early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
+                    // `AddAssignLocal` clears this register, and the trailing
+                    // binding write below is what stores the result back into it.
+                    let local = match index {
+                        BindingKind::Local(local) => local,
+                        BindingKind::Stack(_) | BindingKind::Global(_) => None,
+                    };
+
+                    early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op(), local);
 
                     if is_lexical {
                         match compiler.lexical_scope.set_mutable_binding(name.clone()) {
@@ -185,7 +208,7 @@ impl ByteCompiler<'_> {
 
                             compiler.emit_get_property_by_name(dst, &object, &object, name.sym());
 
-                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
+                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op(), None);
 
                             compiler.emit_set_property_by_name(dst, &object, &object, name.sym());
 
@@ -205,7 +228,7 @@ impl ByteCompiler<'_> {
                                 object.variable(),
                             );
 
-                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
+                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op(), None);
 
                             compiler.bytecode.emit_set_property_by_value(
                                 dst.variable(),
@@ -230,7 +253,7 @@ impl ByteCompiler<'_> {
                             index.into(),
                         );
 
-                        early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
+                        early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op(), None);
 
                         compiler.bytecode.emit_set_private_field(
                             dst.variable(),
@@ -249,7 +272,7 @@ impl ByteCompiler<'_> {
 
                             compiler.emit_get_property_by_name(dst, &receiver, &object, name.sym());
 
-                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
+                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op(), None);
 
                             compiler.emit_set_property_by_name(dst, &receiver, &object, name.sym());
 
@@ -272,7 +295,7 @@ impl ByteCompiler<'_> {
                                 object.variable(),
                             );
 
-                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op());
+                            early_exit = emit(&mut compiler, dst, assign.rhs(), assign.op(), None);
 
                             compiler.bytecode.emit_set_property_by_value(
                                 dst.variable(),

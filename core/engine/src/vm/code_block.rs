@@ -358,6 +358,9 @@ impl CodeBlock {
             | Instruction::CreateUnmappedArgumentsObject { dst }
             | Instruction::RestParameterInit { dst }
             | Instruction::PushNewArray { dst } => format!("dst:{dst}"),
+            Instruction::AddAssignLocal { local, value, rhs } => {
+                format!("local:{local}, value:{value}, rhs:{rhs}")
+            }
             Instruction::Add { lhs, rhs, dst }
             | Instruction::Sub { lhs, rhs, dst }
             | Instruction::Div { lhs, rhs, dst }
@@ -842,8 +845,7 @@ impl CodeBlock {
             | Instruction::NewSpread
             | Instruction::SuperCallSpread
             | Instruction::PopPrivateEnvironment => String::new(),
-            Instruction::Reserved1
-            | Instruction::Reserved2
+            Instruction::Reserved2
             | Instruction::Reserved3
             | Instruction::Reserved4
             | Instruction::Reserved5

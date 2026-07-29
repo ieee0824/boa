@@ -438,6 +438,21 @@ impl Vm {
         self.stack.stack[self.frame.rp as usize + index] = value;
     }
 
+    /// Moves the value out of a register, leaving `undefined` behind.
+    ///
+    /// Taking rather than cloning is what lets an operation see a reference count of
+    /// one for a value only this register holds, which is the condition for mutating
+    /// it in place. Only sound when the register's value is dead, and when nothing
+    /// between the take and the write-back can fail: on an early return the register
+    /// is left holding `undefined` rather than its old value.
+    #[track_caller]
+    pub(crate) fn take_register(&mut self, index: usize) -> JsValue {
+        std::mem::replace(
+            &mut self.stack.stack[self.frame.rp as usize + index],
+            JsValue::undefined(),
+        )
+    }
+
     #[track_caller]
     pub(crate) fn get_register(&self, index: usize) -> &JsValue {
         self.stack
