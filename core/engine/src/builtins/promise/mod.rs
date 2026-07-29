@@ -25,7 +25,7 @@ use crate::{
     symbol::JsSymbol,
     value::JsValue,
 };
-use boa_gc::{Finalize, Gc, GcRefCell, Trace, custom_trace};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, custom_trace};
 use boa_macros::JsData;
 use std::{cell::Cell, rc::Rc};
 use tap::{Conv, Pipe};
@@ -238,7 +238,7 @@ impl PromiseCapability {
 
         // 2. NOTE: C is assumed to be a constructor function that supports the parameter conventions of the Promise constructor (see 27.2.3.1).
         // 3. Let promiseCapability be the PromiseCapability Record { [[Promise]]: undefined, [[Resolve]]: undefined, [[Reject]]: undefined }.
-        let promise_capability = Gc::new(GcRefCell::new(RejectResolve {
+        let promise_capability = Rooted::new(GcRefCell::new(RejectResolve {
             reject: JsValue::undefined(),
             resolve: JsValue::undefined(),
         }));
@@ -276,7 +276,7 @@ impl PromiseCapability {
                     // e. Return undefined.
                     Ok(JsValue::undefined())
                 },
-                promise_capability.clone(),
+                promise_capability.clone().into_edge(),
             ),
         )
         .name("")
@@ -635,14 +635,14 @@ impl Promise {
             #[unsafe_ignore_trace]
             already_called: Rc<Cell<bool>>,
             index: usize,
-            values: Gc<GcRefCell<Vec<JsValue>>>,
+            values: GcEdge<GcRefCell<Vec<JsValue>>>,
             capability_resolve: JsFunction,
             #[unsafe_ignore_trace]
             remaining_elements_count: Rc<Cell<i32>>,
         }
 
         // 1. Let values be a new empty List.
-        let values = Gc::new(GcRefCell::new(Vec::new()));
+        let values = Rooted::new(GcRefCell::new(Vec::new()));
 
         // 2. Let remainingElementsCount be the Record { [[Value]]: 1 }.
         let remaining_elements_count = Rc::new(Cell::new(1));
@@ -718,7 +718,7 @@ impl Promise {
                     ResolveElementCaptures {
                         already_called: Rc::new(Cell::new(false)),
                         index,
-                        values: values.clone(),
+                        values: values.clone().into_edge(),
                         capability_resolve: result_capability.functions.resolve.clone(),
                         remaining_elements_count: remaining_elements_count.clone(),
                     },
@@ -850,14 +850,14 @@ impl Promise {
             #[unsafe_ignore_trace]
             already_called: Rc<Cell<bool>>,
             index: usize,
-            values: Gc<GcRefCell<Vec<JsValue>>>,
+            values: GcEdge<GcRefCell<Vec<JsValue>>>,
             capability: JsFunction,
             #[unsafe_ignore_trace]
             remaining_elements: Rc<Cell<i32>>,
         }
 
         // 1. Let values be a new empty List.
-        let values = Gc::new(GcRefCell::new(Vec::new()));
+        let values = Rooted::new(GcRefCell::new(Vec::new()));
 
         // 2. Let remainingElementsCount be the Record { [[Value]]: 1 }.
         let remaining_elements_count = Rc::new(Cell::new(1));
@@ -954,7 +954,7 @@ impl Promise {
                     ResolveRejectElementCaptures {
                         already_called: Rc::new(Cell::new(false)),
                         index,
-                        values: values.clone(),
+                        values: values.clone().into_edge(),
                         capability: result_capability.functions.resolve.clone(),
                         remaining_elements: remaining_elements_count.clone(),
                     },
@@ -1044,7 +1044,7 @@ impl Promise {
                     ResolveRejectElementCaptures {
                         already_called: Rc::new(Cell::new(false)),
                         index,
-                        values: values.clone(),
+                        values: values.clone().into_edge(),
                         capability: result_capability.functions.resolve.clone(),
                         remaining_elements: remaining_elements_count.clone(),
                     },
@@ -1173,14 +1173,14 @@ impl Promise {
             #[unsafe_ignore_trace]
             already_called: Rc<Cell<bool>>,
             index: usize,
-            errors: Gc<GcRefCell<Vec<JsValue>>>,
+            errors: GcEdge<GcRefCell<Vec<JsValue>>>,
             capability_reject: JsFunction,
             #[unsafe_ignore_trace]
             remaining_elements_count: Rc<Cell<i32>>,
         }
 
         // 1. Let errors be a new empty List.
-        let errors = Gc::new(GcRefCell::new(Vec::new()));
+        let errors = Rooted::new(GcRefCell::new(Vec::new()));
 
         // 2. Let remainingElementsCount be the Record { [[Value]]: 1 }.
         let remaining_elements_count = Rc::new(Cell::new(1));
@@ -1265,7 +1265,7 @@ impl Promise {
                     RejectElementCaptures {
                         already_called: Rc::new(Cell::new(false)),
                         index,
-                        errors: errors.clone(),
+                        errors: errors.clone().into_edge(),
                         capability_reject: result_capability.functions.reject.clone(),
                         remaining_elements_count: remaining_elements_count.clone(),
                     },
@@ -2083,7 +2083,7 @@ impl Promise {
         // 1. Let alreadyResolved be the Record { [[Value]]: false }.
         // 5. Set resolve.[[Promise]] to promise.
         // 6. Set resolve.[[AlreadyResolved]] to alreadyResolved.
-        let promise = Gc::new(Cell::new(Some(promise.clone())));
+        let promise = Rooted::new(Cell::new(Some(promise.clone())));
 
         // 2. Let stepsResolve be the algorithm steps defined in Promise Resolve Functions.
         // 3. Let lengthResolve be the number of non-optional parameters of the function definition in Promise Resolve Functions.
@@ -2172,7 +2172,7 @@ impl Promise {
                     // 16. Return undefined.
                     Ok(JsValue::undefined())
                 },
-                promise.clone(),
+                promise.clone().into_edge(),
             ),
         )
         .name("")
@@ -2207,7 +2207,7 @@ impl Promise {
                     // 8. Return undefined.
                     Ok(JsValue::undefined())
                 },
-                promise,
+                promise.into_edge(),
             ),
         )
         .name("")
