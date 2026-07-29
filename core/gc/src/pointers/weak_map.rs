@@ -86,12 +86,6 @@ impl<K: Trace + ?Sized, V: Trace + Clone> Default for WeakMapEdge<K, V> {
     }
 }
 
-unsafe impl<K: Trace + ?Sized + 'static, V: Trace + 'static> Trace for WeakMap<K, V> {
-    custom_trace!(this, mark, {
-        mark(&this.inner);
-    });
-}
-
 impl<K: Trace + ?Sized, V: Trace + Clone> WeakMap<K, V> {
     /// Creates a new `WeakMap`.
     #[must_use]
