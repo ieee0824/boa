@@ -1222,7 +1222,11 @@ impl JsPromise {
                     let async_generator = r#gen.async_generator_object();
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    let frame = r#gen.call_frame.take().expect("should have a call frame");
+                    let frame = r#gen
+                        .call_frame
+                        .take()
+                        .expect("should have a call frame")
+                        .into_rooted();
                     let rp = frame.rp;
                     context.vm.push_frame(frame);
                     context.vm.frame_mut().set_register_pointer(rp);
@@ -1235,7 +1239,7 @@ impl JsPromise {
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    r#gen.call_frame = context.vm.pop_frame();
+                    r#gen.call_frame = context.vm.pop_frame().map(|frame| frame.into_edge());
                     assert!(r#gen.call_frame.is_some());
 
                     if let Some(async_generator) = async_generator {
@@ -1279,7 +1283,11 @@ impl JsPromise {
                     let async_generator = r#gen.async_generator_object();
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    let frame = r#gen.call_frame.take().expect("should have a call frame");
+                    let frame = r#gen
+                        .call_frame
+                        .take()
+                        .expect("should have a call frame")
+                        .into_rooted();
                     let rp = frame.rp;
                     context.vm.push_frame(frame);
                     context.vm.frame_mut().set_register_pointer(rp);
@@ -1295,7 +1303,7 @@ impl JsPromise {
                     }
 
                     std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
-                    r#gen.call_frame = context.vm.pop_frame();
+                    r#gen.call_frame = context.vm.pop_frame().map(|frame| frame.into_edge());
                     assert!(r#gen.call_frame.is_some());
 
                     if let Some(async_generator) = async_generator {

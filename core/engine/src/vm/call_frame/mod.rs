@@ -9,7 +9,7 @@ use crate::{
 };
 use boa_ast::Position;
 use boa_ast::scope::BindingLocator;
-use boa_gc::{Finalize, Gc, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, Rooted, Trace, custom_trace};
 use boa_string::JsString;
 use thin_vec::ThinVec;
 
@@ -40,9 +40,9 @@ pub struct CallFrameLocation {
 }
 
 /// A `CallFrame` holds the state of a function call.
-#[derive(Clone, Debug, Finalize, Trace)]
-pub struct CallFrame {
-    pub(crate) code_block: Gc<CodeBlock>,
+#[derive(Clone, Debug, Finalize)]
+pub struct CallFrame<H = Rooted<CodeBlock>> {
+    pub(crate) code_block: H,
     pub(crate) pc: u32,
     /// The register pointer, points to the first register in the stack.
     // TODO: Check if storing the frame pointer instead of argument count and computing the
@@ -57,7 +57,6 @@ pub struct CallFrame {
 
     // The stack of bindings being updated.
     // SAFETY: Nothing in `BindingLocator` requires tracing, so this is safe.
-    #[unsafe_ignore_trace]
     pub(crate) binding_stack: Vec<BindingLocator>,
 
     /// How many iterations a loop has done.
@@ -73,16 +72,30 @@ pub struct CallFrame {
     pub(crate) realm: Realm,
 
     // SAFETY: Nothing in `CallFrameFlags` requires tracing, so this is safe.
-    #[unsafe_ignore_trace]
     pub(crate) flags: CallFrameFlags,
 }
 
+unsafe impl<H: Trace> Trace for CallFrame<H> {
+    custom_trace!(this, mark, {
+        mark(&this.code_block);
+        mark(&this.iterators);
+        mark(&this.active_runnable);
+        mark(&this.environments);
+        mark(&this.realm);
+    });
+}
+
+pub(crate) type SuspendedCallFrame = CallFrame<GcEdge<CodeBlock>>;
+
 /// ---- `CallFrame` public API ----
-impl CallFrame {
+impl<H> CallFrame<H>
+where
+    H: std::ops::Deref<Target = CodeBlock>,
+{
     /// Retrieves the [`CodeBlock`] of this call frame.
     #[inline]
     #[must_use]
-    pub const fn code_block(&self) -> &Gc<CodeBlock> {
+    pub const fn code_block(&self) -> &H {
         &self.code_block
     }
 
@@ -124,12 +137,44 @@ impl CallFrame {
             argument_count: 0,
             iterators: ThinVec::new(),
             binding_stack: Vec::new(),
-            code_block,
+            code_block: Rooted::from_gc(code_block),
             loop_iteration_count: 0,
             active_runnable,
             environments,
             realm,
             flags: CallFrameFlags::empty(),
+        }
+    }
+
+    pub(crate) fn into_edge(self) -> SuspendedCallFrame {
+        let Self {
+            code_block,
+            pc,
+            rp,
+            argument_count,
+            env_fp,
+            iterators,
+            binding_stack,
+            loop_iteration_count,
+            active_runnable,
+            environments,
+            realm,
+            flags,
+        } = self;
+
+        SuspendedCallFrame {
+            code_block: code_block.into_edge(),
+            pc,
+            rp,
+            argument_count,
+            env_fp,
+            iterators,
+            binding_stack,
+            loop_iteration_count,
+            active_runnable,
+            environments,
+            realm,
+            flags,
         }
     }
 
@@ -217,6 +262,40 @@ impl CallFrame {
     /// The cached value is placed in the [`CallFrame::THIS_POSITION`] position.
     pub(crate) fn has_this_value_cached(&self) -> bool {
         self.flags.contains(CallFrameFlags::THIS_VALUE_CACHED)
+    }
+}
+
+impl SuspendedCallFrame {
+    pub(crate) fn into_rooted(self) -> CallFrame {
+        let Self {
+            code_block,
+            pc,
+            rp,
+            argument_count,
+            env_fp,
+            iterators,
+            binding_stack,
+            loop_iteration_count,
+            active_runnable,
+            environments,
+            realm,
+            flags,
+        } = self;
+
+        CallFrame {
+            code_block: code_block.root(),
+            pc,
+            rp,
+            argument_count,
+            env_fp,
+            iterators,
+            binding_stack,
+            loop_iteration_count,
+            active_runnable,
+            environments,
+            realm,
+            flags,
+        }
     }
 }
 
