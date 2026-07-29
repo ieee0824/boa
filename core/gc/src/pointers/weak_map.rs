@@ -6,7 +6,7 @@ use hashbrown::{
     hash_table::{Entry as RawEntry, Iter as RawIter},
 };
 
-use crate::{Allocator, Ephemeron, Finalize, Gc, GcRefCell, Trace, custom_trace};
+use crate::{Allocator, Ephemeron, Finalize, Gc, GcRefCell, Rooted, Trace, custom_trace};
 use std::{fmt, hash::BuildHasher, marker::PhantomData};
 
 /// A map that holds weak references to its keys and is traced by the garbage collector.
@@ -31,28 +31,28 @@ impl<K: Trace + ?Sized, V: Trace + Clone> WeakMap<K, V> {
 
     /// Inserts a key-value pair into the map.
     #[inline]
-    pub fn insert(&mut self, key: &Gc<K>, value: V) {
-        self.inner.borrow_mut().insert(key, value);
+    pub fn insert(&mut self, key: &Rooted<K>, value: V) {
+        self.inner.borrow_mut().insert(key.as_gc(), value);
     }
 
     /// Removes a key from the map, returning the value at the key if the key was previously in the map.
     #[inline]
-    pub fn remove(&mut self, key: &Gc<K>) -> Option<V> {
-        self.inner.borrow_mut().remove(key)
+    pub fn remove(&mut self, key: &Rooted<K>) -> Option<V> {
+        self.inner.borrow_mut().remove(key.as_gc())
     }
 
     /// Returns `true` if the map contains a value for the specified key.
     #[must_use]
     #[inline]
-    pub fn contains_key(&self, key: &Gc<K>) -> bool {
-        self.inner.borrow().contains_key(key)
+    pub fn contains_key(&self, key: &Rooted<K>) -> bool {
+        self.inner.borrow().contains_key(key.as_gc())
     }
 
     /// Returns a reference to the value corresponding to the key.
     #[must_use]
     #[inline]
-    pub fn get(&self, key: &Gc<K>) -> Option<V> {
-        self.inner.borrow().get(key)
+    pub fn get(&self, key: &Rooted<K>) -> Option<V> {
+        self.inner.borrow().get(key.as_gc())
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{Ephemeron, Finalize, Gc, Trace};
+use crate::{Ephemeron, Finalize, Gc, GcEdge, Rooted, Trace};
 use std::hash::{Hash, Hasher};
 
 /// A weak reference to a [`Gc`].
@@ -21,12 +21,40 @@ impl<T: Trace + ?Sized> WeakGc<T> {
         }
     }
 
+    /// Creates a new weak pointer from a heap edge.
+    #[inline]
+    #[must_use]
+    pub fn new_edge(value: &GcEdge<T>) -> Self {
+        Self::new(value.as_gc())
+    }
+
+    /// Creates a new weak pointer from an explicitly rooted handle.
+    #[inline]
+    #[must_use]
+    pub fn new_rooted(value: &Rooted<T>) -> Self {
+        Self::new(value.as_gc())
+    }
+
     /// Upgrade returns a `Gc` pointer for the internal value if the pointer is still live, or `None`
     /// if the value was already garbage collected.
     #[inline]
     #[must_use]
     pub fn upgrade(&self) -> Option<Gc<T>> {
         self.inner.key()
+    }
+
+    /// Upgrades this weak pointer into an unregistered heap edge.
+    #[inline]
+    #[must_use]
+    pub fn upgrade_edge(&self) -> Option<GcEdge<T>> {
+        self.upgrade().map(GcEdge::from)
+    }
+
+    /// Upgrades this weak pointer into an explicitly registered root.
+    #[inline]
+    #[must_use]
+    pub fn upgrade_rooted(&self) -> Option<Rooted<T>> {
+        self.upgrade().map(Rooted::from_gc)
     }
 
     /// Check if the [`WeakGc`] can be upgraded.

@@ -22,7 +22,7 @@ use crate::{
 use boa_ast::scope::Scope;
 use boa_engine::JsValue;
 use boa_engine::property::{Attribute, PropertyDescriptor, PropertyKey};
-use boa_gc::{Finalize, Gc, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace};
 use rustc_hash::FxHashMap;
 
 /// Representation of a Realm.
@@ -121,7 +121,7 @@ impl Realm {
         let global_this = hooks
             .create_global_this(&intrinsics)
             .unwrap_or_else(|| global_object.clone());
-        let environment = GcEdge::from(Gc::new(DeclarativeEnvironment::global()));
+        let environment = GcEdge::new(DeclarativeEnvironment::global());
         let scope = Scope::new_global();
 
         let realm = Self {

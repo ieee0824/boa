@@ -11,6 +11,14 @@ pub struct GcEdge<T: Trace + ?Sized + 'static> {
     inner: Gc<T>,
 }
 
+impl<T: Trace> GcEdge<T> {
+    /// Allocates a garbage-collected value as an unregistered heap edge.
+    #[must_use]
+    pub fn new(value: T) -> Self {
+        Self::from_gc(Gc::new(value))
+    }
+}
+
 impl<T: Trace + ?Sized> GcEdge<T> {
     pub(super) fn from_gc(inner: Gc<T>) -> Self {
         Self { inner }

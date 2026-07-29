@@ -156,7 +156,7 @@ impl WeakMap {
         // ii. Set p.[[Value]] to empty.
         // iii. Return true.
         // 6. Return false.
-        Ok(map.remove(key.inner()).is_some().into())
+        Ok(map.remove(&key.root_inner()).is_some().into())
     }
 
     /// `WeakMap.prototype.get ( key )`
@@ -191,7 +191,7 @@ impl WeakMap {
         // 5. For each Record { [[Key]], [[Value]] } p of entries, do
         // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return p.[[Value]].
         // 6. Return undefined.
-        Ok(map.get(key.inner()).unwrap_or_default())
+        Ok(map.get(&key.root_inner()).unwrap_or_default())
     }
 
     /// `WeakMap.prototype.has ( key )`
@@ -226,7 +226,7 @@ impl WeakMap {
         // 5. For each Record { [[Key]], [[Value]] } p of entries, do
         // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return true.
         // 6. Return false.
-        Ok(map.contains_key(key.inner()).into())
+        Ok(map.contains_key(&key.root_inner()).into())
     }
 
     /// `WeakMap.prototype.set ( key, value )`
@@ -269,7 +269,7 @@ impl WeakMap {
         // ii. Return M.
         // 6. Let p be the Record { [[Key]]: key, [[Value]]: value }.
         // 7. Append p to entries.
-        map.insert(key.inner(), args.get_or_undefined(1).clone());
+        map.insert(&key.root_inner(), args.get_or_undefined(1).clone());
 
         // 8. Return M.
         Ok(this.clone())
@@ -316,7 +316,7 @@ impl WeakMap {
         };
 
         // 4. For each Record { [[Key]], [[Value]] } p of M.[[WeakMapData]]
-        if let Some(existing) = map.borrow().data().get(key.inner()) {
+        if let Some(existing) = map.borrow().data().get(&key.root_inner()) {
             // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return p.[[Value]].
             return Ok(existing);
         }
@@ -325,7 +325,7 @@ impl WeakMap {
         let value = args.get_or_undefined(1).clone();
         map.borrow_mut()
             .data_mut()
-            .insert(key.inner(), value.clone());
+            .insert(&key.root_inner(), value.clone());
         Ok(value)
     }
 
@@ -377,7 +377,7 @@ impl WeakMap {
         };
 
         // 5. For each Record { [[Key]], [[Value]] } p of M.[[WeakMapData]]
-        if let Some(existing) = map.borrow().data().get(key_obj.inner()) {
+        if let Some(existing) = map.borrow().data().get(&key_obj.root_inner()) {
             // a. If p.[[Key]] is not empty and SameValue(p.[[Key]], key) is true, return p.[[Value]].
             return Ok(existing);
         }
@@ -393,7 +393,7 @@ impl WeakMap {
         // 8-10. Insert or update the entry and return value.
         map.borrow_mut()
             .data_mut()
-            .insert(key_obj.inner(), value.clone());
+            .insert(&key_obj.root_inner(), value.clone());
         Ok(value)
     }
 }
