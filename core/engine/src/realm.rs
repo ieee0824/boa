@@ -22,7 +22,7 @@ use crate::{
 use boa_ast::scope::Scope;
 use boa_engine::JsValue;
 use boa_engine::property::{Attribute, PropertyDescriptor, PropertyKey};
-use boa_gc::{Finalize, Gc, GcRef, GcRefCell, GcRefMut, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace};
 use rustc_hash::FxHashMap;
 
 /// Representation of a Realm.
@@ -57,7 +57,7 @@ struct Inner {
     intrinsics: Intrinsics,
 
     /// The global declarative environment of this realm.
-    environment: Gc<DeclarativeEnvironment>,
+    environment: GcEdge<DeclarativeEnvironment>,
 
     /// The global scope of this realm.
     /// This is directly related to the global declarative environment.
@@ -86,7 +86,7 @@ impl Realm {
         let global_this = hooks
             .create_global_this(&intrinsics)
             .unwrap_or_else(|| global_object.clone());
-        let environment = Gc::new(DeclarativeEnvironment::global());
+        let environment = GcEdge::from(Gc::new(DeclarativeEnvironment::global()));
         let scope = Scope::new_global();
 
         let realm = Self {
@@ -162,8 +162,8 @@ impl Realm {
             .cloned()
     }
 
-    pub(crate) fn environment(&self) -> &Gc<DeclarativeEnvironment> {
-        &self.inner.environment
+    pub(crate) fn environment(&self) -> Rooted<DeclarativeEnvironment> {
+        self.inner.environment.clone().root()
     }
 
     /// Returns the scope of this realm.
@@ -187,8 +187,8 @@ impl Realm {
     /// Resizes the number of bindings on the global environment.
     pub(crate) fn resize_global_env(&self) {
         let binding_number = self.scope().num_bindings();
-        let env = self
-            .environment()
+        let environment = self.environment();
+        let env = environment
             .kind()
             .as_global()
             .expect("Realm should only store global environments")
@@ -254,5 +254,22 @@ impl Realm {
     pub(crate) fn addr(&self) -> *const () {
         let ptr: *const _ = &raw const *self.inner;
         ptr.cast()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::Context;
+
+    #[test]
+    fn global_environment_root_survives_forced_collection() {
+        let environment = {
+            let context = Context::default();
+            context.realm().environment()
+        };
+
+        boa_gc::force_collect();
+
+        assert!(environment.kind().as_global().is_some());
     }
 }

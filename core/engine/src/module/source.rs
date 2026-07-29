@@ -1669,7 +1669,7 @@ impl SourceTextModule {
         };
 
         // 8. Let moduleContext be a new ECMAScript code execution context.
-        let mut envs = EnvironmentStack::new(Rooted::from_gc(global_env));
+        let mut envs = EnvironmentStack::new(global_env);
         envs.push_module(self.code.source.scope().clone());
 
         // 9. Set the Function of moduleContext to null.
