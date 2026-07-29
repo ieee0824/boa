@@ -62,7 +62,7 @@ mod synthetic;
 /// [spec]: https://tc39.es/ecma262/#sec-abstract-module-records
 #[derive(Clone, Trace, Finalize)]
 pub struct Module {
-    inner: Gc<ModuleRepr>,
+    inner: Rooted<ModuleRepr>,
 }
 
 impl std::fmt::Debug for Module {
@@ -173,7 +173,7 @@ impl Module {
         let src = SourceTextModule::new(module, context.interner(), source_text, path.clone());
 
         Ok(Self {
-            inner: Gc::new(ModuleRepr {
+            inner: Rooted::new(ModuleRepr {
                 realm: realm.to_edge(),
                 namespace: GcRefCell::default(),
                 kind: ModuleKind::SourceText(Box::new(src)),
@@ -203,7 +203,7 @@ impl Module {
         let synth = SyntheticModule::new(names, &evaluation_steps);
 
         Self {
-            inner: Gc::new(ModuleRepr {
+            inner: Rooted::new(ModuleRepr {
                 realm: realm.to_edge(),
                 namespace: GcRefCell::default(),
                 kind: ModuleKind::Synthetic(Box::new(synth)),
@@ -645,7 +645,7 @@ impl Module {
 impl PartialEq for Module {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
-        Gc::ptr_eq(&self.inner, &other.inner)
+        Gc::ptr_eq(self.inner.as_gc(), other.inner.as_gc())
     }
 }
 
@@ -654,7 +654,7 @@ impl Eq for Module {}
 impl Hash for Module {
     #[inline]
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        std::ptr::hash(self.inner.as_ref(), state);
+        std::ptr::hash(&raw const *self.inner, state);
     }
 }
 
