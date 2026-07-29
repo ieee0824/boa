@@ -45,7 +45,7 @@ use boa_ast::{
     },
     scope::BindingLocatorScope,
 };
-use boa_gc::{self, Finalize, Gc, Trace, custom_trace};
+use boa_gc::{self, Finalize, Gc, GcEdge, Rooted, Trace, custom_trace};
 use boa_interner::Sym;
 use boa_macros::js_str;
 use boa_parser::{Parser, Source};
@@ -166,7 +166,7 @@ unsafe impl Trace for ClassFieldDefinition {
 #[derive(Debug, Trace, Finalize)]
 pub struct OrdinaryFunction {
     /// The code block containing the compiled function.
-    pub(crate) code: Gc<CodeBlock>,
+    pub(crate) code: GcEdge<CodeBlock>,
 
     /// The `[[Environment]]` internal slot.
     pub(crate) environments: EnvironmentStack,
@@ -210,13 +210,13 @@ impl JsData for OrdinaryFunction {
 
 impl OrdinaryFunction {
     pub(crate) fn new(
-        code: Gc<CodeBlock>,
+        code: Rooted<CodeBlock>,
         environments: EnvironmentStack,
         script_or_module: Option<ActiveRunnable>,
         realm: Realm,
     ) -> Self {
         Self {
-            code,
+            code: code.into_edge(),
             environments,
             home_object: None,
             script_or_module,
@@ -673,7 +673,8 @@ impl BuiltInFunctionObject {
             );
 
         let environments = context.vm.environments.pop_to_global();
-        let function_object = crate::vm::create_function_object(code, prototype, context);
+        let function_object =
+            crate::vm::create_function_object(Rooted::from_gc(code), prototype, context);
         context.vm.environments.extend(environments);
 
         Ok(function_object)
@@ -1000,7 +1001,7 @@ pub(crate) fn function_call(
             .into());
     }
 
-    let code = function.code.clone();
+    let code = function.code.clone().root();
     let environments = function.environments.clone();
     let script_or_module = function.script_or_module.clone();
 
@@ -1008,7 +1009,7 @@ pub(crate) fn function_call(
 
     let env_fp = environments.len() as u32;
 
-    let frame = CallFrame::new(code.clone(), script_or_module, environments, realm)
+    let frame = CallFrame::new_rooted(code.clone(), script_or_module, environments, realm)
         .with_argument_count(argument_count as u32)
         .with_env_fp(env_fp);
 
@@ -1092,7 +1093,7 @@ fn function_construct(
         "only ordinary functions can be constructed"
     );
 
-    let code = function.code.clone();
+    let code = function.code.clone().root();
     let environments = function.environments.clone();
     let script_or_module = function.script_or_module.clone();
     drop(function);
@@ -1121,7 +1122,7 @@ fn function_construct(
         Some(this)
     };
 
-    let mut frame = CallFrame::new(code.clone(), script_or_module, environments, realm)
+    let mut frame = CallFrame::new_rooted(code.clone(), script_or_module, environments, realm)
         .with_argument_count(argument_count as u32)
         .with_env_fp(env_fp)
         .with_flags(CallFrameFlags::CONSTRUCT);

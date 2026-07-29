@@ -1,4 +1,4 @@
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_parser::Source;
 
 use crate::{
@@ -317,9 +317,13 @@ fn set_internal_method() {
     assert_eq!(context.slot().index, slot.index);
 }
 
-fn get_codeblock(value: &JsValue) -> Option<(JsObject, Gc<CodeBlock>)> {
+fn get_codeblock(value: &JsValue) -> Option<(JsObject, Rooted<CodeBlock>)> {
     let object = value.as_object()?.clone();
-    let code = object.downcast_ref::<OrdinaryFunction>()?.code.clone();
+    let code = object
+        .downcast_ref::<OrdinaryFunction>()?
+        .code
+        .clone()
+        .root();
 
     Some((object, code))
 }
