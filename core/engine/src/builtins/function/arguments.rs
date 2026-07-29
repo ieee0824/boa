@@ -13,7 +13,7 @@ use crate::{
     property::{DescriptorKind, PropertyDescriptor, PropertyKey},
 };
 use boa_ast::{function::FormalParameterList, operations::bound_names, scope::Scope};
-use boa_gc::{Finalize, Gc, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, Trace};
 use boa_interner::Interner;
 use rustc_hash::FxHashMap;
 use thin_vec::{ThinVec, thin_vec};
@@ -83,7 +83,7 @@ impl UnmappedArguments {
 pub(crate) struct MappedArguments {
     #[unsafe_ignore_trace]
     binding_indices: Vec<Option<u32>>,
-    environment: Gc<DeclarativeEnvironment>,
+    environment: GcEdge<DeclarativeEnvironment>,
 }
 
 impl JsData for MappedArguments {
@@ -234,7 +234,7 @@ impl MappedArguments {
         let range = binding_indices.len().min(len);
         let map = MappedArguments {
             binding_indices: binding_indices[..range].to_vec(),
-            environment: env.clone(),
+            environment: env.clone().into(),
         };
 
         // %Array.prototype.values%
