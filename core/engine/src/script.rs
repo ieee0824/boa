@@ -82,7 +82,7 @@ impl Script {
         self.inner.realm.to_rooted()
     }
 
-    /// Returns the [`ECMAScript specification`][spec] defined [`\[\[HostDefined\]\]`][`HostDefined`] field of the [`Module`].
+    /// Returns the [`ECMAScript specification`][spec] defined [`\[\[HostDefined\]\]`][`HostDefined`] field of the [`crate::Module`].
     ///
     /// [spec]: https://tc39.es/ecma262/#script-record
     #[must_use]
