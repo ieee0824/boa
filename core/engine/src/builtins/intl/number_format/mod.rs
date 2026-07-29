@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, Trace, custom_trace};
 use fixed_decimal::{Decimal, FloatPrecision, SignDisplay};
 use icu_decimal::{
     DecimalFormatter, FormattedDecimal,
@@ -35,7 +35,7 @@ use crate::{
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     js_string,
     object::{
-        FunctionObjectBuilder, JsFunction, ObjectInitializer,
+        FunctionObjectBuilder, JsFunctionEdge, ObjectInitializer,
         internal_methods::get_prototype_from_constructor,
     },
     property::{Attribute, PropertyDescriptor},
@@ -47,9 +47,7 @@ use crate::{
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Trace, Finalize, JsData)]
-// Safety: `NumberFormat` only contains non-traceable types.
-#[boa_gc(unsafe_empty_trace)]
+#[derive(Debug, Finalize, JsData)]
 pub(crate) struct NumberFormat {
     locale: Locale,
     formatter: DecimalFormatter,
@@ -59,7 +57,12 @@ pub(crate) struct NumberFormat {
     notation: Notation,
     use_grouping: GroupingStrategy,
     sign_display: SignDisplay,
-    bound_format: Option<JsFunction>,
+    bound_format: Option<JsFunctionEdge>,
+}
+
+// SAFETY: `bound_format` is the only traceable field.
+unsafe impl Trace for NumberFormat {
+    custom_trace!(this, mark, mark(&this.bound_format));
 }
 
 impl NumberFormat {
@@ -501,7 +504,7 @@ impl NumberFormat {
         let mut nf = nf.borrow_mut();
 
         let bound_format = if let Some(f) = nf.data_mut().bound_format.clone() {
-            f
+            f.root()
         } else {
             // 4. If nf.[[BoundFormat]] is undefined, then
             //     a. Let F be a new built-in function object as defined in Number Format Functions (15.5.2).
@@ -531,7 +534,7 @@ impl NumberFormat {
             .length(2)
             .build();
 
-            nf.data_mut().bound_format = Some(bound_format.clone());
+            nf.data_mut().bound_format = Some(bound_format.clone().into_edge());
             bound_format
         };
 

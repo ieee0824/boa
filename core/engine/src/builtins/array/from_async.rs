@@ -3,9 +3,9 @@ use boa_gc::{Finalize, Trace};
 use super::Array;
 use crate::builtins::AsyncFromSyncIterator;
 use crate::builtins::iterable::IteratorRecord;
-use crate::builtins::promise::ResolvingFunctions;
+use crate::builtins::promise::ResolvingFunctionsEdge;
 use crate::native_function::{CoroutineState, NativeCoroutine};
-use crate::object::{JsFunction, JsPromise};
+use crate::object::{JsFunction, JsFunctionEdge, JsPromise};
 use crate::{
     Context, JsArgs, JsError, JsNativeError, JsObject, JsResult, JsSymbol, JsValue, js_string,
 };
@@ -96,9 +96,9 @@ impl Array {
 
                 let coroutine_state = (
                     GlobalState {
-                        mapfn,
+                        mapfn: mapfn.map(JsFunction::into_edge),
                         this_arg,
-                        resolvers: resolvers.clone(),
+                        resolvers: resolvers.clone().into_edge(),
                     },
                     Cell::new(Some(ArrayLikeStateMachine::LoopStart {
                         array_like,
@@ -143,9 +143,9 @@ impl Array {
 
             let coroutine_state = (
                 GlobalState {
-                    mapfn,
+                    mapfn: mapfn.map(JsFunction::into_edge),
                     this_arg,
-                    resolvers: resolvers.clone(),
+                    resolvers: resolvers.clone().into_edge(),
                 },
                 Cell::new(Some(AsyncIteratorStateMachine::LoopStart {
                     // vi. Let k be 0.
@@ -195,9 +195,9 @@ impl Array {
 
 #[derive(Trace, Finalize)]
 struct GlobalState {
-    mapfn: Option<JsFunction>,
+    mapfn: Option<JsFunctionEdge>,
     this_arg: JsValue,
-    resolvers: ResolvingFunctions,
+    resolvers: ResolvingFunctionsEdge,
 }
 
 #[derive(Trace, Finalize)]

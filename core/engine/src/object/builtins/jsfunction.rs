@@ -2,12 +2,14 @@
 use crate::js_string;
 use crate::{
     Context, JsNativeError, JsResult, JsValue, NativeFunction, TryIntoJsResult,
-    builtins::function::ConstructorKind, native_function::NativeFunctionObject, object::JsObject,
+    builtins::function::ConstructorKind,
+    native_function::NativeFunctionObject,
+    object::{ErasedVTableObject, JsObject},
     value::TryFromJs,
 };
-use boa_gc::{Finalize, Trace};
-use std::marker::PhantomData;
+use boa_gc::{Finalize, Rooted, Trace};
 use std::ops::Deref;
+use std::{fmt, marker::PhantomData};
 
 /// A trait for converting a tuple of Rust values into a vector of `JsValue`,
 /// to be used as arguments for a JavaScript function.
@@ -42,7 +44,7 @@ impl_try_into_js_args!(a: A, b: B, c: C, d: D, e: E);
 /// actually have strong typing).
 ///
 /// To create this type, use the [`JsFunction::typed`] method.
-#[derive(Debug, Clone, Trace, Finalize)]
+#[derive(Debug, Clone, Finalize)]
 pub struct TypedJsFunction<A: TryIntoJsArguments, R: TryFromJs> {
     inner: JsFunction,
     _args: PhantomData<A>,
@@ -111,15 +113,26 @@ impl<A: TryIntoJsArguments, R: TryFromJs> From<TypedJsFunction<A, R>> for JsFunc
 }
 
 /// JavaScript `Function` rust object.
-#[derive(Debug, Clone, Trace, Finalize)]
+#[derive(Clone, Finalize)]
 pub struct JsFunction {
+    inner: JsObject,
+    _owner: Rooted<ErasedVTableObject>,
+}
+
+/// A JavaScript function reference stored inside the traced heap.
+#[derive(Debug, Clone, Trace, Finalize)]
+pub(crate) struct JsFunctionEdge {
     inner: JsObject,
 }
 
 impl JsFunction {
     /// Creates a new `JsFunction` from an object, without checking if the object is callable.
     pub(crate) fn from_object_unchecked(object: JsObject) -> Self {
-        Self { inner: object }
+        let owner = object.root_inner();
+        Self {
+            inner: object,
+            _owner: owner,
+        }
     }
 
     /// Creates a new, empty intrinsic function object with only its function internal methods set.
@@ -128,17 +141,15 @@ impl JsFunction {
     ///
     /// [`Context`]: crate::Context
     pub(crate) fn empty_intrinsic_function(constructor: bool) -> Self {
-        Self {
-            inner: JsObject::from_proto_and_data(
-                None,
-                NativeFunctionObject {
-                    f: NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())).to_edge(),
-                    name: js_string!(),
-                    constructor: constructor.then_some(ConstructorKind::Base),
-                    realm: None,
-                },
-            ),
-        }
+        Self::from_object_unchecked(JsObject::from_proto_and_data(
+            None,
+            NativeFunctionObject {
+                f: NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())).to_edge(),
+                name: js_string!(),
+                constructor: constructor.then_some(ConstructorKind::Base),
+                realm: None,
+            },
+        ))
     }
 
     /// Creates a [`JsFunction`] from a [`JsObject`], or returns `None` if the object is not a function.
@@ -162,6 +173,31 @@ impl JsFunction {
             _ret: PhantomData,
         }
     }
+
+    /// Converts this external function owner into a traced heap edge.
+    pub(crate) fn into_edge(self) -> JsFunctionEdge {
+        JsFunctionEdge {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl fmt::Debug for JsFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.inner.fmt(f)
+    }
+}
+
+impl JsFunctionEdge {
+    /// Promotes a heap function edge into an external owner.
+    pub(crate) fn root(&self) -> JsFunction {
+        JsFunction::from_object_unchecked(self.inner.clone())
+    }
+
+    /// Returns the underlying object edge.
+    pub(crate) fn object(&self) -> JsObject {
+        self.inner.clone()
+    }
 }
 
 impl From<JsFunction> for JsObject {
@@ -179,6 +215,15 @@ impl From<JsFunction> for JsValue {
 }
 
 impl Deref for JsFunction {
+    type Target = JsObject;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
+impl Deref for JsFunctionEdge {
     type Target = JsObject;
 
     #[inline]

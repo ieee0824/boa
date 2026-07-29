@@ -25,7 +25,7 @@ use crate::{
     js_string,
     native_function::NativeFunction,
     object::{
-        FunctionObjectBuilder, JsFunction, JsObject,
+        FunctionObjectBuilder, JsFunctionEdge, JsObject,
         internal_methods::get_prototype_from_constructor,
     },
     property::Attribute,
@@ -54,7 +54,7 @@ pub(crate) struct Collator {
     sensitivity: Sensitivity,
     ignore_punctuation: bool,
     collator: icu_collator::Collator,
-    bound_compare: Option<JsFunction>,
+    bound_compare: Option<JsFunctionEdge>,
 }
 
 // SAFETY: only `bound_compare` is a traceable object.
@@ -445,7 +445,7 @@ impl Collator {
         //     b. Set F.[[Collator]] to collator.
         //     c. Set collator.[[BoundCompare]] to F.
         let bound_compare = if let Some(f) = collator.bound_compare.clone() {
-            f
+            f.root()
         } else {
             let bound_compare = FunctionObjectBuilder::new(
                 context.realm(),
@@ -487,7 +487,7 @@ impl Collator {
             .length(2)
             .build();
 
-            collator.bound_compare = Some(bound_compare.clone());
+            collator.bound_compare = Some(bound_compare.clone().into_edge());
             bound_compare
         };
 

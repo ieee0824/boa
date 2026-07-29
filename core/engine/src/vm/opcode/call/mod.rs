@@ -406,7 +406,7 @@ async fn load_dyn_import(
                 Promise::perform_promise_then(
                     &evaluate,
                     Some(fulfill),
-                    Some(on_rejected.clone()),
+                    Some(on_rejected.root()),
                     None,
                     context,
                 );
@@ -414,7 +414,7 @@ async fn load_dyn_import(
                 // g. Return unused.
                 Ok(JsValue::undefined())
             },
-            (module.clone(), cap.clone(), on_rejected.clone()),
+            (module.clone(), cap.clone(), on_rejected.clone().into_edge()),
         ),
     )
     .build();

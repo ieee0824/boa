@@ -94,7 +94,7 @@ impl TryFromJs for JsProxy {
 ///
 /// [proxy]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy
 /// [revocable]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Proxy/revocable
-#[derive(Debug, Trace, Finalize)]
+#[derive(Debug, Finalize)]
 pub struct JsRevocableProxy {
     proxy: JsProxy,
     revoker: JsFunction,
