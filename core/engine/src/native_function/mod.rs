@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 
-use boa_gc::{Finalize, Gc, GcEdge, Rooted, Trace, custom_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
 use boa_string::JsString;
 
 use crate::job::NativeAsyncJob;
@@ -305,7 +305,7 @@ impl NativeFunction {
     {
         // Hopefully, this unsafe operation will be replaced by the `CoerceUnsized` API in the
         // future: https://github.com/rust-lang/rust/issues/18598
-        let ptr = Gc::into_raw(Gc::new(Closure {
+        let ptr = Rooted::into_raw(Rooted::new(Closure {
             f: closure,
             captures,
         }));
@@ -313,7 +313,7 @@ impl NativeFunction {
         // meaning this is safe.
         unsafe {
             Self {
-                inner: RootedInner::Closure(Rooted::from_gc(Gc::from_raw(ptr))),
+                inner: RootedInner::Closure(Rooted::from_raw(ptr)),
             }
         }
     }

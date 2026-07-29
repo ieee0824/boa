@@ -663,12 +663,12 @@ impl JsTypedArray {
     /// # Examples
     ///
     /// ```
-    /// # use boa_gc::{Gc, GcRefCell};
+    /// # use boa_gc::{GcEdge, GcRefCell};
     /// # use boa_engine::{JsResult, object::{builtins::JsUint8Array, FunctionObjectBuilder}, NativeFunction, JsValue, Context};
     /// # fn main() -> JsResult<()> {
     /// let context = &mut Context::default();
     /// let array = JsUint8Array::from_iter(vec![1, 2, 3, 4, 5], context)?;
-    /// let num_to_modify = Gc::new(GcRefCell::new(0u8));
+    /// let num_to_modify = GcEdge::new(GcRefCell::new(0u8));
     ///
     /// let js_function = FunctionObjectBuilder::new(
     ///     context.realm(),
@@ -683,7 +683,7 @@ impl JsTypedArray {
     ///             *captures.borrow_mut() += element;
     ///             Ok(JsValue::undefined())
     ///         },
-    ///         Gc::clone(&num_to_modify),
+    ///         num_to_modify.clone(),
     ///     ),
     /// )
     /// .build();

@@ -1,5 +1,5 @@
 use boa_ast::scope::Scope;
-use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace};
 use rustc_hash::FxHashSet;
 
 use super::{BindingName, ResolveExportError, ResolvedBinding};
@@ -131,7 +131,7 @@ impl SyntheticModuleInitializer {
     {
         // Hopefully, this unsafe operation will be replaced by the `CoerceUnsized` API in the
         // future: https://github.com/rust-lang/rust/issues/18598
-        let ptr = Gc::into_raw(Gc::new(Callback {
+        let ptr = Rooted::into_raw(Rooted::new(Callback {
             f: closure,
             captures,
         }));
@@ -140,7 +140,7 @@ impl SyntheticModuleInitializer {
         // meaning this is safe.
         unsafe {
             Self {
-                inner: Rooted::from_gc(Gc::from_raw(ptr)),
+                inner: Rooted::from_raw(ptr),
             }
         }
     }

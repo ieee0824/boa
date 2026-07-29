@@ -43,6 +43,28 @@ impl<T: Trace + ?Sized> Rooted<T> {
         let inner = unsafe { ptr::read(&raw const this.inner) };
         GcEdge::from_gc(inner)
     }
+
+    /// Consumes this root and returns its allocation pointer.
+    ///
+    /// This is primarily useful for an immediate pointer unsizing conversion
+    /// followed by [`Self::from_raw`]. The allocation is unregistered while the
+    /// raw pointer is outstanding.
+    #[must_use]
+    pub fn into_raw(this: Self) -> ptr::NonNull<crate::GcBox<T>> {
+        GcEdge::into_raw(this.into_edge())
+    }
+
+    /// Reconstructs an explicit root from a pointer produced by [`Self::into_raw`].
+    ///
+    /// # Safety
+    ///
+    /// `inner` must have been returned by [`Self::into_raw`] for a compatible
+    /// allocation and must not have been reconstructed already.
+    #[must_use]
+    pub unsafe fn from_raw(inner: ptr::NonNull<crate::GcBox<T>>) -> Self {
+        // SAFETY: Forwarded from this function's contract.
+        unsafe { GcEdge::from_raw(inner) }.root()
+    }
 }
 
 impl<T: Trace + ?Sized> Clone for Rooted<T> {

@@ -14,7 +14,7 @@ use std::{
     sync::atomic,
 };
 
-use boa_gc::{Ephemeron, Finalize, Gc, GcRefCell, Trace, WeakGc, WeakMap};
+use boa_gc::{Ephemeron, Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace, WeakGc, WeakMap};
 
 use super::internal_methods::{InternalObjectMethods, ORDINARY_INTERNAL_METHODS};
 
@@ -202,6 +202,10 @@ impl<T> JsData for Cell<Option<T>> {}
 default_impls!(icu_locale::Locale);
 
 impl<T: Trace + ?Sized> JsData for Gc<T> {}
+
+impl<T: Trace + ?Sized> JsData for GcEdge<T> {}
+
+impl<T: Trace + ?Sized> JsData for Rooted<T> {}
 
 impl<T: Trace + ?Sized> JsData for WeakGc<T> {}
 
