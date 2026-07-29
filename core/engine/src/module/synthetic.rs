@@ -51,7 +51,7 @@ where
 /// to use. All other closures can also be stored in a `NativeFunction`, albeit by using an `unsafe`
 /// API, but note that passing closures implicitly capturing traceable types could cause
 /// **Undefined Behaviour**.
-#[derive(Clone, Trace, Finalize)]
+#[derive(Clone)]
 pub struct SyntheticModuleInitializer {
     inner: Rooted<dyn TraceableCallback>,
 }
