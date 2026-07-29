@@ -1,5 +1,5 @@
 use boa_ast::scope::Scope;
-use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Trace};
 use rustc_hash::FxHashSet;
 
 use super::{BindingName, ResolveExportError, ResolvedBinding};
@@ -148,7 +148,7 @@ enum ModuleStatus {
     Unlinked,
     Linked {
         environment: Gc<DeclarativeEnvironment>,
-        eval_context: (EnvironmentStack, Gc<CodeBlock>),
+        eval_context: (EnvironmentStack, GcEdge<CodeBlock>),
     },
     Evaluated {
         environment: Gc<DeclarativeEnvironment>,
@@ -358,7 +358,7 @@ impl SyntheticModule {
             .borrow_mut()
             .transition(|_| ModuleStatus::Linked {
                 environment: env,
-                eval_context: (envs, cb),
+                eval_context: (envs, cb.into()),
             });
 
         // 5. Return unused.
@@ -391,8 +391,8 @@ impl SyntheticModule {
         let realm = module_self.realm().clone();
 
         let env_fp = environments.len() as u32;
-        let callframe = CallFrame::new(
-            codeblock,
+        let callframe = CallFrame::new_rooted(
+            codeblock.root(),
             // 4. Set the ScriptOrModule of moduleContext to module.
             Some(ActiveRunnable::Module(module_self.clone())),
             // 5. Set the VariableEnvironment of moduleContext to module.[[Environment]].
