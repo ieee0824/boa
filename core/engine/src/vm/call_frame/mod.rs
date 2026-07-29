@@ -7,7 +7,7 @@ use crate::{
     JsValue,
     builtins::iterable::IteratorRecord,
     environments::{EnvironmentStack, EnvironmentStackEdges},
-    realm::Realm,
+    realm::{Realm, RealmEdge},
     vm::CodeBlock,
     vm::SourcePath,
 };
@@ -45,7 +45,7 @@ pub struct CallFrameLocation {
 
 /// A `CallFrame` holds the state of a function call.
 #[derive(Clone, Debug, Finalize)]
-pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack> {
+pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack, R = Realm> {
     pub(crate) code_block: H,
     pub(crate) pc: u32,
     /// The register pointer, points to the first register in the stack.
@@ -73,13 +73,13 @@ pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack> {
     pub(crate) environments: E,
 
     /// \[\[Realm\]\]
-    pub(crate) realm: Realm,
+    pub(crate) realm: R,
 
     // SAFETY: Nothing in `CallFrameFlags` requires tracing, so this is safe.
     pub(crate) flags: CallFrameFlags,
 }
 
-unsafe impl<H: Trace, E: Trace> Trace for CallFrame<H, E> {
+unsafe impl<H: Trace, E: Trace, R: Trace> Trace for CallFrame<H, E, R> {
     custom_trace!(this, mark, {
         mark(&this.code_block);
         mark(&this.iterators);
@@ -89,10 +89,10 @@ unsafe impl<H: Trace, E: Trace> Trace for CallFrame<H, E> {
     });
 }
 
-pub(crate) type SuspendedCallFrame = CallFrame<GcEdge<CodeBlock>, EnvironmentStackEdges>;
+pub(crate) type SuspendedCallFrame = CallFrame<GcEdge<CodeBlock>, EnvironmentStackEdges, RealmEdge>;
 
 /// ---- `CallFrame` public API ----
-impl<H, E> CallFrame<H, E>
+impl<H, E, R> CallFrame<H, E, R>
 where
     H: std::ops::Deref<Target = CodeBlock>,
 {
@@ -177,7 +177,7 @@ impl CallFrame {
             loop_iteration_count,
             active_runnable,
             environments: environments.to_edges(),
-            realm,
+            realm: realm.to_edge(),
             flags,
         }
     }
@@ -297,7 +297,7 @@ impl SuspendedCallFrame {
             loop_iteration_count,
             active_runnable,
             environments: environments.to_rooted(),
-            realm,
+            realm: realm.to_rooted(),
             flags,
         }
     }
