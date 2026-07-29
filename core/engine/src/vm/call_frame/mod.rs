@@ -130,6 +130,20 @@ impl CallFrame {
         environments: EnvironmentStack,
         realm: Realm,
     ) -> Self {
+        Self::new_rooted(
+            Rooted::from_gc(code_block),
+            active_runnable,
+            environments,
+            realm,
+        )
+    }
+
+    pub(crate) fn new_rooted(
+        code_block: Rooted<CodeBlock>,
+        active_runnable: Option<ActiveRunnable>,
+        environments: EnvironmentStack,
+        realm: Realm,
+    ) -> Self {
         Self {
             pc: 0,
             rp: 0,
@@ -137,7 +151,7 @@ impl CallFrame {
             argument_count: 0,
             iterators: ThinVec::new(),
             binding_stack: Vec::new(),
-            code_block: Rooted::from_gc(code_block),
+            code_block,
             loop_iteration_count: 0,
             active_runnable,
             environments,
