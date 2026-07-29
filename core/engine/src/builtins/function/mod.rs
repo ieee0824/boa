@@ -37,7 +37,7 @@ use crate::{
     string::StaticJsStrings,
     symbol::JsSymbol,
     value::IntegerOrInfinity,
-    vm::{ActiveRunnable, CallFrame, CallFrameFlags, CodeBlock},
+    vm::{ActiveRunnable, ActiveRunnableEdge, CallFrame, CallFrameFlags, CodeBlock},
 };
 use boa_ast::{
     Position, Span, Spanned, StatementList,
@@ -178,7 +178,7 @@ pub struct OrdinaryFunction {
     pub(crate) home_object: Option<JsObject>,
 
     /// The `[[ScriptOrModule]]` internal slot.
-    pub(crate) script_or_module: Option<ActiveRunnable>,
+    pub(crate) script_or_module: Option<ActiveRunnableEdge>,
 
     /// The [`Realm`] the function is defined in.
     pub(crate) realm: RealmEdge,
@@ -222,7 +222,7 @@ impl OrdinaryFunction {
             code: code.into_edge(),
             environments: environments.to_edges(),
             home_object: None,
-            script_or_module,
+            script_or_module: script_or_module.map(|runnable| runnable.to_edge()),
             realm: realm.to_edge(),
             fields: ThinVec::default(),
             private_methods: ThinVec::default(),
@@ -1005,7 +1005,10 @@ pub(crate) fn function_call(
 
     let code = function.code.clone().root();
     let environments = function.environments.to_rooted();
-    let script_or_module = function.script_or_module.clone();
+    let script_or_module = function
+        .script_or_module
+        .as_ref()
+        .map(ActiveRunnableEdge::to_rooted);
 
     drop(function);
 
@@ -1097,7 +1100,10 @@ fn function_construct(
 
     let code = function.code.clone().root();
     let environments = function.environments.to_rooted();
-    let script_or_module = function.script_or_module.clone();
+    let script_or_module = function
+        .script_or_module
+        .as_ref()
+        .map(ActiveRunnableEdge::to_rooted);
     drop(function);
 
     let env_fp = environments.len() as u32;

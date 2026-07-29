@@ -32,9 +32,24 @@ pub struct Script {
     inner: Rooted<Inner>,
 }
 
+#[derive(Clone, Trace, Finalize)]
+pub(crate) struct ScriptEdge {
+    inner: GcEdge<Inner>,
+}
+
 impl std::fmt::Debug for Script {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Script")
+            .field("realm", &self.inner.realm.addr())
+            .field("code", &self.inner.source)
+            .field("loaded_modules", &self.inner.loaded_modules)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ScriptEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScriptEdge")
             .field("realm", &self.inner.realm.addr())
             .field("code", &self.inner.source)
             .field("loaded_modules", &self.inner.loaded_modules)
@@ -55,6 +70,12 @@ struct Inner {
 }
 
 impl Script {
+    pub(crate) fn to_edge(&self) -> ScriptEdge {
+        ScriptEdge {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+
     /// Gets the realm of this script.
     #[must_use]
     pub fn realm(&self) -> Realm {
@@ -238,5 +259,13 @@ impl Script {
 
     pub(super) fn get_source(&self) -> SourceText {
         self.inner.source_text.clone()
+    }
+}
+
+impl ScriptEdge {
+    pub(crate) fn to_rooted(&self) -> Script {
+        Script {
+            inner: self.inner.clone().root(),
+        }
     }
 }

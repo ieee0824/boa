@@ -8,9 +8,10 @@ use crate::{
     Context, JsError, JsNativeError, JsObject, JsResult, JsString, JsValue, Module,
     builtins::promise::{PromiseCapability, ResolvingFunctions},
     environments::EnvironmentStack,
+    module::ModuleEdge,
     object::JsFunction,
     realm::Realm,
-    script::Script,
+    script::{Script, ScriptEdge},
 };
 use boa_gc::{Finalize, Rooted, Trace, custom_trace};
 use shadow_stack::ShadowStack;
@@ -285,9 +286,9 @@ impl Stack {
 
     /// Get the async generator object for the given frame.
     #[track_caller]
-    pub(crate) fn async_generator_object<H, E, R>(
+    pub(crate) fn async_generator_object<H, E, R, A>(
         &self,
-        frame: &CallFrame<H, E, R>,
+        frame: &CallFrame<H, E, R, A>,
     ) -> Option<JsObject>
     where
         H: std::ops::Deref<Target = CodeBlock>,
@@ -401,9 +402,18 @@ impl Stack {
 
 /// Active runnable in the current vm context.
 #[derive(Debug, Clone, Finalize)]
-pub(crate) enum ActiveRunnable {
+#[doc(hidden)]
+pub enum ActiveRunnable {
+    /// A script record.
     Script(Script),
+    /// A module record.
     Module(Module),
+}
+
+#[derive(Debug, Clone, Finalize)]
+pub(crate) enum ActiveRunnableEdge {
+    Script(ScriptEdge),
+    Module(ModuleEdge),
 }
 
 unsafe impl Trace for ActiveRunnable {
@@ -413,6 +423,33 @@ unsafe impl Trace for ActiveRunnable {
             Self::Module(module) => mark(module),
         }
     });
+}
+
+unsafe impl Trace for ActiveRunnableEdge {
+    custom_trace!(this, mark, {
+        match this {
+            Self::Script(script) => mark(script),
+            Self::Module(module) => mark(module),
+        }
+    });
+}
+
+impl ActiveRunnable {
+    pub(crate) fn to_edge(&self) -> ActiveRunnableEdge {
+        match self {
+            Self::Script(script) => ActiveRunnableEdge::Script(script.to_edge()),
+            Self::Module(module) => ActiveRunnableEdge::Module(module.to_edge()),
+        }
+    }
+}
+
+impl ActiveRunnableEdge {
+    pub(crate) fn to_rooted(&self) -> ActiveRunnable {
+        match self {
+            Self::Script(script) => ActiveRunnable::Script(script.to_rooted()),
+            Self::Module(module) => ActiveRunnable::Module(module.to_rooted()),
+        }
+    }
 }
 
 impl Vm {

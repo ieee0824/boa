@@ -32,7 +32,7 @@ use rustc_hash::FxHashSet;
 use boa_engine::js_string;
 use boa_engine::property::PropertyKey;
 use boa_engine::value::TryFromJs;
-use boa_gc::{Finalize, Gc, GcRefCell, Rooted, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
 use boa_interner::Interner;
 use boa_parser::source::ReadChar;
 use boa_parser::{Parser, Source};
@@ -65,9 +65,24 @@ pub struct Module {
     inner: Rooted<ModuleRepr>,
 }
 
+#[derive(Clone, Trace, Finalize)]
+pub(crate) struct ModuleEdge {
+    inner: GcEdge<ModuleRepr>,
+}
+
 impl std::fmt::Debug for Module {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Module")
+            .field("realm", &self.inner.realm.addr())
+            .field("namespace", &self.inner.namespace)
+            .field("kind", &self.inner.kind)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for ModuleEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModuleEdge")
             .field("realm", &self.inner.realm.addr())
             .field("namespace", &self.inner.namespace)
             .field("kind", &self.inner.kind)
@@ -151,6 +166,12 @@ pub(crate) enum ResolveExportError {
 }
 
 impl Module {
+    pub(crate) fn to_edge(&self) -> ModuleEdge {
+        ModuleEdge {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+
     /// Abstract operation [`ParseModule ( sourceText, realm, hostDefined )`][spec].
     ///
     /// Parses the provided `src` as an ECMAScript module, returning an error if parsing fails.
@@ -639,6 +660,14 @@ impl Module {
     #[must_use]
     pub fn path(&self) -> Option<&Path> {
         self.inner.path.as_deref()
+    }
+}
+
+impl ModuleEdge {
+    pub(crate) fn to_rooted(&self) -> Module {
+        Module {
+            inner: self.inner.clone().root(),
+        }
     }
 }
 
