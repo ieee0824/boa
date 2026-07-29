@@ -1003,7 +1003,7 @@ pub(crate) fn function_call(
         );
         return Err(JsNativeError::typ()
             .with_message("class constructor cannot be invoked without 'new'")
-            .with_realm(realm)
+            .with_realm(&realm)
             .into());
     }
 

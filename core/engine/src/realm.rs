@@ -29,7 +29,7 @@ use rustc_hash::FxHashMap;
 ///
 /// In the specification these are called Realm Records.
 #[doc(hidden)]
-pub trait RealmHandle: Clone + Trace + std::ops::Deref<Target = RealmInner> {
+pub trait RealmHandle: Clone + std::ops::Deref<Target = RealmInner> {
     fn as_inner(&self) -> &RealmInner;
 }
 
@@ -49,12 +49,21 @@ impl RealmHandle for GcEdge<RealmInner> {
 ///
 /// The default handle is an explicit native root. Heap-owned records use an
 /// internal edge specialization.
-#[derive(Clone, Trace, Finalize)]
+#[derive(Clone)]
 pub struct Realm<H: RealmHandle = Rooted<RealmInner>> {
     inner: H,
 }
 
 pub(crate) type RealmEdge = Realm<GcEdge<RealmInner>>;
+
+impl Finalize for RealmEdge {}
+
+// SAFETY: Heap-owned realms contain only an explicitly traced GC edge.
+unsafe impl Trace for RealmEdge {
+    boa_gc::custom_trace!(this, mark, {
+        mark(&this.inner);
+    });
+}
 
 impl<H: RealmHandle> Eq for Realm<H> {}
 

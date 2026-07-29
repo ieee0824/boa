@@ -1190,7 +1190,7 @@ fn non_existant_call(
 ) -> JsResult<CallValue> {
     Err(JsNativeError::typ()
         .with_message("not a callable function")
-        .with_realm(context.realm().clone())
+        .with_realm(context.realm())
         .into())
 }
 
@@ -1201,6 +1201,6 @@ fn non_existant_construct(
 ) -> JsResult<CallValue> {
     Err(JsNativeError::typ()
         .with_message("not a constructor")
-        .with_realm(context.realm().clone())
+        .with_realm(context.realm())
         .into())
 }

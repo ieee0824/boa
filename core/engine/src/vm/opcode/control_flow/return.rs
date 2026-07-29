@@ -54,7 +54,7 @@ impl CheckReturn {
             context.vm.pending_exception = Some(
                 JsNativeError::typ()
                     .with_message("derived constructor can only return an Object or undefined")
-                    .with_realm(realm)
+                    .with_realm(&realm)
                     .into(),
             );
             return context.handle_throw();
@@ -67,7 +67,7 @@ impl CheckReturn {
 
                 match context.vm.environments.get_this_binding() {
                     Err(err) => {
-                        let err = err.inject_realm(realm);
+                        let err = err.inject_realm(&realm);
                         context.vm.pending_exception = Some(err);
                         return context.handle_throw();
                     }

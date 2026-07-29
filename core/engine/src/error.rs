@@ -9,7 +9,7 @@ use crate::{
     js_string,
     object::JsObject,
     property::PropertyDescriptor,
-    realm::Realm,
+    realm::{Realm, RealmEdge},
     vm::{
         NativeSourceInfo,
         shadow_stack::{Backtrace, ShadowEntry},
@@ -508,7 +508,7 @@ impl JsError {
                     kind,
                     message,
                     cause: cause.map(|v| Box::new(Self::from_opaque(v))),
-                    realm: Some(realm),
+                    realm: Some(realm.to_edge()),
                     position,
                 })
             }
@@ -644,10 +644,10 @@ impl JsError {
     ///
     /// This is a no-op if the error is not native or if the `realm` field of the error is already
     /// set.
-    pub(crate) fn inject_realm(mut self, realm: Realm) -> Self {
+    pub(crate) fn inject_realm(mut self, realm: &Realm) -> Self {
         match &mut self.inner {
             Repr::Native(err) if err.realm.is_none() => {
-                err.realm = Some(realm);
+                err.realm = Some(realm.to_edge());
             }
             _ => {}
         }
@@ -792,7 +792,7 @@ pub struct JsNativeError {
     message: Cow<'static, str>,
     #[source]
     cause: Option<Box<JsError>>,
-    realm: Option<Realm>,
+    realm: Option<RealmEdge>,
     position: IgnoreEq<Option<ShadowEntry>>,
 }
 
@@ -1302,8 +1302,8 @@ impl JsNativeError {
     }
 
     /// Sets the realm of this error.
-    pub(crate) fn with_realm(mut self, realm: Realm) -> Self {
-        self.realm = Some(realm);
+    pub(crate) fn with_realm(mut self, realm: &Realm) -> Self {
+        self.realm = Some(realm.to_edge());
         self
     }
 
