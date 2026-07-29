@@ -141,6 +141,36 @@ fn unregister_ephemeron_root(pointer: EphemeronPointer) {
     });
 }
 
+struct TemporaryStrongRoot(GcErasedPointer);
+
+impl TemporaryStrongRoot {
+    fn new(pointer: GcErasedPointer) -> Self {
+        register_root(pointer);
+        Self(pointer)
+    }
+}
+
+impl Drop for TemporaryStrongRoot {
+    fn drop(&mut self) {
+        unregister_root(self.0);
+    }
+}
+
+struct TemporaryEphemeronRoot(EphemeronPointer);
+
+impl TemporaryEphemeronRoot {
+    fn new(pointer: EphemeronPointer) -> Self {
+        register_ephemeron_root(pointer);
+        Self(pointer)
+    }
+}
+
+impl Drop for TemporaryEphemeronRoot {
+    fn drop(&mut self) {
+        unregister_ephemeron_root(self.0);
+    }
+}
+
 #[cfg(test)]
 fn registered_roots() -> Vec<RootEntry> {
     GC_ROOTS.with(|roots| roots.borrow().values().copied().collect())
@@ -246,17 +276,24 @@ impl Allocator {
     /// Allocate a new garbage collected value to the Garbage Collector's heap.
     fn alloc_gc<T: Trace>(value: GcBox<T>) -> NonNull<GcBox<T>> {
         let element_size = size_of_val::<GcBox<T>>(&value);
+        // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
+        let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
+        let erased: NonNull<GcBox<NonTraceable>> = ptr.cast();
+        let temporary_root = TemporaryStrongRoot::new(erased);
+
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
 
             Self::manage_state(&mut gc);
-            // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
-            let erased: NonNull<GcBox<NonTraceable>> = ptr.cast();
+            // A collection can mark the allocation through its temporary root even though it is
+            // not in the heap vector yet. Clear that mark before publishing it to the heap.
+            // SAFETY: `ptr` remains owned by this allocation path.
+            unsafe { ptr.as_ref() }.header.unmark();
 
             gc.strongs.push(erased);
             gc.runtime.bytes_allocated += element_size;
 
+            drop(temporary_root);
             ptr
         })
     }
@@ -265,17 +302,22 @@ impl Allocator {
         value: EphemeronBox<K, V>,
     ) -> NonNull<EphemeronBox<K, V>> {
         let element_size = size_of_val::<EphemeronBox<K, V>>(&value);
+        // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
+        let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
+        let erased: NonNull<dyn ErasedEphemeronBox> = ptr;
+        let temporary_root = TemporaryEphemeronRoot::new(erased);
+
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
 
             Self::manage_state(&mut gc);
-            // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
-            let erased: NonNull<dyn ErasedEphemeronBox> = ptr;
+            // SAFETY: `ptr` remains owned by this allocation path.
+            unsafe { ptr.as_ref() }.header.unmark();
 
             gc.weaks.push(erased);
             gc.runtime.bytes_allocated += element_size;
 
+            drop(temporary_root);
             ptr
         })
     }
@@ -341,8 +383,6 @@ impl Collector {
     fn collect(gc: &mut BoaGc) {
         gc.runtime.collections += 1;
 
-        Self::trace_non_roots(gc);
-
         let mut tracer = Tracer::new();
 
         let unreachables = Self::mark_heap(&mut tracer, &gc.strongs, &gc.weaks, &gc.weak_maps);
@@ -393,26 +433,6 @@ impl Collector {
         gc.weak_maps.shrink_to(gc.weak_maps.len() >> 2);
     }
 
-    fn trace_non_roots(gc: &BoaGc) {
-        // Count all the handles located in GC heap.
-        // Then, we can find whether there is a reference from other places, and they are the roots.
-        for node in &gc.strongs {
-            // SAFETY: node must be valid as this phase cannot drop any node.
-            let trace_non_roots_fn = unsafe { node.as_ref() }.trace_non_roots_fn();
-
-            // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-            unsafe {
-                trace_non_roots_fn(*node);
-            }
-        }
-
-        for eph in &gc.weaks {
-            // SAFETY: node must be valid as this phase cannot drop any node.
-            let eph_ref = unsafe { eph.as_ref() };
-            eph_ref.trace_non_roots();
-        }
-    }
-
     /// Walk the heap and mark any nodes deemed reachable
     fn mark_heap(
         tracer: &mut Tracer,
@@ -426,18 +446,19 @@ impl Collector {
 
         // === Preliminary mark phase ===
         //
-        // 0. Get the naive list of possibly dead nodes.
+        // 0. Trace every explicitly registered strong root.
+        GC_ROOTS.with(|roots| {
+            for root in roots.borrow().values() {
+                tracer.enqueue(root.pointer);
+            }
+        });
+        // SAFETY: registered roots point to live collector allocations.
+        unsafe { tracer.trace_until_empty() };
+
+        // Get the naive list of possibly dead nodes.
         for node in strongs {
             // SAFETY: node must be valid as this phase cannot drop any node.
-            let node_ref = unsafe { node.as_ref() };
-            if node_ref.is_rooted() {
-                tracer.enqueue(*node);
-
-                // SAFETY: all nodes must be valid as this phase cannot drop any node.
-                unsafe {
-                    tracer.trace_until_empty();
-                }
-            } else if !node_ref.is_marked() {
+            if unsafe { !node.as_ref().is_marked() } {
                 strong_dead.push(*node);
             }
         }
@@ -457,16 +478,18 @@ impl Collector {
         // === Weak mark phase ===
         //
         //
-        // 1. Get the naive list of ephemerons that are supposedly dead or their key is dead and
-        // trace all the ephemerons that have roots and their keys are live. Also remove from
-        // this list the ephemerons that are marked but their value is dead.
+        // 1. Mark explicitly registered ephemeron roots, then get the naive list of ephemerons
+        // that are supposedly dead or whose key is dead.
+        EPHEMERON_ROOTS.with(|roots| {
+            for root in roots.borrow().values() {
+                // SAFETY: registered roots point to live collector allocations.
+                unsafe { root.pointer.as_ref() }.header().mark();
+            }
+        });
+
         for eph in weaks {
             // SAFETY: node must be valid as this phase cannot drop any node.
             let eph_ref = unsafe { eph.as_ref() };
-            let header = eph_ref.header();
-            if header.is_rooted() {
-                header.mark();
-            }
             // SAFETY: the garbage collector ensures `eph_ref` always points to valid data.
             if unsafe { !eph_ref.trace(tracer) } {
                 pending_ephemerons.push(*eph);
@@ -571,7 +594,6 @@ impl Collector {
             let node_ref = unsafe { node.as_ref() };
             if node_ref.is_marked() {
                 node_ref.header.unmark();
-                node_ref.reset_non_root_count();
 
                 true
             } else {
@@ -596,7 +618,6 @@ impl Collector {
             let header = eph_ref.header();
             if header.is_marked() {
                 header.unmark();
-                header.reset_non_root_count();
 
                 true
             } else {

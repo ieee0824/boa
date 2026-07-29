@@ -34,9 +34,6 @@ unsafe impl Trace for NonTraceable {
     unsafe fn trace(&self, _tracer: &mut Tracer) {
         unreachable!()
     }
-    unsafe fn trace_non_roots(&self) {
-        unreachable!()
-    }
     fn run_finalizer(&self) {
         unreachable!()
     }
@@ -412,25 +409,13 @@ impl<T: Trace + ?Sized> Gc<T> {
     }
 }
 
-impl<T: Trace + ?Sized> Finalize for Gc<T> {
-    fn finalize(&self) {
-        // SAFETY: inner_ptr should be alive when calling finalize.
-        // We don't call inner_ptr() to avoid overhead of calling finalizer_safe().
-        unsafe {
-            self.inner_ptr.as_ref().dec_ref_count();
-        }
-    }
-}
+impl<T: Trace + ?Sized> Finalize for Gc<T> {}
 
 // SAFETY: `Gc` maintains it's own rootedness and implements all methods of
 // Trace. It is not possible to root an already rooted `Gc` and vice versa.
 unsafe impl<T: Trace + ?Sized> Trace for Gc<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         tracer.enqueue(self.as_erased_pointer());
-    }
-
-    unsafe fn trace_non_roots(&self) {
-        self.inner().inc_non_root_count();
     }
 
     fn run_finalizer(&self) {
@@ -441,13 +426,8 @@ unsafe impl<T: Trace + ?Sized> Trace for Gc<T> {
 impl<T: Trace + ?Sized> Clone for Gc<T> {
     fn clone(&self) -> Self {
         let ptr = self.inner_ptr();
-        // SAFETY: though `ptr` doesn't come from a `into_raw` call, it essentially does the same,
-        // but it skips the call to `std::mem::forget` since we have a reference instead of an owned
-        // value.
-        unsafe {
-            ptr.as_ref().inc_ref_count();
-            Self::from_raw(ptr)
-        }
+        // SAFETY: the collector owns the allocation and `self` proves the pointer is valid.
+        unsafe { Self::from_raw(ptr) }
     }
 }
 

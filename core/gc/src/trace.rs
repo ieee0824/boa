@@ -82,13 +82,6 @@ pub unsafe trait Trace: Finalize {
     /// See [`Trace`].
     unsafe fn trace(&self, tracer: &mut Tracer);
 
-    /// Trace handles located in GC heap, and mark them as non root.
-    ///
-    /// # Safety
-    ///
-    /// See [`Trace`].
-    unsafe fn trace_non_roots(&self);
-
     /// Runs [`Finalize::finalize`] on this object and all
     /// contained subobjects.
     fn run_finalizer(&self);
@@ -102,8 +95,6 @@ macro_rules! empty_trace {
     () => {
         #[inline]
         unsafe fn trace(&self, _tracer: &mut $crate::Tracer) {}
-        #[inline]
-        unsafe fn trace_non_roots(&self) {}
         #[inline]
         fn run_finalizer(&self) {
             $crate::Finalize::finalize(self)
@@ -131,17 +122,6 @@ macro_rules! custom_trace {
                     $crate::Trace::trace(it, tracer);
                 }
             };
-            let $this = self;
-            $body
-        }
-        #[inline]
-        unsafe fn trace_non_roots(&self) {
-            fn $marker<T: $crate::Trace + ?Sized>(it: &T) {
-                // SAFETY: The implementor must ensure that `trace` is correctly implemented.
-                unsafe {
-                    $crate::Trace::trace_non_roots(it);
-                }
-            }
             let $this = self;
             $body
         }
@@ -316,13 +296,6 @@ unsafe impl<T: Trace + ?Sized> Trace for Box<T> {
         // SAFETY: The implementor must ensure that `trace` is correctly implemented.
         unsafe {
             Trace::trace(&**self, tracer);
-        }
-    }
-    #[inline]
-    unsafe fn trace_non_roots(&self) {
-        // SAFETY: The implementor must ensure that `trace_non_roots` is correctly implemented.
-        unsafe {
-            Trace::trace_non_roots(&**self);
         }
     }
     #[inline]

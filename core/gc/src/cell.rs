@@ -237,14 +237,6 @@ unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
         }
     }
 
-    unsafe fn trace_non_roots(&self) {
-        match self.borrow.get().borrowed() {
-            BorrowState::Writing => (),
-            // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { (*self.cell.get()).trace_non_roots() },
-        }
-    }
-
     fn run_finalizer(&self) {
         Finalize::finalize(self);
         match self.borrow.get().borrowed() {

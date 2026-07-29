@@ -85,11 +85,6 @@ unsafe impl<K: Trace + ?Sized, V: Trace> Trace for Ephemeron<K, V> {
         unsafe { self.inner.trace(tracer) };
     }
 
-    unsafe fn trace_non_roots(&self) {
-        // SAFETY: Delegated to the valid inner edge during compatibility migration.
-        unsafe { self.inner.trace_non_roots() };
-    }
-
     fn run_finalizer(&self) {
         self.inner.run_finalizer();
     }
@@ -130,12 +125,7 @@ impl<K: Trace + ?Sized, V: Trace + Clone> EphemeronEdge<K, V> {
         // `inner_ptr`.
         let key_ptr = unsafe { self.inner_ptr.as_ref().key_ptr() }?;
 
-        // SAFETY: Returned pointer is valid, so this is safe.
-        unsafe {
-            key_ptr.as_ref().inc_ref_count();
-        }
-
-        // SAFETY: The gc pointer's reference count has been incremented, so this is safe.
+        // SAFETY: the key remains owned by the collector while this ephemeron is live.
         Some(GcEdge::from(unsafe { Gc::from_raw(key_ptr) }))
     }
 
@@ -194,15 +184,7 @@ impl<K: Trace + ?Sized, V: Trace> EphemeronEdge<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Finalize for EphemeronEdge<K, V> {
-    fn finalize(&self) {
-        // SAFETY: inner_ptr should be alive when calling finalize.
-        // We don't call inner_ptr() to avoid overhead of calling finalizer_safe().
-        unsafe {
-            self.inner_ptr.as_ref().dec_ref_count();
-        }
-    }
-}
+impl<K: Trace + ?Sized, V: Trace> Finalize for EphemeronEdge<K, V> {}
 
 // SAFETY: `EphemeronEdge`s trace implementation only marks its inner box because we want to stop
 // tracing through weakly held pointers.
@@ -215,10 +197,6 @@ unsafe impl<K: Trace + ?Sized, V: Trace> Trace for EphemeronEdge<K, V> {
         }
     }
 
-    unsafe fn trace_non_roots(&self) {
-        self.inner().inc_non_root_count();
-    }
-
     fn run_finalizer(&self) {
         Finalize::finalize(self);
     }
@@ -227,7 +205,6 @@ unsafe impl<K: Trace + ?Sized, V: Trace> Trace for EphemeronEdge<K, V> {
 impl<K: Trace + ?Sized, V: Trace> Clone for EphemeronEdge<K, V> {
     fn clone(&self) -> Self {
         let ptr = self.inner_ptr();
-        self.inner().inc_ref_count();
         // SAFETY: `&self` is a valid EphemeronEdge pointer.
         unsafe { Self::from_raw(ptr) }
     }
