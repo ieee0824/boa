@@ -150,6 +150,9 @@ fn create_operations_module(context: &mut Context) -> Module {
     .name("sqrt")
     .build();
 
+    let functions: (JsValue, JsValue, JsValue, JsValue, JsValue) =
+        (sum.into(), sub.into(), mult.into(), div.into(), sqrt.into());
+
     Module::synthetic(
         // Make sure to list all exports beforehand.
         &[
@@ -171,7 +174,7 @@ fn create_operations_module(context: &mut Context) -> Module {
                 module.set_export(&js_string!("sqrt"), fns.4.clone().into())?;
                 Ok(())
             },
-            (sum, sub, mult, div, sqrt),
+            functions,
         ),
         None,
         None,
