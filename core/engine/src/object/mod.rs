@@ -445,7 +445,7 @@ impl<'realm> FunctionObjectBuilder<'realm> {
     pub fn build(self) -> JsFunction {
         let object = self.realm.intrinsics().templates().function().create(
             NativeFunctionObject {
-                f: self.function,
+                f: self.function.to_edge(),
                 name: self.name.clone(),
                 constructor: self.constructor,
                 realm: Some(self.realm.clone()),
@@ -893,7 +893,7 @@ impl<'ctx> ConstructorBuilder<'ctx> {
 
         let constructor = {
             let data = NativeFunctionObject {
-                f: self.function,
+                f: self.function.to_edge(),
                 name: self.name.clone(),
                 constructor: self.kind,
                 realm: Some(self.context.realm().clone()),

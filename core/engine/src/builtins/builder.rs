@@ -103,7 +103,7 @@ impl<S: ApplyToObject + IsConstructor> ApplyToObject for Callable<S> {
             let mut function = object
                 .downcast_mut::<NativeFunctionObject>()
                 .expect("Builtin must be a function object");
-            function.f = NativeFunction::from_fn_ptr(self.function);
+            function.f = NativeFunction::from_fn_ptr(self.function).to_edge();
             function.constructor = S::IS_CONSTRUCTOR.then_some(ConstructorKind::Base);
             function.realm = Some(self.realm);
         }
@@ -436,7 +436,7 @@ impl BuiltInConstructorWithPrototype<'_> {
                 .constructor
                 .downcast_mut::<NativeFunctionObject>()
                 .expect("Builtin must be a function object");
-            function.f = NativeFunction::from_fn_ptr(self.function);
+            function.f = NativeFunction::from_fn_ptr(self.function).to_edge();
             function.constructor = Some(ConstructorKind::Base);
             function.realm = Some(self.realm.clone());
         }
@@ -468,7 +468,7 @@ impl BuiltInConstructorWithPrototype<'_> {
                 .constructor
                 .downcast_mut::<NativeFunctionObject>()
                 .expect("Builtin must be a function object");
-            function.f = NativeFunction::from_fn_ptr(self.function);
+            function.f = NativeFunction::from_fn_ptr(self.function).to_edge();
             function.constructor = Some(ConstructorKind::Base);
             function.realm = Some(self.realm.clone());
         }
@@ -518,7 +518,7 @@ impl BuiltInCallable<'_> {
     pub(crate) fn build(self) -> JsFunction {
         let object = self.realm.intrinsics().templates().function().create(
             NativeFunctionObject {
-                f: NativeFunction::from_fn_ptr(self.function),
+                f: NativeFunction::from_fn_ptr(self.function).to_edge(),
                 name: self.name.clone(),
                 constructor: None,
                 realm: Some(self.realm.clone()),

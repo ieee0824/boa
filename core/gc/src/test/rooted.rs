@@ -1,5 +1,5 @@
 use super::run_test;
-use crate::{Rooted, registered_roots};
+use crate::{Finalize, Gc, Rooted, Trace, registered_roots};
 
 #[test]
 fn explicit_roots_follow_handle_lifetimes() {
@@ -40,4 +40,20 @@ fn root_edge_conversions_update_registration() {
         drop(root);
         assert!(registered_roots().is_empty());
     });
+}
+
+#[test]
+fn rooted_fields_drop_safely_during_thread_teardown() {
+    #[derive(Trace, Finalize)]
+    struct Holder {
+        root: Rooted<u32>,
+    }
+
+    std::thread::spawn(|| {
+        let _holder = Gc::new(Holder {
+            root: Rooted::new(7),
+        });
+    })
+    .join()
+    .expect("collector teardown must not outlive its root registry");
 }

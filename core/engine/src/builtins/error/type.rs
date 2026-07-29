@@ -132,7 +132,8 @@ impl IntrinsicObject for ThrowTypeError {
                         functions or the arguments objects for calls to them",
                     )
                     .into())
-            });
+            })
+            .to_edge();
             obj.name = js_string!();
             obj.constructor = None;
             obj.realm = Some(realm.clone());

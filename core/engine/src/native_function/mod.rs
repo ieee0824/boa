@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 
-use boa_gc::{Finalize, Gc, Trace, custom_trace};
+use boa_gc::{Finalize, Gc, GcEdge, Rooted, Trace, custom_trace};
 use boa_string::JsString;
 
 use crate::job::NativeAsyncJob;
@@ -74,7 +74,7 @@ where
 /// The data of an object containing a `NativeFunction`.
 pub struct NativeFunctionObject {
     /// The rust function.
-    pub(crate) f: NativeFunction,
+    pub(crate) f: NativeFunctionEdge,
 
     /// JavaScript name of the function.
     pub(crate) name: JsString,
@@ -130,20 +130,39 @@ impl JsData for NativeFunctionObject {
 /// **Undefined Behaviour**.
 #[derive(Clone, Finalize)]
 pub struct NativeFunction {
-    inner: Inner,
+    inner: RootedInner,
 }
 
 #[derive(Clone)]
-enum Inner {
+enum RootedInner {
     PointerFn(NativeFunctionPointer),
-    Closure(Gc<dyn TraceableClosure>),
+    Closure(Rooted<dyn TraceableClosure>),
+}
+
+#[derive(Clone, Finalize)]
+pub(crate) struct NativeFunctionEdge {
+    inner: EdgeInner,
+}
+
+#[derive(Clone)]
+enum EdgeInner {
+    PointerFn(NativeFunctionPointer),
+    Closure(GcEdge<dyn TraceableClosure>),
 }
 
 // Manual implementation because deriving `Trace` triggers the `single_use_lifetimes` lint.
 // SAFETY: Only closures can contain `Trace` captures, so this implementation is safe.
 unsafe impl Trace for NativeFunction {
     custom_trace!(this, mark, {
-        if let Inner::Closure(c) = &this.inner {
+        if let RootedInner::Closure(c) = &this.inner {
+            mark(c);
+        }
+    });
+}
+
+unsafe impl Trace for NativeFunctionEdge {
+    custom_trace!(this, mark, {
+        if let EdgeInner::Closure(c) = &this.inner {
             mark(c);
         }
     });
@@ -155,12 +174,18 @@ impl std::fmt::Debug for NativeFunction {
     }
 }
 
+impl std::fmt::Debug for NativeFunctionEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeFunctionEdge").finish_non_exhaustive()
+    }
+}
+
 impl NativeFunction {
     /// Creates a `NativeFunction` from a function pointer.
     #[inline]
     pub fn from_fn_ptr(function: NativeFunctionPointer) -> Self {
         Self {
-            inner: Inner::PointerFn(function),
+            inner: RootedInner::PointerFn(function),
         }
     }
 
@@ -288,7 +313,7 @@ impl NativeFunction {
         // meaning this is safe.
         unsafe {
             Self {
-                inner: Inner::Closure(Gc::from_raw(ptr)),
+                inner: RootedInner::Closure(Rooted::from_gc(Gc::from_raw(ptr))),
             }
         }
     }
@@ -302,8 +327,8 @@ impl NativeFunction {
         context: &mut Context,
     ) -> JsResult<JsValue> {
         match self.inner {
-            Inner::PointerFn(f) => f(this, args, context),
-            Inner::Closure(ref c) => c.call(this, args, context),
+            RootedInner::PointerFn(f) => f(this, args, context),
+            RootedInner::Closure(ref c) => c.call(this, args, context),
         }
     }
 
@@ -313,6 +338,29 @@ impl NativeFunction {
     #[must_use]
     pub fn to_js_function(self, realm: &Realm) -> JsFunction {
         FunctionObjectBuilder::new(realm, self).build()
+    }
+
+    pub(crate) fn to_edge(&self) -> NativeFunctionEdge {
+        let inner = match &self.inner {
+            RootedInner::PointerFn(f) => EdgeInner::PointerFn(*f),
+            RootedInner::Closure(c) => EdgeInner::Closure(c.clone().into_edge()),
+        };
+        NativeFunctionEdge { inner }
+    }
+}
+
+impl NativeFunctionEdge {
+    #[inline]
+    pub(crate) fn call(
+        &self,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        match self.inner {
+            EdgeInner::PointerFn(f) => f(this, args, context),
+            EdgeInner::Closure(ref c) => c.call(this, args, context),
+        }
     }
 }
 
@@ -457,4 +505,22 @@ fn native_function_construct(
     context.vm.stack.push(result?);
 
     Ok(CallValue::Complete)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NativeFunction;
+    use crate::{Context, JsValue};
+
+    #[test]
+    fn native_closure_survives_collection_before_heap_storage() {
+        let function = NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::new(42)));
+
+        boa_gc::force_collect();
+
+        let result = function
+            .call(&JsValue::undefined(), &[], &mut Context::default())
+            .expect("native closure should remain callable while externally owned");
+        assert_eq!(result, JsValue::new(42));
+    }
 }
