@@ -1,12 +1,12 @@
 use super::run_test;
-use crate::{Gc, WeakMap, force_collect, has_weak_maps};
+use crate::{Rooted, WeakMap, force_collect, has_weak_maps};
 
 #[test]
 fn weak_map_basic() {
     run_test(|| {
-        let key1 = Gc::new(String::from("key1"));
-        let key2 = Gc::new(String::from("key2"));
-        let key3 = Gc::new(String::from("key3"));
+        let key1 = Rooted::new(String::from("key1"));
+        let key2 = Rooted::new(String::from("key2"));
+        let key3 = Rooted::new(String::from("key3"));
 
         assert!(!has_weak_maps());
 
@@ -58,9 +58,9 @@ fn weak_map_basic() {
 #[test]
 fn weak_map_multiple() {
     run_test(|| {
-        let key1 = Gc::new(String::from("key1"));
-        let key2 = Gc::new(String::from("key2"));
-        let key3 = Gc::new(String::from("key3"));
+        let key1 = Rooted::new(String::from("key1"));
+        let key2 = Rooted::new(String::from("key2"));
+        let key3 = Rooted::new(String::from("key3"));
 
         assert!(!has_weak_maps());
 
@@ -115,7 +115,7 @@ fn weak_map_multiple() {
 #[test]
 fn weak_map_key_live() {
     run_test(|| {
-        let key = Gc::new(String::from("key"));
+        let key = Rooted::new(String::from("key"));
         let key_copy = key.clone();
 
         let mut map = WeakMap::new();

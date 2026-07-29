@@ -10,7 +10,7 @@ use crate::{
     object::FunctionObjectBuilder,
     vm::{CompletionRecord, GeneratorResumeKind, opcode::Operation},
 };
-use boa_gc::Gc;
+use boa_gc::GcEdge;
 use std::{cell::Cell, ops::ControlFlow};
 
 /// `Await` implements the Opcode Operation for `Opcode::Await`
@@ -50,7 +50,7 @@ impl Await {
 
         let r#gen = GeneratorContext::from_current(context, None);
 
-        let captures = Gc::new(Cell::new(Some(r#gen)));
+        let captures = GcEdge::new(Cell::new(Some(r#gen)));
 
         // 3. Let fulfilledClosure be a new Abstract Closure with parameters (value) that captures asyncContext and performs the following steps when called:
         // 4. Let onFulfilled be CreateBuiltinFunction(fulfilledClosure, 1, "", « »).

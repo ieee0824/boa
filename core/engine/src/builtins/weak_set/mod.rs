@@ -161,14 +161,14 @@ impl WeakSet {
 
         // 4. Let entries be the List that is S.[[WeakSetData]].
         // 5. For each element e of entries, do
-        if set.contains_key(value.inner()) {
+        if set.contains_key(&value.root_inner()) {
             // a. If e is not empty and SameValue(e, value) is true, then
             // i. Return S.
             return Ok(this.clone());
         }
 
         // 6. Append value as the last element of entries.
-        set.insert(value.inner(), ());
+        set.insert(&value.root_inner(), ());
 
         // 7. Return S.
         Ok(this.clone())
@@ -211,7 +211,7 @@ impl WeakSet {
         // i. Replace the element of entries whose value is e with an element whose value is empty.
         // ii. Return true.
         // 6. Return false.
-        Ok(set.remove(value.inner()).is_some().into())
+        Ok(set.remove(&value.root_inner()).is_some().into())
     }
 
     /// `WeakSet.prototype.has( value )`
@@ -249,6 +249,6 @@ impl WeakSet {
         // 5. For each element e of entries, do
         // a. If e is not empty and SameValue(e, value) is true, return true.
         // 6. Return false.
-        Ok(set.contains_key(value.inner()).into())
+        Ok(set.contains_key(&value.root_inner()).into())
     }
 }

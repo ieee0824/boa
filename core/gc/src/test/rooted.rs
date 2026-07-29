@@ -1,5 +1,5 @@
 use super::run_test;
-use crate::{Finalize, Gc, Rooted, Trace, registered_roots};
+use crate::{Finalize, Gc, GcEdge, Rooted, Trace, WeakGc, registered_roots};
 
 #[test]
 fn explicit_roots_follow_handle_lifetimes() {
@@ -36,6 +36,22 @@ fn root_edge_conversions_update_registration() {
         let root = edge.root();
         assert_eq!(registered_roots().len(), 1);
         assert_eq!(**root.as_gc(), 11);
+
+        drop(root);
+        assert!(registered_roots().is_empty());
+    });
+}
+
+#[test]
+fn edge_allocation_and_weak_promotion_register_only_explicit_roots() {
+    run_test(|| {
+        let edge = GcEdge::new(13_u32);
+        assert!(registered_roots().is_empty());
+
+        let weak = WeakGc::new_edge(&edge);
+        let root = weak.upgrade_rooted().expect("edge is still live");
+        assert_eq!(registered_roots().len(), 1);
+        assert_eq!(*root, 13);
 
         drop(root);
         assert!(registered_roots().is_empty());

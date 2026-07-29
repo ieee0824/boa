@@ -22,7 +22,7 @@ use crate::{
     property::{PropertyDescriptor, PropertyKey},
     value::PreferredType,
 };
-use boa_gc::{self, Finalize, Gc, GcEdge, GcRef, GcRefCell, GcRefMut, Trace};
+use boa_gc::{self, Finalize, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace};
 use core::ptr::fn_addr_eq;
 use std::collections::HashSet;
 use std::{
@@ -119,15 +119,12 @@ impl JsObject {
         object: Object<T>,
         vtable: &'static InternalObjectMethods,
     ) -> Self {
-        let inner = Gc::new(VTableObject {
+        let inner = GcEdge::new(VTableObject {
             object: GcRefCell::new(object),
             vtable,
         });
 
-        JsObject {
-            inner: inner.into(),
-        }
-        .upcast()
+        JsObject { inner }.upcast()
     }
 
     /// Creates a new ordinary object with its prototype set to the `Object` prototype.
@@ -169,7 +166,7 @@ impl JsObject {
         data: T,
     ) -> Self {
         let internal_methods = data.internal_methods();
-        let inner = Gc::new(VTableObject {
+        let inner = GcEdge::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
                 properties: PropertyMap::from_prototype_unique_shape(prototype.into()),
@@ -179,10 +176,7 @@ impl JsObject {
             vtable: internal_methods,
         });
 
-        JsObject {
-            inner: inner.into(),
-        }
-        .upcast()
+        JsObject { inner }.upcast()
     }
 
     /// Creates a new object with the provided prototype and object data.
@@ -198,7 +192,7 @@ impl JsObject {
         data: T,
     ) -> Self {
         let internal_methods = data.internal_methods();
-        let inner = Gc::new(VTableObject {
+        let inner = GcEdge::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
                 properties: PropertyMap::from_prototype_with_shared_shape(
@@ -211,10 +205,7 @@ impl JsObject {
             vtable: internal_methods,
         });
 
-        JsObject {
-            inner: inner.into(),
-        }
-        .upcast()
+        JsObject { inner }.upcast()
     }
 
     /// Downcasts the object's inner data if the object is of type `T`.
@@ -721,7 +712,7 @@ impl<T: NativeObject> JsObject<T> {
     #[must_use]
     #[inline]
     pub fn equals(lhs: &Self, rhs: &Self) -> bool {
-        Gc::ptr_eq(lhs.inner(), rhs.inner())
+        GcEdge::ptr_eq(lhs.inner(), rhs.inner())
     }
 
     /// Get the prototype of the object.
@@ -813,8 +804,12 @@ impl<T: NativeObject> JsObject<T> {
         self.inner.vtable
     }
 
-    pub(crate) fn inner(&self) -> &Gc<VTableObject<T>> {
-        self.inner.as_gc()
+    pub(crate) const fn inner(&self) -> &GcEdge<VTableObject<T>> {
+        &self.inner
+    }
+
+    pub(crate) fn root_inner(&self) -> Rooted<VTableObject<T>> {
+        self.inner.clone().root()
     }
 
     /// Create a new private name with this object as the unique identifier.
@@ -831,7 +826,7 @@ impl<T: NativeObject> JsObject<T> {
     /// `JsValue`. To erase the pointer, call [`JsObject::upcast`].
     pub fn new<O: Into<Option<JsObject>>>(root_shape: &RootShape, prototype: O, data: T) -> Self {
         let internal_methods = data.internal_methods();
-        let inner = GcEdge::from(Gc::new(VTableObject {
+        let inner = GcEdge::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
                 properties: PropertyMap::from_prototype_with_shared_shape(
@@ -842,7 +837,7 @@ impl<T: NativeObject> JsObject<T> {
                 private_elements: ThinVec::new(),
             }),
             vtable: internal_methods,
-        }));
+        });
 
         Self { inner }
     }
@@ -853,7 +848,7 @@ impl<T: NativeObject> JsObject<T> {
     /// `JsValue`. To erase the pointer, call [`JsObject::upcast`].
     pub fn new_unique<O: Into<Option<JsObject>>>(prototype: O, data: T) -> Self {
         let internal_methods = data.internal_methods();
-        let inner = GcEdge::from(Gc::new(VTableObject {
+        let inner = GcEdge::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
                 properties: PropertyMap::from_prototype_unique_shape(prototype.into()),
@@ -861,7 +856,7 @@ impl<T: NativeObject> JsObject<T> {
                 private_elements: ThinVec::new(),
             }),
             vtable: internal_methods,
-        }));
+        });
 
         Self { inner }
     }
@@ -885,12 +880,10 @@ impl<T: NativeObject> AsRef<GcRefCell<Object<T>>> for JsObject<T> {
     }
 }
 
-impl<T: NativeObject> From<Gc<VTableObject<T>>> for JsObject<T> {
+impl<T: NativeObject> From<GcEdge<VTableObject<T>>> for JsObject<T> {
     #[inline]
-    fn from(inner: Gc<VTableObject<T>>) -> Self {
-        Self {
-            inner: inner.into(),
-        }
+    fn from(inner: GcEdge<VTableObject<T>>) -> Self {
+        Self { inner }
     }
 }
 
