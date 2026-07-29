@@ -1,12 +1,12 @@
 use boa_macros::{Finalize, Trace};
 
 use super::{Harness, run_test};
-use crate::{Gc, GcBox, GcRefCell, force_collect};
+use crate::{GcBox, GcEdge, GcRefCell, Rooted, force_collect};
 
 #[test]
 fn gc_basic_cell_allocation() {
     run_test(|| {
-        let gc_cell = Gc::new(GcRefCell::new(16_u16));
+        let gc_cell = Rooted::new(GcRefCell::new(16_u16));
 
         force_collect();
         Harness::assert_collections(1);
@@ -18,7 +18,7 @@ fn gc_basic_cell_allocation() {
 #[test]
 fn gc_basic_pointer_alloc() {
     run_test(|| {
-        let gc = Gc::new(16_u8);
+        let gc = Rooted::new(16_u8);
 
         force_collect();
         Harness::assert_collections(1);
@@ -40,17 +40,17 @@ fn gc_recursion() {
         #[derive(Debug, Finalize, Trace)]
         struct S {
             i: usize,
-            next: Option<Gc<S>>,
+            next: Option<GcEdge<S>>,
         }
 
         const SIZE: usize = size_of::<GcBox<S>>();
         const COUNT: usize = 1_000_000;
 
-        let mut root = Gc::new(S { i: 0, next: None });
+        let mut root = Rooted::new(S { i: 0, next: None });
         for i in 1..COUNT {
-            root = Gc::new(S {
+            root = Rooted::new(S {
                 i,
-                next: Some(root),
+                next: Some(root.into_edge()),
             });
         }
 
@@ -88,7 +88,7 @@ fn allocating_under_the_threshold_does_not_collect() {
         // 256 KiB of live data, comfortably inside a `4 MiB` threshold.
         let mut held = Vec::new();
         for _ in 0..256 {
-            held.push(Gc::new([0u8; 1024]));
+            held.push(Rooted::new([0u8; 1024]));
         }
 
         Harness::assert_collections(0);
@@ -105,7 +105,7 @@ fn allocating_past_the_threshold_collects() {
         // Dropped immediately, so this is `8 MiB` of garbage against a `4 MiB` threshold
         // and cannot be satisfied without collecting.
         for _ in 0..8192 {
-            drop(Gc::new([0u8; 1024]));
+            drop(GcEdge::new([0u8; 1024]));
         }
 
         Harness::assert_collected_at_least(1);
