@@ -18,7 +18,7 @@ use boa_ast::{
     },
     scope::BindingLocator,
 };
-use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Trace};
 use boa_interner::Interner;
 use boa_macros::js_str;
 use dynify::Dynify;
@@ -199,7 +199,7 @@ impl ModuleStatus {
 #[derive(Clone, Trace, Finalize)]
 #[boa_gc(unsafe_no_drop)]
 struct SourceTextContext {
-    codeblock: Gc<CodeBlock>,
+    codeblock: GcEdge<CodeBlock>,
     environments: EnvironmentStack,
     realm: Realm,
 }
@@ -1759,7 +1759,7 @@ impl SourceTextModule {
                 environment: env,
                 info,
                 context: SourceTextContext {
-                    codeblock,
+                    codeblock: codeblock.into(),
                     environments: frame.environments.clone(),
                     realm,
                 },
@@ -1800,8 +1800,8 @@ impl SourceTextModule {
         // 6. Set the VariableEnvironment of moduleContext to module.[[Environment]].
         // 7. Set the LexicalEnvironment of moduleContext to module.[[Environment]].
         let env_fp = environments.len() as u32;
-        let callframe = CallFrame::new(
-            codeblock,
+        let callframe = CallFrame::new_rooted(
+            codeblock.root(),
             Some(ActiveRunnable::Module(module_self.clone())),
             environments,
             realm,
