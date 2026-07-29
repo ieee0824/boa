@@ -313,7 +313,7 @@ async fn load_dyn_import(
             //         i. Append the Record { [[Specifier]]: specifier, [[Module]]: result.[[Value]] } to referrer.[[LoadedModules]].
             let entry = loaded_modules
                 .entry(specifier)
-                .or_insert_with(|| module.clone());
+                .or_insert_with(|| module.to_edge());
 
             //         i. Assert: That Record's [[Module]] is result.[[Value]].
             debug_assert_eq!(&module, entry);
@@ -324,14 +324,14 @@ async fn load_dyn_import(
             let mut loaded_modules = realm.loaded_modules().borrow_mut();
             let entry = loaded_modules
                 .entry(specifier)
-                .or_insert_with(|| module.clone());
+                .or_insert_with(|| module.to_edge());
             debug_assert_eq!(&module, entry);
         }
         Referrer::Script(script) => {
             let mut loaded_modules = script.loaded_modules().borrow_mut();
             let entry = loaded_modules
                 .entry(specifier)
-                .or_insert_with(|| module.clone());
+                .or_insert_with(|| module.to_edge());
             debug_assert_eq!(&module, entry);
         }
     }
@@ -365,6 +365,7 @@ async fn load_dyn_import(
         context.borrow().realm(),
         NativeFunction::from_copy_closure_with_captures(
             |_, _, (module, cap, on_rejected), context| {
+                let module = module.to_rooted();
                 // a. Let link be Completion(module.Link()).
                 // b. If link is an abrupt completion, then
                 if let Err(e) = module.link(context) {
@@ -386,6 +387,7 @@ async fn load_dyn_import(
                     context.realm(),
                     NativeFunction::from_copy_closure_with_captures(
                         |_, _, (module, cap), context| {
+                            let module = module.to_rooted();
                             // i. Let namespace be GetModuleNamespace(module).
                             let namespace = module.namespace(context);
 
@@ -397,7 +399,7 @@ async fn load_dyn_import(
                             // iii. Return unused.
                             Ok(JsValue::undefined())
                         },
-                        (module.clone(), cap.clone()),
+                        (module.to_edge(), cap.clone()),
                     ),
                 )
                 .build();
@@ -414,7 +416,11 @@ async fn load_dyn_import(
                 // g. Return unused.
                 Ok(JsValue::undefined())
             },
-            (module.clone(), cap.clone(), on_rejected.clone().into_edge()),
+            (
+                module.to_edge(),
+                cap.clone(),
+                on_rejected.clone().into_edge(),
+            ),
         ),
     )
     .build();

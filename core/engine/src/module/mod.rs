@@ -60,13 +60,17 @@ mod synthetic;
 /// ECMAScript's [**Abstract module record**][spec].
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-abstract-module-records
-#[derive(Clone, Trace, Finalize)]
+#[derive(Clone)]
 pub struct Module {
     inner: Rooted<ModuleRepr>,
 }
 
+/// A module reference stored inside a traced garbage-collected value.
+///
+/// Use [`Module::to_edge`] before placing a module in a native-function capture,
+/// and [`Self::root`] when an external owner is needed again.
 #[derive(Clone, Trace, Finalize)]
-pub(crate) struct ModuleEdge {
+pub struct ModuleEdge {
     inner: GcEdge<ModuleRepr>,
 }
 
@@ -166,7 +170,9 @@ pub(crate) enum ResolveExportError {
 }
 
 impl Module {
-    pub(crate) fn to_edge(&self) -> ModuleEdge {
+    /// Creates an unregistered module edge suitable for traced heap storage.
+    #[must_use]
+    pub fn to_edge(&self) -> ModuleEdge {
         ModuleEdge {
             inner: self.inner.clone().into_edge(),
         }
@@ -562,10 +568,11 @@ impl Module {
                 Some(
                     NativeFunction::from_copy_closure_with_captures(
                         |_, _, module, context| {
+                            let module = module.to_rooted();
                             module.link(context)?;
                             Ok(JsValue::undefined())
                         },
-                        self.clone(),
+                        self.to_edge(),
                     )
                     .to_js_function(context.realm()),
                 ),
@@ -575,8 +582,8 @@ impl Module {
             .then(
                 Some(
                     NativeFunction::from_copy_closure_with_captures(
-                        |_, _, module, context| Ok(module.evaluate(context).into()),
-                        self.clone(),
+                        |_, _, module, context| Ok(module.to_rooted().evaluate(context).into()),
+                        self.to_edge(),
                     )
                     .to_js_function(context.realm()),
                 ),
@@ -622,7 +629,7 @@ impl Module {
                     .collect();
 
                 //     d. Set namespace to ModuleNamespaceCreate(module, unambiguousNames).
-                ModuleNamespace::create(self.clone(), unambiguous_names, context)
+                ModuleNamespace::create(self, unambiguous_names, context)
             })
             .clone()
     }
@@ -664,10 +671,44 @@ impl Module {
 }
 
 impl ModuleEdge {
-    pub(crate) fn to_rooted(&self) -> Module {
+    /// Creates an explicitly registered external module owner.
+    #[must_use]
+    pub fn root(&self) -> Module {
         Module {
             inner: self.inner.clone().root(),
         }
+    }
+
+    pub(crate) fn to_rooted(&self) -> Module {
+        self.root()
+    }
+}
+
+impl PartialEq for ModuleEdge {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        Gc::ptr_eq(self.inner.as_gc(), other.inner.as_gc())
+    }
+}
+
+impl Eq for ModuleEdge {}
+
+impl PartialEq<Module> for ModuleEdge {
+    fn eq(&self, other: &Module) -> bool {
+        Gc::ptr_eq(self.inner.as_gc(), other.inner.as_gc())
+    }
+}
+
+impl PartialEq<ModuleEdge> for Module {
+    fn eq(&self, other: &ModuleEdge) -> bool {
+        Gc::ptr_eq(self.inner.as_gc(), other.inner.as_gc())
+    }
+}
+
+impl Hash for ModuleEdge {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(&raw const *self.inner, state);
     }
 }
 
@@ -713,6 +754,40 @@ impl<T: IntoIterator<Item = (JsString, NativeFunction)> + Clone> IntoJsModule fo
             None,
             context,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Module;
+    use crate::{Context, JsValue, NativeFunction, Source};
+
+    #[test]
+    fn native_capture_keeps_module_alive_across_collection() {
+        let mut context = Context::default();
+        let module = Module::parse(
+            Source::from_bytes("export const answer = 42;"),
+            None,
+            &mut context,
+        )
+        .expect("module should parse");
+
+        let callback = NativeFunction::from_copy_closure_with_captures(
+            |_, _, module, _| {
+                let module = module.root();
+                assert!(module.path().is_none());
+                Ok(JsValue::undefined())
+            },
+            module.to_edge(),
+        )
+        .to_js_function(context.realm());
+
+        drop(module);
+        boa_gc::force_collect();
+
+        callback
+            .call(&JsValue::undefined(), &[], &mut context)
+            .expect("captured module should survive collection");
     }
 }
 

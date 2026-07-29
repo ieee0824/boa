@@ -16,7 +16,7 @@ use crate::{
         intrinsics::{Intrinsics, StandardConstructor},
     },
     environments::DeclarativeEnvironment,
-    module::Module,
+    module::ModuleEdge,
     object::shape::RootShape,
 };
 use boa_ast::scope::Scope;
@@ -92,7 +92,7 @@ pub struct RealmInner {
     global_object: JsObject,
     global_this: JsObject,
     template_map: GcRefCell<FxHashMap<u64, JsObject>>,
-    loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
+    loaded_modules: GcRefCell<FxHashMap<JsString, ModuleEdge>>,
     host_classes: GcRefCell<FxHashMap<TypeId, StandardConstructor>>,
 
     host_defined: GcRefCell<HostDefined>,
@@ -223,7 +223,7 @@ impl<H: RealmHandle> Realm<H> {
         &self.inner.global_this
     }
 
-    pub(crate) fn loaded_modules(&self) -> &GcRefCell<FxHashMap<JsString, Module>> {
+    pub(crate) fn loaded_modules(&self) -> &GcRefCell<FxHashMap<JsString, ModuleEdge>> {
         &self.inner.loaded_modules
     }
 

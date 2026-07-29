@@ -3,7 +3,10 @@ use std::cell::RefCell;
 use boa_ast::scope::Scope;
 use boa_gc::{Finalize, GcRefCell, Trace};
 
-use crate::{JsString, JsValue, module::Module};
+use crate::{
+    JsString, JsValue,
+    module::{Module, ModuleEdge},
+};
 
 /// Type of accessor used to access an indirect binding.
 #[derive(Debug, Clone)]
@@ -15,7 +18,7 @@ enum BindingAccessor {
 /// An indirect reference to a binding inside an environment.
 #[derive(Clone, Debug, Trace, Finalize)]
 struct IndirectBinding {
-    module: Module,
+    module: ModuleEdge,
     #[unsafe_ignore_trace]
     accessor: RefCell<BindingAccessor>,
 }
@@ -69,6 +72,7 @@ impl ModuleEnvironment {
         match &bindings[index as usize] {
             BindingType::Direct(v) => v.clone(),
             BindingType::Indirect(IndirectBinding { module, accessor }) => {
+                let module = module.to_rooted();
                 let env = module.environment()?;
 
                 match &*accessor.clone().borrow() {
@@ -116,11 +120,16 @@ impl ModuleEnvironment {
     ///
     /// Panics if the binding value is out of range.
     #[track_caller]
-    pub(crate) fn set_indirect(&self, index: u32, target_module: Module, target_binding: JsString) {
+    pub(crate) fn set_indirect(
+        &self,
+        index: u32,
+        target_module: &Module,
+        target_binding: JsString,
+    ) {
         let mut bindings = self.bindings.borrow_mut();
 
         bindings[index as usize] = BindingType::Indirect(IndirectBinding {
-            module: target_module,
+            module: target_module.to_edge(),
             accessor: RefCell::new(BindingAccessor::Identifier(target_binding)),
         });
     }
