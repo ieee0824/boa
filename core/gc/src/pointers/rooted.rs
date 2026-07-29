@@ -1,6 +1,6 @@
-use super::Gc;
+use super::{Gc, GcEdge};
 use crate::{register_root, unregister_root, Finalize, Trace};
-use std::{fmt, ops::Deref};
+use std::{fmt, mem::ManuallyDrop, ops::Deref, ptr};
 
 /// An explicitly registered, heap-external owner of a garbage-collected value.
 ///
@@ -30,6 +30,18 @@ impl<T: Trace + ?Sized> Rooted<T> {
     /// Borrows the compatibility `Gc<T>` handle used during migration.
     pub fn as_gc(&self) -> &Gc<T> {
         &self.inner
+    }
+
+    /// Converts this external root into an unregistered heap edge.
+    #[must_use]
+    pub fn into_edge(self) -> GcEdge<T> {
+        let this = ManuallyDrop::new(self);
+        unregister_root(this.inner.as_erased_pointer());
+
+        // SAFETY: `this` will not run `Rooted::drop`, and `inner` is read exactly
+        // once into the returned edge.
+        let inner = unsafe { ptr::read(&raw const this.inner) };
+        GcEdge::from_gc(inner)
     }
 }
 

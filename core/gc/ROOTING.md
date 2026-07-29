@@ -34,7 +34,9 @@ fields accept only the edge representation.
 ## Migration order
 
 1. Add the explicit root registry and `Rooted<T>` compatibility handle.
-2. Add a distinct edge representation without changing collector semantics.
+2. Add `GcEdge<T>` as a distinct edge representation without changing
+   collector semantics. Conversion from `Rooted<T>` unregisters the root;
+   conversion back registers it again.
 3. Split the wrapper types, starting with `JsObject`, and migrate traced fields.
 4. Migrate VM stack, call frames, realms, scripts, modules, shapes, closures,
    and embedding API return values.
