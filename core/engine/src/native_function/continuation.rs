@@ -46,7 +46,7 @@ where
 /// to use. All other closures can also be stored in a `NativeCoroutine`, albeit by using an `unsafe`
 /// API, but note that passing closures implicitly capturing traceable types could cause
 /// **Undefined Behaviour**.
-#[derive(Clone, Trace, Finalize)]
+#[derive(Clone)]
 pub(crate) struct NativeCoroutine {
     inner: Rooted<dyn TraceableCoroutine>,
 }
