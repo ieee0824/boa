@@ -1,6 +1,6 @@
 use std::{cell::RefCell, fmt::Debug};
 
-use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge, custom_trace};
 
 use crate::property::PropertyKey;
 
@@ -29,9 +29,15 @@ pub struct Inner {
 /// the builtin object.
 ///
 /// Cloning this does a shallow clone.
-#[derive(Debug, Clone, Trace, Finalize)]
+#[derive(Debug, Clone, Finalize)]
 pub(crate) struct UniqueShape<H = Rooted<Inner>> {
     inner: H,
+}
+
+unsafe impl Trace for UniqueShape<GcEdge<Inner>> {
+    custom_trace!(this, mark, {
+        mark(&this.inner);
+    });
 }
 
 impl UniqueShape {

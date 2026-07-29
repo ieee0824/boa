@@ -1,4 +1,4 @@
-use boa_gc::{Finalize, Trace};
+use boa_gc::{Finalize, GcEdge, Trace};
 use thin_vec::ThinVec;
 
 use crate::{
@@ -10,27 +10,29 @@ use crate::{
     property::{Attribute, PropertyKey},
 };
 
-use super::{SharedShape, TransitionKey};
+use super::{Inner, SharedShape, TransitionKey};
 
 /// Represent a template of an objects properties and prototype.
 /// This is used to construct as many objects  as needed from a predefined [`SharedShape`].
 #[derive(Debug, Clone, Trace, Finalize)]
 pub(crate) struct ObjectTemplate {
-    shape: SharedShape,
+    shape: SharedShape<GcEdge<Inner>>,
 }
 
 impl ObjectTemplate {
     /// Create a new [`ObjectTemplate`]
     pub(crate) fn new(shape: &SharedShape) -> Self {
         Self {
-            shape: shape.clone(),
+            shape: shape.clone().into_edge(),
         }
     }
 
     /// Create and [`ObjectTemplate`] with a prototype.
     pub(crate) fn with_prototype(shape: &SharedShape, prototype: JsObject) -> Self {
         let shape = shape.change_prototype_transition(Some(prototype));
-        Self { shape }
+        Self {
+            shape: shape.into_edge(),
+        }
     }
 
     /// Check if the shape has a specific, prototype.
@@ -42,12 +44,15 @@ impl ObjectTemplate {
     ///
     /// This assumes that the prototype has not been set yet.
     pub(crate) fn set_prototype(&mut self, prototype: JsObject) -> &mut Self {
-        self.shape = self.shape.change_prototype_transition(Some(prototype));
+        self.shape = self
+            .shape
+            .change_prototype_transition(Some(prototype))
+            .into_edge();
         self
     }
 
     /// Returns the inner shape of the [`ObjectTemplate`].
-    pub(crate) const fn shape(&self) -> &SharedShape {
+    pub(crate) const fn shape(&self) -> &SharedShape<GcEdge<Inner>> {
         &self.shape
     }
 
@@ -59,10 +64,13 @@ impl ObjectTemplate {
         debug_assert!(!matches!(&key, PropertyKey::Index(_)));
 
         let attributes = SlotAttributes::from_bits_truncate(attributes.bits());
-        self.shape = self.shape.insert_property_transition(TransitionKey {
-            property_key: key,
-            attributes,
-        });
+        self.shape = self
+            .shape
+            .insert_property_transition(TransitionKey {
+                property_key: key,
+                attributes,
+            })
+            .into_edge();
         self
     }
 
@@ -97,10 +105,13 @@ impl ObjectTemplate {
             result
         };
 
-        self.shape = self.shape.insert_property_transition(TransitionKey {
-            property_key: key,
-            attributes,
-        });
+        self.shape = self
+            .shape
+            .insert_property_transition(TransitionKey {
+                property_key: key,
+                attributes,
+            })
+            .into_edge();
         self
     }
 
@@ -113,7 +124,10 @@ impl ObjectTemplate {
         let mut object = Object {
             data: ObjectData::new(data),
             extensible: true,
-            properties: PropertyMap::new(self.shape.clone().into(), IndexedProperties::default()),
+            properties: PropertyMap::new(
+                self.shape.root_handle().into(),
+                IndexedProperties::default(),
+            ),
             private_elements: ThinVec::new(),
         };
 
@@ -136,7 +150,7 @@ impl ObjectTemplate {
         let mut object = Object {
             data: ObjectData::new(data),
             extensible: true,
-            properties: PropertyMap::new(self.shape.clone().into(), indexed_properties),
+            properties: PropertyMap::new(self.shape.root_handle().into(), indexed_properties),
             private_elements: ThinVec::new(),
         };
 
