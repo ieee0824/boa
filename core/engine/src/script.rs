@@ -16,7 +16,7 @@ use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace};
 use boa_parser::{Parser, Source, source::ReadChar};
 
 use crate::{
-    Context, HostDefined, JsResult, JsString, JsValue, Module, SpannedSourceText,
+    Context, HostDefined, JsResult, JsString, JsValue, SpannedSourceText,
     bytecompiler::{ByteCompiler, global_declaration_instantiation_context},
     js_string,
     realm::{Realm, RealmEdge},
@@ -64,7 +64,7 @@ struct Inner {
     source: boa_ast::Script,
     source_text: SourceText,
     codeblock: GcRefCell<Option<GcEdge<CodeBlock>>>,
-    loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
+    loaded_modules: GcRefCell<FxHashMap<JsString, crate::module::ModuleEdge>>,
     host_defined: HostDefined,
     path: Option<PathBuf>,
 }
@@ -82,7 +82,7 @@ impl Script {
         self.inner.realm.to_rooted()
     }
 
-    /// Returns the [`ECMAScript specification`][spec] defined [`\[\[HostDefined\]\]`][`HostDefined`] field of the [`Module`].
+    /// Returns the [`ECMAScript specification`][spec] defined [`\[\[HostDefined\]\]`][`HostDefined`] field of the [`crate::Module`].
     ///
     /// [spec]: https://tc39.es/ecma262/#script-record
     #[must_use]
@@ -91,7 +91,9 @@ impl Script {
     }
 
     /// Gets the loaded modules of this script.
-    pub(crate) fn loaded_modules(&self) -> &GcRefCell<FxHashMap<JsString, Module>> {
+    pub(crate) fn loaded_modules(
+        &self,
+    ) -> &GcRefCell<FxHashMap<JsString, crate::module::ModuleEdge>> {
         &self.inner.loaded_modules
     }
 

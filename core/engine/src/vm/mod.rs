@@ -416,15 +416,6 @@ pub(crate) enum ActiveRunnableEdge {
     Module(ModuleEdge),
 }
 
-unsafe impl Trace for ActiveRunnable {
-    custom_trace!(this, mark, {
-        match this {
-            Self::Script(script) => mark(script),
-            Self::Module(module) => mark(module),
-        }
-    });
-}
-
 unsafe impl Trace for ActiveRunnableEdge {
     custom_trace!(this, mark, {
         match this {

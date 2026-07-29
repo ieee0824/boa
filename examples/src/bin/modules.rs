@@ -56,6 +56,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             Some(
                 NativeFunction::from_copy_closure_with_captures(
                     |_, _, module, context| {
+                        let module = module.root();
                         // After loading, link all modules by resolving the imports
                         // and exports on the full module graph, initializing module
                         // environments. This returns a plain `Err` since all modules
@@ -63,7 +64,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         module.link(context)?;
                         Ok(JsValue::undefined())
                     },
-                    module.clone(),
+                    module.to_edge(),
                 )
                 .to_js_function(context.realm()),
             ),
@@ -77,8 +78,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                     // This returns a `JsPromise` since a module could have
                     // top-level await statements, which defers module execution to the
                     // job queue.
-                    |_, _, module, context| Ok(module.evaluate(context).into()),
-                    module.clone(),
+                    |_, _, module, context| Ok(module.root().evaluate(context).into()),
+                    module.to_edge(),
                 )
                 .to_js_function(context.realm()),
             ),

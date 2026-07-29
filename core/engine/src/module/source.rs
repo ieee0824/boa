@@ -43,8 +43,8 @@ use crate::{
 };
 
 use super::{
-    BindingName, GraphLoadingState, Module, Referrer, ResolveExportError, ResolvedBinding,
-    SourceText,
+    BindingName, GraphLoadingState, Module, ModuleEdge, Referrer, ResolveExportError,
+    ResolvedBinding, SourceText,
 };
 
 /// Information for the [**Depth-first search**] algorithm used in the
@@ -84,7 +84,7 @@ enum ModuleStatus {
         environment: GcEdge<DeclarativeEnvironment>,
         context: SourceTextContext,
         top_level_capability: Option<PromiseCapability>,
-        cycle_root: Module,
+        cycle_root: ModuleEdge,
         info: DfsInfo,
         async_eval_index: Option<usize>,
     },
@@ -92,14 +92,14 @@ enum ModuleStatus {
         environment: GcEdge<DeclarativeEnvironment>,
         context: SourceTextContext,
         top_level_capability: Option<PromiseCapability>,
-        cycle_root: Module,
+        cycle_root: ModuleEdge,
         async_eval_index: usize,
         pending_async_dependencies: usize,
     },
     Evaluated {
         environment: GcEdge<DeclarativeEnvironment>,
         top_level_capability: Option<PromiseCapability>,
-        cycle_root: Module,
+        cycle_root: ModuleEdge,
         error: Option<JsError>,
     },
 }
@@ -170,11 +170,11 @@ impl ModuleStatus {
     }
 
     /// If this module is in the evaluating state, gets its cycle root.
-    const fn cycle_root(&self) -> Option<&Module> {
+    fn cycle_root(&self) -> Option<Module> {
         match &self {
             Self::Evaluating { cycle_root, .. }
             | Self::EvaluatingAsync { cycle_root, .. }
-            | Self::Evaluated { cycle_root, .. } => Some(cycle_root),
+            | Self::Evaluated { cycle_root, .. } => Some(cycle_root.to_rooted()),
             _ => None,
         }
     }
@@ -220,8 +220,8 @@ impl std::fmt::Debug for SourceTextContext {
 #[derive(Trace, Finalize)]
 pub(crate) struct SourceTextModule {
     status: GcRefCell<ModuleStatus>,
-    loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
-    async_parent_modules: GcRefCell<Vec<Module>>,
+    loaded_modules: GcRefCell<FxHashMap<JsString, ModuleEdge>>,
+    async_parent_modules: GcRefCell<Vec<ModuleEdge>>,
     import_meta: GcRefCell<Option<JsObject>>,
     #[unsafe_ignore_trace]
     code: ModuleCode,
@@ -414,7 +414,7 @@ impl SourceTextModule {
                 let mut loaded_modules = src.loaded_modules.borrow_mut();
                 let entry = loaded_modules
                     .entry(specifier)
-                    .or_insert_with(|| loaded.clone());
+                    .or_insert_with(|| loaded.to_edge());
 
                 //    i. Assert: That Record's [[Module]] is result.[[Value]].
                 assert_eq!(entry, loaded);
@@ -472,7 +472,11 @@ impl SourceTextModule {
             // d. For each String required of module.[[RequestedModules]], do
             for required in requested {
                 // i. If module.[[LoadedModules]] contains a Record whose [[Specifier]] is required, then
-                let loaded = self.loaded_modules.borrow().get(required).cloned();
+                let loaded = self
+                    .loaded_modules
+                    .borrow()
+                    .get(required)
+                    .map(ModuleEdge::to_rooted);
                 if let Some(loaded) = loaded {
                     // 1. Let record be that Record.
                     // 2. Perform InnerModuleLoading(state, record.[[Module]]).
@@ -547,7 +551,7 @@ impl SourceTextModule {
         // 8. For each ExportEntry Record e of module.[[StarExportEntries]], do
         for e in &self.code.star_export_entries {
             // a. Let requestedModule be GetImportedModule(module, e.[[ModuleRequest]]).
-            let requested_module = self.loaded_modules.borrow()[e].clone();
+            let requested_module = self.loaded_modules.borrow()[e].to_rooted();
 
             // b. Let starNames be requestedModule.GetExportedNames(exportStarSet).
             // c. For each element n of starNames, do
@@ -609,7 +613,7 @@ impl SourceTextModule {
             if export_name == &e.export_name().to_js_string(interner) {
                 // i. Let importedModule be GetImportedModule(module, e.[[ModuleRequest]]).
                 let module_request = e.module_request().to_js_string(interner);
-                let imported_module = self.loaded_modules.borrow()[&module_request].clone();
+                let imported_module = self.loaded_modules.borrow()[&module_request].to_rooted();
                 return match e.import_name() {
                     // ii. If e.[[ImportName]] is all, then
                     //    1. Assert: module does not provide the direct binding for this export.
@@ -643,7 +647,7 @@ impl SourceTextModule {
         // 9. For each ExportEntry Record e of module.[[StarExportEntries]], do
         for e in &self.code.star_export_entries {
             // a. Let importedModule be GetImportedModule(module, e.[[ModuleRequest]]).
-            let imported_module = self.loaded_modules.borrow()[e].clone();
+            let imported_module = self.loaded_modules.borrow()[e].to_rooted();
             // b. Let resolution be importedModule.ResolveExport(exportName, resolveSet).
             let resolution =
                 match imported_module.resolve_export(export_name.clone(), resolve_set, interner) {
@@ -785,7 +789,7 @@ impl SourceTextModule {
 
         for required in &self.code.requested_modules {
             // a. Let requiredModule be GetImportedModule(module, required).
-            let required_module = self.loaded_modules.borrow()[required].clone();
+            let required_module = self.loaded_modules.borrow()[required].to_rooted();
 
             // b. Set index to ? InnerModuleLinking(requiredModule, stack, index).
             index = required_module.inner_link(stack, index, context)?;
@@ -927,7 +931,7 @@ impl SourceTextModule {
                     top_level_capability,
                     ..
                 } => (
-                    cycle_root.clone(),
+                    cycle_root.to_rooted(),
                     top_level_capability.as_ref().map(|cap| {
                         JsPromise::from_object(cap.promise().clone())
                             .expect("promise created from the %Promise% intrinsic is always native")
@@ -1096,7 +1100,7 @@ impl SourceTextModule {
                 environment,
                 context,
                 top_level_capability: capability,
-                cycle_root: module_self.clone(),
+                cycle_root: module_self.to_edge(),
                 info: DfsInfo {
                     dfs_index: index,
                     dfs_ancestor_index: index,
@@ -1116,7 +1120,7 @@ impl SourceTextModule {
         // 11. For each String required of module.[[RequestedModules]], do
         for required in &self.code.requested_modules {
             // a. Let requiredModule be GetImportedModule(module, required).
-            let required_module = self.loaded_modules.borrow()[required].clone();
+            let required_module = self.loaded_modules.borrow()[required].to_rooted();
             // b. Set index to ? InnerModuleEvaluation(requiredModule, stack, index).
             index = required_module.inner_evaluate(stack, index, context)?;
 
@@ -1151,6 +1155,7 @@ impl SourceTextModule {
                     ModuleStatus::EvaluatingAsync { cycle_root, .. }
                     | ModuleStatus::Evaluated { cycle_root, .. } => {
                         // 1. Set requiredModule to requiredModule.[[CycleRoot]].
+                        let cycle_root = cycle_root.to_rooted();
                         let ModuleKind::SourceText(cycle_root_src) = cycle_root.kind() else {
                             unreachable!("cycle_root must be a source text module");
                         };
@@ -1196,7 +1201,7 @@ impl SourceTextModule {
                     required_module
                         .async_parent_modules
                         .borrow_mut()
-                        .push(module_self.clone());
+                        .push(module_self.to_edge());
                 }
             }
         }
@@ -1268,7 +1273,7 @@ impl SourceTextModule {
                                 cycle_root: if is_self {
                                     cycle_root
                                 } else {
-                                    module_self.clone()
+                                    module_self.to_edge()
                                 },
                                 async_eval_index,
                                 pending_async_dependencies,
@@ -1282,7 +1287,7 @@ impl SourceTextModule {
                                 cycle_root: if is_self {
                                     cycle_root
                                 } else {
-                                    module_self.clone()
+                                    module_self.to_edge()
                                 },
                                 error: None,
                             }
@@ -1329,12 +1334,13 @@ impl SourceTextModule {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_, _, module, context| {
+                    let module = module.to_rooted();
                     //     a. Perform AsyncModuleExecutionFulfilled(module).
-                    async_module_execution_fulfilled(module, context);
+                    async_module_execution_fulfilled(&module, context);
                     //     b. Return undefined.
                     Ok(JsValue::undefined())
                 },
-                module_self.clone(),
+                module_self.to_edge(),
             ),
         )
         .build();
@@ -1345,13 +1351,14 @@ impl SourceTextModule {
             context.realm(),
             NativeFunction::from_copy_closure_with_captures(
                 |_, args, module, context| {
+                    let module = module.to_rooted();
                     let error = JsError::from_opaque(args.get_or_undefined(0).clone());
                     // a. Perform AsyncModuleExecutionRejected(module, error).
-                    async_module_execution_rejected(module, &error, context);
+                    async_module_execution_rejected(&module, &error, context);
                     // b. Return undefined.
                     Ok(JsValue::undefined())
                 },
-                module_self.clone(),
+                module_self.to_edge(),
             ),
         )
         .build();
@@ -1378,20 +1385,21 @@ impl SourceTextModule {
     fn gather_available_ancestors(&self, exec_list: &mut FxHashSet<Module>) {
         // 1. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
         for m in &*self.async_parent_modules.borrow() {
+            let m = m.to_rooted();
             let ModuleKind::SourceText(m_src) = m.kind() else {
                 continue;
             };
 
-            if exec_list.contains(m) {
+            if exec_list.contains(&m) {
                 continue;
             }
 
             {
                 let m_status = m_src.status.borrow();
-                let Some(cycle_root) = m_status
-                    .cycle_root()
-                    .and_then(|root| root.kind().as_source_text())
-                else {
+                let Some(cycle_root) = m_status.cycle_root() else {
+                    continue;
+                };
+                let Some(cycle_root) = cycle_root.kind().as_source_text() else {
                     continue;
                 };
 
@@ -1513,7 +1521,7 @@ impl SourceTextModule {
             for entry in &self.code.import_entries {
                 // a. Let importedModule be GetImportedModule(module, in.[[ModuleRequest]]).
                 let module_request = entry.module_request().to_js_string(compiler.interner());
-                let imported_module = self.loaded_modules.borrow()[&module_request].clone();
+                let imported_module = self.loaded_modules.borrow()[&module_request].to_rooted();
 
                 if let ImportName::Name(name) = entry.import_name() {
                     let name = name.to_js_string(compiler.interner());
@@ -1715,7 +1723,7 @@ impl SourceTextModule {
                         .kind()
                         .as_module()
                         .expect("last environment should be the module env")
-                        .set_indirect(locator.binding_index(), export_locator.module, name),
+                        .set_indirect(locator.binding_index(), &export_locator.module, name),
                     BindingName::Namespace => {
                         let namespace = export_locator.module.namespace(context);
                         context.vm.environments.put_lexical_value(
@@ -1844,7 +1852,7 @@ impl SourceTextModule {
     }
 
     /// Gets the loaded modules of this module.
-    pub(crate) fn loaded_modules(&self) -> &GcRefCell<FxHashMap<JsString, Module>> {
+    pub(crate) fn loaded_modules(&self) -> &GcRefCell<FxHashMap<JsString, ModuleEdge>> {
         &self.loaded_modules
     }
 
@@ -1903,7 +1911,10 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) {
     // 7. If module.[[TopLevelCapability]] is not empty, then
     if let Some(cap) = module_src.status.borrow().top_level_capability() {
         // a. Assert: module.[[CycleRoot]] is module.
-        debug_assert_eq!(module_src.status.borrow().cycle_root(), Some(module));
+        debug_assert_eq!(
+            module_src.status.borrow().cycle_root().as_ref(),
+            Some(module)
+        );
 
         // b. Perform ! Call(module.[[TopLevelCapability]].[[Resolve]], undefined, « undefined »).
         cap.resolve()
@@ -1985,7 +1996,7 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) {
                 // 2. If m.[[TopLevelCapability]] is not empty, then
                 if let Some(cap) = status.top_level_capability() {
                     // a. Assert: m.[[CycleRoot]] is m.
-                    assert_eq!(status.cycle_root(), Some(&m));
+                    assert_eq!(status.cycle_root().as_ref(), Some(&m));
 
                     // b. Perform ! Call(m.[[TopLevelCapability]].[[Resolve]], undefined, « undefined »).
                     cap.resolve()
@@ -2039,14 +2050,14 @@ fn async_module_execution_rejected(module: &Module, error: &JsError, context: &m
     // 7. For each Cyclic Module Record m of module.[[AsyncParentModules]], do
     for m in &*module_src.async_parent_modules.borrow() {
         // a. Perform AsyncModuleExecutionRejected(m, error).
-        async_module_execution_rejected(m, error, context);
+        async_module_execution_rejected(&m.to_rooted(), error, context);
     }
 
     let status = module_src.status.borrow();
     // 8. If module.[[TopLevelCapability]] is not empty, then
     if let Some(cap) = status.top_level_capability() {
         // a. Assert: module.[[CycleRoot]] is module.
-        assert_eq!(status.cycle_root(), Some(module));
+        assert_eq!(status.cycle_root().as_ref(), Some(module));
 
         // b. Perform ! Call(module.[[TopLevelCapability]].[[Reject]], undefined, « error »).
         cap.reject()

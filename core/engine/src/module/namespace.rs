@@ -14,7 +14,7 @@ use crate::object::internal_methods::{
 use crate::object::{JsData, JsPrototype};
 use crate::property::{PropertyDescriptor, PropertyKey};
 use crate::{Context, JsResult, JsString, JsValue, js_string, object::JsObject};
-use crate::{JsNativeError, Module};
+use crate::{JsNativeError, Module, module::ModuleEdge};
 
 use super::BindingName;
 
@@ -23,7 +23,7 @@ use super::BindingName;
 /// Exposes the bindings exported by a [`Module`] to be accessed from ECMAScript code.
 #[derive(Debug, Trace, Finalize)]
 pub struct ModuleNamespace {
-    module: Module,
+    module: ModuleEdge,
     #[unsafe_ignore_trace]
     exports: IndexSet<JsString, BuildHasherDefault<FxHasher>>,
 }
@@ -54,7 +54,7 @@ impl ModuleNamespace {
     /// Abstract operation [`ModuleNamespaceCreate ( module, exports )`][spec].
     ///
     /// [spec]: https://tc39.es/ecma262/#sec-modulenamespacecreate
-    pub(crate) fn create(module: Module, names: Vec<JsString>, context: &mut Context) -> JsObject {
+    pub(crate) fn create(module: &Module, names: Vec<JsString>, context: &mut Context) -> JsObject {
         // 1. Assert: module.[[Namespace]] is empty.
         // ignored since this is ensured by `Module::namespace`.
 
@@ -73,11 +73,13 @@ impl ModuleNamespace {
         // Ignored because this is done by `Module::namespace`
 
         // 10. Return M.
-        context
-            .intrinsics()
-            .templates()
-            .namespace()
-            .create(Self { module, exports }, vec![js_string!("Module").into()])
+        context.intrinsics().templates().namespace().create(
+            Self {
+                module: module.to_edge(),
+                exports,
+            },
+            vec![js_string!("Module").into()],
+        )
     }
 
     /// Gets the export names of the Module Namespace object.
@@ -86,8 +88,8 @@ impl ModuleNamespace {
     }
 
     /// Gest the module associated with this Module Namespace object.
-    pub(crate) const fn module(&self) -> &Module {
-        &self.module
+    pub(crate) fn module(&self) -> Module {
+        self.module.to_rooted()
     }
 }
 
