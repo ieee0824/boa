@@ -22,3 +22,22 @@ fn explicit_roots_follow_handle_lifetimes() {
         assert!(registered_roots().is_empty());
     });
 }
+
+#[test]
+fn root_edge_conversions_update_registration() {
+    run_test(|| {
+        let root = Rooted::new(11_u32);
+        assert_eq!(registered_roots().len(), 1);
+
+        let edge = root.into_edge();
+        assert!(registered_roots().is_empty());
+        assert_eq!(**edge.as_gc(), 11);
+
+        let root = edge.root();
+        assert_eq!(registered_roots().len(), 1);
+        assert_eq!(**root.as_gc(), 11);
+
+        drop(root);
+        assert!(registered_roots().is_empty());
+    });
+}

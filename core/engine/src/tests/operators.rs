@@ -690,7 +690,6 @@ mod in_operator {
     }
 }
 
-
 /// Pins the observable behaviour of `+=` on strings.
 ///
 /// Written ahead of making `+=` append into the string's own allocation rather than

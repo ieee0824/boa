@@ -46,6 +46,7 @@ impl CodeBlock {
                 | Instruction::Move { .. }
                 | Instruction::PopIntoRegister { .. }
                 | Instruction::PushFromRegister { .. }
+                | Instruction::AddAssignLocal { .. }
                 | Instruction::Add { .. }
                 | Instruction::Sub { .. }
                 | Instruction::Div { .. }
@@ -453,8 +454,7 @@ impl CodeBlock {
                 Instruction::Return => {
                     graph.add_node(previous_pc, NodeShape::Diamond, label.into(), Color::Red);
                 }
-                Instruction::Reserved1
-                | Instruction::Reserved2
+                Instruction::Reserved2
                 | Instruction::Reserved3
                 | Instruction::Reserved4
                 | Instruction::Reserved5

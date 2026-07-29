@@ -955,8 +955,12 @@ impl JsString {
             //   `old_layout`, and `into_raw` transferred its ownership here, so no
             //   other holder can be left with the old address.
             // - `new_layout` is larger than `old_layout` and non-zero.
-            let reallocated = unsafe { realloc(ptr.as_ptr().cast(), old_layout, new_layout.size()) };
+            let reallocated =
+                unsafe { realloc(ptr.as_ptr().cast(), old_layout, new_layout.size()) };
 
+            // `realloc` preserves the alignment required by `old_layout`, which is
+            // also the alignment used by `new_layout` and `RawJsString`.
+            #[allow(clippy::cast_ptr_alignment)]
             let Some(reallocated) = NonNull::new(reallocated.cast::<RawJsString>()) else {
                 std::alloc::handle_alloc_error(new_layout)
             };

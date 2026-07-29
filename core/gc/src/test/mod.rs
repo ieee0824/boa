@@ -44,7 +44,7 @@ impl Harness {
             let gc = current.borrow();
 
             assert!(gc.strongs.is_empty());
-            assert!(gc.runtime.bytes_allocated == 0);
+            assert_eq!(gc.runtime.bytes_allocated, 0);
         });
     }
 

@@ -1068,7 +1068,7 @@ impl RegExp {
             .named_groups()
             .collect::<Vec<(&str, Option<Range>)>>();
         // Strict mode requires groups to be created in a sorted order
-        named_groups.sort_by(|(name_x, _), (name_y, _)| name_x.cmp(name_y));
+        named_groups.sort_by_key(|(name_x, _)| *name_x);
 
         // Combines:
         // 26. Let groupNames be a new empty List.

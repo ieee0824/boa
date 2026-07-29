@@ -56,7 +56,8 @@ impl InlineCache {
         // slot is always resolved on the receiver's immediate prototype
         // (`Slot::set_not_cachable_if_already_prototype` makes deeper lookups
         // non-cachable), so `shape.prototype()` is exactly the holder.
-        *self.prototype_shape.borrow_mut() = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+        *self.prototype_shape.borrow_mut() = if slot.attributes.contains(SlotAttributes::PROTOTYPE)
+        {
             match shape.prototype() {
                 Some(prototype) => WeakShape::from(prototype.borrow().shape()),
                 None => WeakShape::None,

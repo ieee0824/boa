@@ -271,8 +271,8 @@ impl<R> Lexer<R> {
                     if self
                         .cursor
                         .peek_char()?
-                        .filter(|c| (0x30..=0x39/* 0..=9 */).contains(c))
-                        .is_some()
+                        .as_ref()
+                        .is_some_and(|c| (0x30..=0x39/* 0..=9 */).contains(c))
                     {
                         NumberLiteral::new(b'.').lex(&mut self.cursor, start, interner)
                     } else {
@@ -412,18 +412,13 @@ impl<'a> From<&'a [u8]> for Lexer<UTF8Input<&'a [u8]>> {
 /// ECMAScript goal symbols.
 ///
 /// <https://tc39.es/ecma262/#sec-ecmascript-language-lexical-grammar>
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum InputElement {
     Div,
+    #[default]
     RegExp,
     TemplateTail,
     HashbangOrRegExp,
-}
-
-impl Default for InputElement {
-    fn default() -> Self {
-        Self::RegExp
-    }
 }
 
 /// Checks if a character is whitespace as per ECMAScript standards.

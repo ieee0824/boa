@@ -36,7 +36,7 @@ pub use crate::trace::{Finalize, Trace, Tracer};
 pub use boa_macros::{Finalize, Trace};
 pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
-pub use pointers::{Ephemeron, Gc, GcErased, Rooted, WeakGc, WeakMap};
+pub use pointers::{Ephemeron, Gc, GcEdge, GcErased, Rooted, WeakGc, WeakMap};
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
@@ -68,7 +68,10 @@ fn register_root(pointer: GcErasedPointer) {
         roots
             .entry(key)
             .and_modify(|entry| entry.handles += 1)
-            .or_insert(RootEntry { pointer, handles: 1 });
+            .or_insert(RootEntry {
+                pointer,
+                handles: 1,
+            });
     });
 }
 
