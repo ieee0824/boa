@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace};
 use boa_parser::{Parser, Source, source::ReadChar};
 
 use crate::{
@@ -29,7 +29,7 @@ use crate::{
 /// [spec]: https://tc39.es/ecma262/#sec-script-records
 #[derive(Clone, Trace, Finalize)]
 pub struct Script {
-    inner: Gc<Inner>,
+    inner: Rooted<Inner>,
 }
 
 impl std::fmt::Debug for Script {
@@ -100,7 +100,7 @@ impl Script {
 
         let realm = realm.unwrap_or_else(|| context.realm().clone());
         Ok(Self {
-            inner: Gc::new(Inner {
+            inner: Rooted::new(Inner {
                 realm: realm.to_edge(),
                 source: code,
                 source_text,
