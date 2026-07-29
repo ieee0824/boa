@@ -5,7 +5,7 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, WeakShape, slot::Slot, slot::SlotAttributes},
+    object::shape::{Shape, ShapeEdge, WeakShape, slot::Slot, slot::SlotAttributes},
 };
 
 #[cfg(test)]
@@ -48,7 +48,7 @@ impl InlineCache {
         }
     }
 
-    pub(crate) fn set(&self, shape: &Shape, slot: Slot) {
+    pub(crate) fn set(&self, shape: &ShapeEdge, slot: Slot) {
         *self.shape.borrow_mut() = shape.into();
         // Prototype-property slots index into the holder prototype's storage, so
         // remember the prototype's shape to guard against it being reindexed
@@ -59,7 +59,7 @@ impl InlineCache {
         *self.prototype_shape.borrow_mut() = if slot.attributes.contains(SlotAttributes::PROTOTYPE)
         {
             match shape.prototype() {
-                Some(prototype) => WeakShape::from(prototype.borrow().shape()),
+                Some(prototype) => WeakShape::from(prototype.borrow().shape_edge()),
                 None => WeakShape::None,
             }
         } else {
@@ -78,7 +78,7 @@ impl InlineCache {
     ///
     /// Otherwise we reset the internal weak reference(s) to [`WeakShape::None`],
     /// so they can be deallocated by the GC.
-    pub(crate) fn match_or_reset(&self, shape: &Shape) -> Option<(Shape, Slot)> {
+    pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<(Shape, Slot)> {
         let mut old = self.shape.borrow_mut();
 
         let old_upgraded = old.upgrade();
@@ -96,9 +96,9 @@ impl InlineCache {
         // prototype. Require the holder prototype's current shape to still match
         // the one recorded at cache time, otherwise the slot index may be stale.
         if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let current_prototype_addr = matched
-                .prototype()
-                .map_or(0, |prototype| prototype.borrow().shape().to_addr_usize());
+            let current_prototype_addr = matched.prototype().map_or(0, |prototype| {
+                prototype.borrow().shape_edge().to_addr_usize()
+            });
 
             let mut cached_prototype = self.prototype_shape.borrow_mut();
             let cached_addr = cached_prototype

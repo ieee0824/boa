@@ -1,7 +1,7 @@
 use super::{
     JsPrototype, ObjectStorage, PropertyDescriptor, PropertyKey,
     shape::{
-        ChangeTransitionAction, RootShape, Shape, UniqueShape,
+        ChangeTransitionAction, RootShape, Shape, ShapeEdge, UniqueShape,
         property_table::PropertyTableInner,
         shared_shape::TransitionKey,
         slot::{Slot, SlotAttributes},
@@ -369,7 +369,7 @@ pub struct PropertyMap {
     /// Properties stored with integers as keys.
     pub(crate) indexed_properties: IndexedProperties,
 
-    pub(crate) shape: Shape,
+    pub(crate) shape: ShapeEdge,
     pub(crate) storage: ObjectStorage,
 }
 
@@ -380,7 +380,7 @@ impl PropertyMap {
     pub fn new(shape: Shape, indexed_properties: IndexedProperties) -> Self {
         Self {
             indexed_properties,
-            shape,
+            shape: shape.into_edge(),
             storage: Vec::default(),
         }
     }
@@ -391,7 +391,8 @@ impl PropertyMap {
     pub fn from_prototype_unique_shape(prototype: JsPrototype) -> Self {
         Self {
             indexed_properties: IndexedProperties::default(),
-            shape: UniqueShape::new(prototype, PropertyTableInner::default()).into(),
+            shape: Shape::from(UniqueShape::new(prototype, PropertyTableInner::default()))
+                .into_edge(),
             storage: Vec::default(),
         }
     }
@@ -406,7 +407,7 @@ impl PropertyMap {
         let shape = root_shape.shape().change_prototype_transition(prototype);
         Self {
             indexed_properties: IndexedProperties::default(),
-            shape: shape.into(),
+            shape: Shape::from(shape).into_edge(),
             storage: Vec::default(),
         }
     }
@@ -496,7 +497,7 @@ impl PropertyMap {
                     attributes,
                 };
                 let transition = self.shape.change_attributes_transition(key);
-                self.shape = transition.shape;
+                self.shape = transition.shape.into_edge();
                 match transition.action {
                     ChangeTransitionAction::Nothing => {}
                     ChangeTransitionAction::Remove => {
@@ -537,7 +538,10 @@ impl PropertyMap {
             property_key: key.clone(),
             attributes,
         };
-        self.shape = self.shape.insert_property_transition(transition_key);
+        self.shape = self
+            .shape
+            .insert_property_transition(transition_key)
+            .into_edge();
 
         // Make Sure that if we are inserting, it has the correct slot index.
         debug_assert_eq!(
@@ -587,7 +591,7 @@ impl PropertyMap {
             }
             self.storage.remove(slot.index as usize);
 
-            self.shape = self.shape.remove_property_transition(key);
+            self.shape = self.shape.remove_property_transition(key).into_edge();
             return true;
         }
 

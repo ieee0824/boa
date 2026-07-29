@@ -1,6 +1,6 @@
 use std::{cell::RefCell, fmt::Debug};
 
-use boa_gc::{Finalize, Gc, GcRefCell, Trace, WeakGc};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGc};
 
 use crate::property::PropertyKey;
 
@@ -11,7 +11,8 @@ use super::{
 
 /// The internal representation of [`UniqueShape`].
 #[derive(Default, Debug, Trace, Finalize)]
-struct Inner {
+#[doc(hidden)]
+pub struct Inner {
     /// The property table that maps a [`PropertyKey`] to a slot in the objects storage.
     //
     // SAFETY: This is safe becasue nothing in this field needs tracing.
@@ -28,19 +29,42 @@ struct Inner {
 /// the builtin object.
 ///
 /// Cloning this does a shallow clone.
-#[derive(Default, Debug, Clone, Trace, Finalize)]
-pub(crate) struct UniqueShape {
-    inner: Gc<Inner>,
+#[derive(Debug, Clone, Trace, Finalize)]
+pub(crate) struct UniqueShape<H = Rooted<Inner>> {
+    inner: H,
 }
 
 impl UniqueShape {
     /// Create a new [`UniqueShape`].
     pub(crate) fn new(prototype: JsPrototype, property_table: PropertyTableInner) -> Self {
         Self {
-            inner: Gc::new(Inner {
+            inner: Rooted::new(Inner {
                 property_table: RefCell::new(property_table),
                 prototype: GcRefCell::new(prototype),
             }),
+        }
+    }
+
+    pub(crate) fn into_edge(self) -> UniqueShape<GcEdge<Inner>> {
+        UniqueShape {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+}
+
+impl Default for UniqueShape {
+    fn default() -> Self {
+        Self::new(JsPrototype::default(), PropertyTableInner::default())
+    }
+}
+
+impl<H> UniqueShape<H>
+where
+    H: super::ShapeGcHandle<Inner>,
+{
+    pub(crate) fn root_handle(&self) -> UniqueShape {
+        UniqueShape {
+            inner: self.inner.clone_rooted(),
         }
     }
 
@@ -64,19 +88,19 @@ impl UniqueShape {
     }
 
     /// Inserts a new property into the [`UniqueShape`].
-    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> Self {
+    pub(crate) fn insert_property_transition(&self, key: TransitionKey) -> UniqueShape {
         let mut property_table = self.property_table().borrow_mut();
         property_table.insert(key.property_key, key.attributes);
-        self.clone()
+        self.root_handle()
     }
 
     /// Remove a property from the [`UniqueShape`].
     ///
     /// This will cause the current shape to be invalidated, and a new [`UniqueShape`] will be returned.
-    pub(crate) fn remove_property_transition(&self, key: &PropertyKey) -> Self {
+    pub(crate) fn remove_property_transition(&self, key: &PropertyKey) -> UniqueShape {
         let mut property_table = self.property_table().borrow_mut();
         let Some((index, _attributes)) = property_table.map.remove(key) else {
-            return self.clone();
+            return self.root_handle();
         };
 
         let index = index as usize;
@@ -113,7 +137,7 @@ impl UniqueShape {
         }
 
         let prototype = self.inner.prototype.borrow_mut().take();
-        Self::new(prototype, property_table)
+        UniqueShape::new(prototype, property_table)
     }
 
     /// Does a property lookup on the [`UniqueShape`] returning the [`Slot`] where it's
@@ -149,7 +173,7 @@ impl UniqueShape {
             property_table.keys[index].1.attributes = key.attributes;
             // TODO: invalidate the pointer.
             return ChangeTransition {
-                shape: self.clone().into(),
+                shape: self.root_handle().into(),
                 action: ChangeTransitionAction::Nothing,
             };
         }
@@ -208,7 +232,7 @@ impl UniqueShape {
         }
 
         let prototype = self.inner.prototype.borrow_mut().take();
-        let shape = Self::new(prototype, property_table);
+        let shape = UniqueShape::new(prototype, property_table);
 
         ChangeTransition {
             shape: shape.into(),
@@ -219,13 +243,13 @@ impl UniqueShape {
     /// Change the prototype of the [`UniqueShape`].
     ///
     /// This will cause the current shape to be invalidated, and a new [`UniqueShape`] will be returned.
-    pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> Self {
+    pub(crate) fn change_prototype_transition(&self, prototype: JsPrototype) -> UniqueShape {
         let mut property_table = self.inner.property_table.borrow_mut();
 
         // We need to create a new unique shape,
         // to invalidate any pointers to this shape i.e inline caches.
         let property_table = std::mem::take(&mut *property_table);
-        Self::new(prototype, property_table)
+        UniqueShape::new(prototype, property_table)
     }
 
     /// Gets all keys first strings then symbols in creation order.
@@ -235,7 +259,7 @@ impl UniqueShape {
 
     /// Return location in memory of the [`UniqueShape`].
     pub(crate) fn to_addr_usize(&self) -> usize {
-        let ptr: *const _ = self.inner.as_ref();
+        let ptr: *const _ = &raw const *self.inner;
         ptr as usize
     }
 }
@@ -265,15 +289,19 @@ impl WeakUniqueShape {
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<UniqueShape> {
         Some(UniqueShape {
-            inner: self.inner.upgrade()?,
+            inner: Rooted::from_gc(self.inner.upgrade()?),
         })
     }
 }
 
-impl From<&UniqueShape> for WeakUniqueShape {
-    fn from(value: &UniqueShape) -> Self {
+impl<H> From<&UniqueShape<H>> for WeakUniqueShape
+where
+    H: super::ShapeGcHandle<Inner>,
+{
+    fn from(value: &UniqueShape<H>) -> Self {
+        let rooted = value.inner.clone_rooted();
         WeakUniqueShape {
-            inner: WeakGc::new(&value.inner),
+            inner: WeakGc::new(rooted.as_gc()),
         }
     }
 }

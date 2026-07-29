@@ -8,7 +8,10 @@ pub use operations::IntegrityLevel;
 pub use property_map::*;
 use thin_vec::ThinVec;
 
-use self::{internal_methods::ORDINARY_INTERNAL_METHODS, shape::Shape};
+use self::{
+    internal_methods::ORDINARY_INTERNAL_METHODS,
+    shape::{Shape, ShapeEdge},
+};
 use crate::{
     Context, JsString, JsSymbol, JsValue,
     builtins::{OrdinaryObject, function::ConstructorKind},
@@ -231,7 +234,13 @@ pub enum PrivateElement {
 impl<T: ?Sized> Object<T> {
     /// Returns the shape of the object.
     #[must_use]
-    pub const fn shape(&self) -> &Shape {
+    pub fn shape(&self) -> Shape {
+        self.properties.shape.root()
+    }
+
+    /// Returns the heap edge to the object's shape for internal tracing users.
+    #[must_use]
+    pub(crate) const fn shape_edge(&self) -> &ShapeEdge {
         &self.properties.shape
     }
 
@@ -265,7 +274,11 @@ impl<T: ?Sized> Object<T> {
     pub fn set_prototype<O: Into<JsPrototype>>(&mut self, prototype: O) -> bool {
         let prototype = prototype.into();
         if self.extensible {
-            self.properties.shape = self.properties.shape.change_prototype_transition(prototype);
+            self.properties.shape = self
+                .properties
+                .shape
+                .change_prototype_transition(prototype)
+                .into_edge();
             true
         } else {
             // If target is non-extensible, [[SetPrototypeOf]] must return false

@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use boa_gc::{Finalize, Gc, GcRefCell, Trace, WeakGc};
+use boa_gc::{Finalize, GcRefCell, Rooted, Trace, WeakGc};
 use rustc_hash::FxHashMap;
 
 use crate::object::JsPrototype;
@@ -54,7 +54,7 @@ pub(super) struct ForwardTransition {
 
 impl ForwardTransition {
     /// Insert a property transition.
-    pub(super) fn insert_property(&self, key: TransitionKey, value: &Gc<SharedShapeInner>) {
+    pub(super) fn insert_property(&self, key: TransitionKey, value: &Rooted<SharedShapeInner>) {
         let mut this = self.inner.borrow_mut();
         let properties = this.properties.get_or_insert_with(Box::default);
 
@@ -62,11 +62,11 @@ impl ForwardTransition {
             properties.map.retain(|_, v| v.is_upgradable());
         }
 
-        properties.map.insert(key, WeakGc::new(value));
+        properties.map.insert(key, WeakGc::new(value.as_gc()));
     }
 
     /// Insert a prototype transition.
-    pub(super) fn insert_prototype(&self, key: JsPrototype, value: &Gc<SharedShapeInner>) {
+    pub(super) fn insert_prototype(&self, key: JsPrototype, value: &Rooted<SharedShapeInner>) {
         let mut this = self.inner.borrow_mut();
         let prototypes = this.prototypes.get_or_insert_with(Box::default);
 
@@ -74,7 +74,7 @@ impl ForwardTransition {
             prototypes.map.retain(|_, v| v.is_upgradable());
         }
 
-        prototypes.map.insert(key, WeakGc::new(value));
+        prototypes.map.insert(key, WeakGc::new(value.as_gc()));
     }
 
     /// Get a property transition, return [`None`] otherwise.
