@@ -150,16 +150,7 @@ enum EdgeInner {
     Closure(GcEdge<dyn TraceableClosure>),
 }
 
-// Manual implementation because deriving `Trace` triggers the `single_use_lifetimes` lint.
 // SAFETY: Only closures can contain `Trace` captures, so this implementation is safe.
-unsafe impl Trace for NativeFunction {
-    custom_trace!(this, mark, {
-        if let RootedInner::Closure(c) = &this.inner {
-            mark(c);
-        }
-    });
-}
-
 unsafe impl Trace for NativeFunctionEdge {
     custom_trace!(this, mark, {
         if let EdgeInner::Closure(c) = &this.inner {
