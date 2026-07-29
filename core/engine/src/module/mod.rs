@@ -32,7 +32,7 @@ use rustc_hash::FxHashSet;
 use boa_engine::js_string;
 use boa_engine::property::PropertyKey;
 use boa_engine::value::TryFromJs;
-use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+use boa_gc::{Finalize, Gc, GcRefCell, Rooted, Trace};
 use boa_interner::Interner;
 use boa_parser::source::ReadChar;
 use boa_parser::{Parser, Source};
@@ -269,7 +269,7 @@ impl Module {
     }
 
     /// Gets the declarative environment of this `Module`.
-    pub(crate) fn environment(&self) -> Option<Gc<DeclarativeEnvironment>> {
+    pub(crate) fn environment(&self) -> Option<Rooted<DeclarativeEnvironment>> {
         match self.kind() {
             ModuleKind::SourceText(src) => src.environment(),
             ModuleKind::Synthetic(syn) => syn.environment(),

@@ -13,7 +13,7 @@ use crate::{
     property::{DescriptorKind, PropertyDescriptor, PropertyKey},
 };
 use boa_ast::{function::FormalParameterList, operations::bound_names, scope::Scope};
-use boa_gc::{Finalize, Gc, GcEdge, Trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace};
 use boa_interner::Interner;
 use rustc_hash::FxHashMap;
 use thin_vec::{ThinVec, thin_vec};
@@ -215,7 +215,7 @@ impl MappedArguments {
         func: &JsObject,
         binding_indices: &[Option<u32>],
         arguments_list: &[JsValue],
-        env: &Gc<DeclarativeEnvironment>,
+        env: &Rooted<DeclarativeEnvironment>,
         context: &Context,
     ) -> JsObject {
         // 1. Assert: formals does not contain a rest parameter, any binding patterns, or any initializers.
@@ -234,7 +234,7 @@ impl MappedArguments {
         let range = binding_indices.len().min(len);
         let map = MappedArguments {
             binding_indices: binding_indices[..range].to_vec(),
-            environment: env.clone().into(),
+            environment: env.clone().into_edge(),
         };
 
         // %Array.prototype.values%

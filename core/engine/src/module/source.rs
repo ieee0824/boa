@@ -18,7 +18,7 @@ use boa_ast::{
     },
     scope::BindingLocator,
 };
-use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace};
 use boa_interner::Interner;
 use boa_macros::js_str;
 use dynify::Dynify;
@@ -30,7 +30,7 @@ use crate::{
     SpannedSourceText,
     builtins::{Promise, promise::PromiseCapability},
     bytecompiler::{BindingAccessOpcode, ByteCompiler, FunctionSpec, ToJsString},
-    environments::{DeclarativeEnvironment, EnvironmentStack},
+    environments::{DeclarativeEnvironment, EnvironmentStack, EnvironmentStackEdges},
     job::NativeAsyncJob,
     js_string,
     module::ModuleKind,
@@ -71,17 +71,17 @@ enum ModuleStatus {
         info: DfsInfo,
     },
     PreLinked {
-        environment: Gc<DeclarativeEnvironment>,
+        environment: GcEdge<DeclarativeEnvironment>,
         context: SourceTextContext,
         info: DfsInfo,
     },
     Linked {
-        environment: Gc<DeclarativeEnvironment>,
+        environment: GcEdge<DeclarativeEnvironment>,
         context: SourceTextContext,
         info: DfsInfo,
     },
     Evaluating {
-        environment: Gc<DeclarativeEnvironment>,
+        environment: GcEdge<DeclarativeEnvironment>,
         context: SourceTextContext,
         top_level_capability: Option<PromiseCapability>,
         cycle_root: Module,
@@ -89,7 +89,7 @@ enum ModuleStatus {
         async_eval_index: Option<usize>,
     },
     EvaluatingAsync {
-        environment: Gc<DeclarativeEnvironment>,
+        environment: GcEdge<DeclarativeEnvironment>,
         context: SourceTextContext,
         top_level_capability: Option<PromiseCapability>,
         cycle_root: Module,
@@ -97,7 +97,7 @@ enum ModuleStatus {
         pending_async_dependencies: usize,
     },
     Evaluated {
-        environment: Gc<DeclarativeEnvironment>,
+        environment: GcEdge<DeclarativeEnvironment>,
         top_level_capability: Option<PromiseCapability>,
         cycle_root: Module,
         error: Option<JsError>,
@@ -180,14 +180,14 @@ impl ModuleStatus {
     }
 
     /// Gets the declarative environment from the module status.
-    fn environment(&self) -> Option<Gc<DeclarativeEnvironment>> {
+    fn environment(&self) -> Option<Rooted<DeclarativeEnvironment>> {
         match self {
             ModuleStatus::Unlinked | ModuleStatus::Linking { .. } => None,
             ModuleStatus::PreLinked { environment, .. }
             | ModuleStatus::Linked { environment, .. }
             | ModuleStatus::Evaluating { environment, .. }
             | ModuleStatus::EvaluatingAsync { environment, .. }
-            | ModuleStatus::Evaluated { environment, .. } => Some(environment.clone()),
+            | ModuleStatus::Evaluated { environment, .. } => Some(environment.clone().root()),
         }
     }
 }
@@ -200,7 +200,7 @@ impl ModuleStatus {
 #[boa_gc(unsafe_no_drop)]
 struct SourceTextContext {
     codeblock: GcEdge<CodeBlock>,
-    environments: EnvironmentStack,
+    environments: EnvironmentStackEdges,
     realm: Realm,
 }
 
@@ -1669,7 +1669,7 @@ impl SourceTextModule {
         };
 
         // 8. Let moduleContext be a new ECMAScript code execution context.
-        let mut envs = EnvironmentStack::new(global_env);
+        let mut envs = EnvironmentStack::new(Rooted::from_gc(global_env));
         envs.push_module(self.code.source.scope().clone());
 
         // 9. Set the Function of moduleContext to null.
@@ -1756,11 +1756,11 @@ impl SourceTextModule {
         // 16. Set module.[[Context]] to moduleContext.
         self.status.borrow_mut().transition(|state| match state {
             ModuleStatus::Linking { info } => ModuleStatus::PreLinked {
-                environment: env,
+                environment: env.into_edge(),
                 info,
                 context: SourceTextContext {
                     codeblock: codeblock.into_edge(),
-                    environments: frame.environments.clone(),
+                    environments: frame.environments.to_edges(),
                     realm,
                 },
             },
@@ -1799,6 +1799,7 @@ impl SourceTextModule {
         // 5. Assert: module has been linked and declarations in its module environment have been instantiated.
         // 6. Set the VariableEnvironment of moduleContext to module.[[Environment]].
         // 7. Set the LexicalEnvironment of moduleContext to module.[[Environment]].
+        let environments = environments.to_rooted();
         let env_fp = environments.len() as u32;
         let callframe = CallFrame::new_rooted(
             codeblock.root(),
@@ -1854,7 +1855,7 @@ impl SourceTextModule {
     }
 
     /// Gets the declarative environment of this module.
-    pub(crate) fn environment(&self) -> Option<Gc<DeclarativeEnvironment>> {
+    pub(crate) fn environment(&self) -> Option<Rooted<DeclarativeEnvironment>> {
         self.status.borrow().environment()
     }
 }

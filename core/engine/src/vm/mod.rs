@@ -285,7 +285,7 @@ impl Stack {
 
     /// Get the async generator object for the given frame.
     #[track_caller]
-    pub(crate) fn async_generator_object<H>(&self, frame: &CallFrame<H>) -> Option<JsObject>
+    pub(crate) fn async_generator_object<H, E>(&self, frame: &CallFrame<H, E>) -> Option<JsObject>
     where
         H: std::ops::Deref<Target = CodeBlock>,
     {
@@ -420,12 +420,12 @@ impl Vm {
             frame: CallFrame::new_rooted(
                 Rooted::new(CodeBlock::new(JsString::default(), 0, true)),
                 None,
-                EnvironmentStack::new(realm.environment().clone()),
+                EnvironmentStack::new(Rooted::from_gc(realm.environment().clone())),
                 realm.clone(),
             ),
             stack: Stack::new(1024),
             return_value: JsValue::undefined(),
-            environments: EnvironmentStack::new(realm.environment().clone()),
+            environments: EnvironmentStack::new(Rooted::from_gc(realm.environment().clone())),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
             native_active_function: None,

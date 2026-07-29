@@ -3,7 +3,7 @@ use crate::{
     object::{JsObject, PrivateName},
 };
 use boa_ast::scope::{BindingLocator, BindingLocatorScope, Scope};
-use boa_gc::{Finalize, Gc, Trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace};
 
 mod declarative;
 mod private;
@@ -22,22 +22,36 @@ pub(crate) use self::{
 /// Environments themselves are garbage collected,
 /// because they must be preserved for function calls.
 #[derive(Clone, Debug, Trace, Finalize)]
-pub(crate) struct EnvironmentStack {
+pub struct EnvironmentStack {
     stack: Vec<Environment>,
-    global: Gc<DeclarativeEnvironment>,
-    private_stack: Vec<Gc<PrivateEnvironment>>,
+    global: Rooted<DeclarativeEnvironment>,
+    private_stack: Vec<Rooted<PrivateEnvironment>>,
+}
+
+/// An environment stack stored inside the traced heap.
+#[derive(Clone, Debug, Trace, Finalize)]
+pub(crate) struct EnvironmentStackEdges {
+    stack: Vec<EnvironmentEdge>,
+    global: GcEdge<DeclarativeEnvironment>,
+    private_stack: Vec<GcEdge<PrivateEnvironment>>,
 }
 
 /// A runtime environment.
 #[derive(Clone, Debug, Trace, Finalize)]
 pub(crate) enum Environment {
-    Declarative(Gc<DeclarativeEnvironment>),
+    Declarative(Rooted<DeclarativeEnvironment>),
+    Object(JsObject),
+}
+
+#[derive(Clone, Debug, Trace, Finalize)]
+enum EnvironmentEdge {
+    Declarative(GcEdge<DeclarativeEnvironment>),
     Object(JsObject),
 }
 
 impl Environment {
     /// Returns the declarative environment if it is one.
-    pub(crate) const fn as_declarative(&self) -> Option<&Gc<DeclarativeEnvironment>> {
+    pub(crate) const fn as_declarative(&self) -> Option<&Rooted<DeclarativeEnvironment>> {
         match self {
             Self::Declarative(env) => Some(env),
             Self::Object(_) => None,
@@ -47,7 +61,7 @@ impl Environment {
 
 impl EnvironmentStack {
     /// Create a new environment stack.
-    pub(crate) fn new(global: Gc<DeclarativeEnvironment>) -> Self {
+    pub(crate) fn new(global: Rooted<DeclarativeEnvironment>) -> Self {
         assert!(matches!(
             global.kind(),
             DeclarativeEnvironmentKind::Global(_)
@@ -60,7 +74,7 @@ impl EnvironmentStack {
     }
 
     /// Replaces the current global with a new global environment.
-    pub(crate) fn replace_global(&mut self, global: Gc<DeclarativeEnvironment>) {
+    pub(crate) fn replace_global(&mut self, global: Rooted<DeclarativeEnvironment>) {
         assert!(matches!(
             global.kind(),
             DeclarativeEnvironmentKind::Global(_)
@@ -69,12 +83,14 @@ impl EnvironmentStack {
     }
 
     /// Gets the current global environment.
-    pub(crate) fn global(&self) -> &Gc<DeclarativeEnvironment> {
+    pub(crate) fn global(&self) -> &Rooted<DeclarativeEnvironment> {
         &self.global
     }
 
     /// Gets the next outer function environment.
-    pub(crate) fn outer_function_environment(&self) -> Option<(Gc<DeclarativeEnvironment>, Scope)> {
+    pub(crate) fn outer_function_environment(
+        &self,
+    ) -> Option<(Rooted<DeclarativeEnvironment>, Scope)> {
         for env in self
             .stack
             .iter()
@@ -175,7 +191,7 @@ impl EnvironmentStack {
 
         let index = self.stack.len() as u32;
 
-        self.stack.push(Environment::Declarative(Gc::new(
+        self.stack.push(Environment::Declarative(Rooted::new(
             DeclarativeEnvironment::new(DeclarativeEnvironmentKind::Lexical(
                 LexicalEnvironment::new(bindings_count, poisoned, with),
             )),
@@ -205,7 +221,7 @@ impl EnvironmentStack {
             (environment.poisoned(), with || environment.with())
         };
 
-        self.stack.push(Environment::Declarative(Gc::new(
+        self.stack.push(Environment::Declarative(Rooted::new(
             DeclarativeEnvironment::new(DeclarativeEnvironmentKind::Function(
                 FunctionEnvironment::new(num_bindings, poisoned, with, function_slots, scope),
             )),
@@ -215,7 +231,7 @@ impl EnvironmentStack {
     /// Push a module environment on the environments stack.
     pub(crate) fn push_module(&mut self, scope: Scope) {
         let num_bindings = scope.num_bindings_non_local();
-        self.stack.push(Environment::Declarative(Gc::new(
+        self.stack.push(Environment::Declarative(Rooted::new(
             DeclarativeEnvironment::new(DeclarativeEnvironmentKind::Module(
                 ModuleEnvironment::new(num_bindings, scope),
             )),
@@ -230,7 +246,7 @@ impl EnvironmentStack {
     }
 
     /// Get the most outer environment.
-    pub(crate) fn current_declarative_ref(&self) -> Option<&Gc<DeclarativeEnvironment>> {
+    pub(crate) fn current_declarative_ref(&self) -> Option<&Rooted<DeclarativeEnvironment>> {
         if let Some(env) = self.stack.last() {
             env.as_declarative()
         } else {
@@ -308,7 +324,7 @@ impl EnvironmentStack {
     }
 
     /// Push a private environment to the private environment stack.
-    pub(crate) fn push_private(&mut self, environment: Gc<PrivateEnvironment>) {
+    pub(crate) fn push_private(&mut self, environment: Rooted<PrivateEnvironment>) {
         self.private_stack.push(environment);
     }
 
@@ -357,6 +373,56 @@ impl EnvironmentStack {
         self.stack
             .iter()
             .any(|env| matches!(env, Environment::Object(_)))
+    }
+
+    pub(crate) fn to_edges(&self) -> EnvironmentStackEdges {
+        EnvironmentStackEdges {
+            stack: self
+                .stack
+                .iter()
+                .map(|environment| match environment {
+                    Environment::Declarative(environment) => {
+                        EnvironmentEdge::Declarative(environment.clone().into_edge())
+                    }
+                    Environment::Object(object) => EnvironmentEdge::Object(object.clone()),
+                })
+                .collect(),
+            global: self.global.clone().into_edge(),
+            private_stack: self
+                .private_stack
+                .iter()
+                .cloned()
+                .map(Rooted::into_edge)
+                .collect(),
+        }
+    }
+}
+
+impl EnvironmentStackEdges {
+    pub(crate) fn to_rooted(&self) -> EnvironmentStack {
+        EnvironmentStack {
+            stack: self
+                .stack
+                .iter()
+                .map(|environment| match environment {
+                    EnvironmentEdge::Declarative(environment) => {
+                        Environment::Declarative(environment.clone().root())
+                    }
+                    EnvironmentEdge::Object(object) => Environment::Object(object.clone()),
+                })
+                .collect(),
+            global: self.global.clone().root(),
+            private_stack: self
+                .private_stack
+                .iter()
+                .cloned()
+                .map(GcEdge::root)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn push_private(&mut self, environment: Rooted<PrivateEnvironment>) {
+        self.private_stack.push(environment.into_edge());
     }
 }
 

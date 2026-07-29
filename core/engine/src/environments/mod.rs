@@ -26,8 +26,10 @@
 
 mod runtime;
 
+pub use runtime::EnvironmentStack;
+
 pub(crate) use runtime::{
-    DeclarativeEnvironment, Environment, EnvironmentStack, FunctionSlots, PrivateEnvironment,
+    DeclarativeEnvironment, Environment, EnvironmentStackEdges, FunctionSlots, PrivateEnvironment,
     ThisBindingStatus,
 };
 

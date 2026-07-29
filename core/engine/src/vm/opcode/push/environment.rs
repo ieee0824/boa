@@ -4,7 +4,7 @@ use crate::{
     environments::PrivateEnvironment,
     vm::opcode::{Operation, VaryingOperand},
 };
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use thin_vec::ThinVec;
 
 /// `PushScope` implements the Opcode Operation for `Opcode::PushScope`
@@ -80,7 +80,7 @@ impl PushPrivateEnvironment {
         }
 
         let ptr: *const _ = class.as_ref();
-        let environment = Gc::new(PrivateEnvironment::new(ptr.cast::<()>() as usize, names));
+        let environment = Rooted::new(PrivateEnvironment::new(ptr.cast::<()>() as usize, names));
 
         class
             .downcast_mut::<OrdinaryFunction>()
