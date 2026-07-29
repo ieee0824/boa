@@ -1,5 +1,5 @@
 use boa_engine::{Context, Finalize, JsData, JsResult, Trace};
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_runtime::{ConsoleState, Logger};
 use std::cell::RefCell;
 use std::fmt::Debug;
@@ -35,7 +35,7 @@ struct RecordingLoggerInner {
 #[derive(Clone, Trace, Finalize, JsData)]
 pub(crate) struct RecordingLogger {
     /// Also send logs to this logger.
-    tee: Gc<Box<dyn Logger>>,
+    tee: Rooted<Box<dyn Logger>>,
 
     #[unsafe_ignore_trace]
     inner: Rc<RefCell<RecordingLoggerInner>>,
@@ -88,7 +88,7 @@ impl Logger for RecordingLogger {
 impl RecordingLogger {
     pub(crate) fn new<L: Logger + 'static>(tee: L) -> Self {
         Self {
-            tee: Gc::new(Box::new(tee)),
+            tee: Rooted::new(Box::new(tee)),
             inner: Rc::new(RefCell::new(Default::default())),
         }
     }

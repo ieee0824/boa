@@ -2,7 +2,7 @@ use super::{Console, ConsoleState, formatter};
 use crate::test::{TestAction, run_test_actions, run_test_actions_with};
 use crate::{Logger, NullLogger};
 use boa_engine::{Context, JsError, JsResult, JsValue, js_string, property::Attribute};
-use boa_gc::{Gc, GcRefCell};
+use boa_gc::{GcRefCell, Rooted};
 use indoc::indoc;
 
 #[test]
@@ -114,9 +114,17 @@ fn console_log_cyclic() {
 }
 
 /// A logger that records all log messages.
-#[derive(Clone, Debug, Default, boa_engine::Trace, boa_engine::Finalize)]
+#[derive(Clone, Debug, boa_engine::Trace, boa_engine::Finalize)]
 pub(crate) struct RecordingLogger {
-    pub log: Gc<GcRefCell<String>>,
+    pub log: Rooted<GcRefCell<String>>,
+}
+
+impl Default for RecordingLogger {
+    fn default() -> Self {
+        Self {
+            log: Rooted::new(GcRefCell::default()),
+        }
+    }
 }
 
 impl Logger for RecordingLogger {
