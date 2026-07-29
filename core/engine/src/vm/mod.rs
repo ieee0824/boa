@@ -447,10 +447,7 @@ impl Vm {
     /// is left holding `undefined` rather than its old value.
     #[track_caller]
     pub(crate) fn take_register(&mut self, index: usize) -> JsValue {
-        std::mem::replace(
-            &mut self.stack.stack[self.frame.rp as usize + index],
-            JsValue::undefined(),
-        )
+        std::mem::take(&mut self.stack.stack[self.frame.rp as usize + index])
     }
 
     #[track_caller]

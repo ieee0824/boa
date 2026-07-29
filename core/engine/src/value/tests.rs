@@ -1668,14 +1668,8 @@ fn primitive_property_access_matches_wrapper_semantics() {
         TestAction::assert("true.valueOf() === true"),
         TestAction::assert_eq("10n.toString()", js_string!("10")),
         // A prototype accessor must receive the primitive as its `this`.
-        TestAction::assert_eq(
-            "Symbol('tag').description",
-            js_string!("tag"),
-        ),
-        TestAction::assert_eq(
-            "Symbol('tag').toString()",
-            js_string!("Symbol(tag)"),
-        ),
+        TestAction::assert_eq("Symbol('tag').description", js_string!("tag")),
+        TestAction::assert_eq("Symbol('tag').toString()", js_string!("Symbol(tag)")),
         // A user accessor or method installed on the prototype receives the
         // primitive, and `OrdinaryCallBindThis` decides what it observes: a
         // non-strict function has its `this` coerced at call time while a strict

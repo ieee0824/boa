@@ -63,7 +63,6 @@ fn gc_recursion() {
     });
 }
 
-
 /// The collection threshold decides how much garbage piles up before a collection,
 /// and a collection walks the whole heap — everything allocated since the last one,
 /// live or not. Pinned because lowering it is a large slowdown that no other test

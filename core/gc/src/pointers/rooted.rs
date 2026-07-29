@@ -1,5 +1,5 @@
 use super::{Gc, GcEdge};
-use crate::{register_root, unregister_root, Finalize, Trace};
+use crate::{Finalize, Trace, register_root, unregister_root};
 use std::{fmt, mem::ManuallyDrop, ops::Deref, ptr};
 
 /// An explicitly registered, heap-external owner of a garbage-collected value.

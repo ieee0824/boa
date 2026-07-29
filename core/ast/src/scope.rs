@@ -676,8 +676,8 @@ impl FunctionScopes {
             .bindings
             .borrow()
             .first()
-            .filter(|b| b.name == "arguments" && b.is_accessed())
-            .is_some()
+            .as_ref()
+            .is_some_and(|b| b.name == "arguments" && b.is_accessed())
         {
             return true;
         }
@@ -688,8 +688,8 @@ impl FunctionScopes {
                 .bindings
                 .borrow()
                 .first()
-                .filter(|b| b.name == "arguments" && b.is_accessed())
-                .is_some()
+                .as_ref()
+                .is_some_and(|b| b.name == "arguments" && b.is_accessed())
         {
             return true;
         }

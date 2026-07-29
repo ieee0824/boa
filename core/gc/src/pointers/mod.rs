@@ -1,14 +1,14 @@
 //! Pointers represents the External types returned by the Boa Garbage Collector
 
-mod ephemeron;
 mod edge;
+mod ephemeron;
 mod gc;
 mod rooted;
 mod weak;
 mod weak_map;
 
-pub use ephemeron::Ephemeron;
 pub use edge::GcEdge;
+pub use ephemeron::Ephemeron;
 pub use gc::{Gc, GcErased};
 pub use rooted::Rooted;
 pub use weak::WeakGc;

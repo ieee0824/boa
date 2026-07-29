@@ -398,7 +398,7 @@ fn clone_builder() {
     // clone_from(empty) == origin(empty)
     let mut cloned_from = Latin1JsStringBuilder::new();
     cloned_from.clone_from(&empty_origin);
-    assert!(cloned_from.capacity() == 0);
+    assert_eq!(cloned_from.capacity(), 0);
     assert_eq!(empty_origin, cloned_from);
 
     // utf16 builder -- test
@@ -428,7 +428,7 @@ fn clone_builder() {
     // clone_from(empty) == origin(empty)
     let mut cloned_from = Utf16JsStringBuilder::new();
     cloned_from.clone_from(&empty_origin);
-    assert!(cloned_from.capacity() == 0);
+    assert_eq!(cloned_from.capacity(), 0);
     assert_eq!(empty_origin, cloned_from);
 }
 
@@ -469,7 +469,6 @@ fn common_js_string_builder() {
         "Déjà vu2024年5月21日🎹"
     );
 }
-
 
 /// The header is on every heap-allocated string, so a field added to it is paid
 /// for by the whole program. Pinned so that growing it is a deliberate act with a
@@ -625,7 +624,6 @@ fn empty_contents_with_slack_stay_empty() {
     assert_eq!(empty.to_std_string_escaped(), "");
 }
 
-
 /// The append path must produce exactly what concatenation would, or the
 /// optimization is observable from JavaScript.
 #[test]
@@ -687,7 +685,9 @@ fn appending_declines_while_the_string_is_shared() {
     // Once the observer is gone the same string is eligible.
     drop(observer);
     assert_eq!(refused.refcount(), Some(1));
-    let appended = refused.try_append(JsStr::latin1(b"de")).expect("sole owner");
+    let appended = refused
+        .try_append(JsStr::latin1(b"de"))
+        .expect("sole owner");
     assert_eq!(appended, JsString::from("abcde"));
 }
 

@@ -68,7 +68,10 @@ fn register_root(pointer: GcErasedPointer) {
         roots
             .entry(key)
             .and_modify(|entry| entry.handles += 1)
-            .or_insert(RootEntry { pointer, handles: 1 });
+            .or_insert(RootEntry {
+                pointer,
+                handles: 1,
+            });
     });
 }
 

@@ -888,7 +888,9 @@ impl<T: NativeObject> AsRef<GcRefCell<Object<T>>> for JsObject<T> {
 impl<T: NativeObject> From<Gc<VTableObject<T>>> for JsObject<T> {
     #[inline]
     fn from(inner: Gc<VTableObject<T>>) -> Self {
-        Self { inner: inner.into() }
+        Self {
+            inner: inner.into(),
+        }
     }
 }
 
