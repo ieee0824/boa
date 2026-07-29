@@ -723,11 +723,11 @@ fn into_js_module() {
     use boa_engine::{
         Context, IntoJsFunctionCopied, JsValue, Module, Source, UnsafeIntoJsFunction, js_string,
     };
-    use boa_gc::{Gc, GcRefCell};
+    use boa_gc::{GcRefCell, Rooted};
     use std::cell::RefCell;
     use std::rc::Rc;
 
-    type ResultType = Gc<GcRefCell<JsValue>>;
+    type ResultType = Rooted<GcRefCell<JsValue>>;
 
     let loader = Rc::new(MapModuleLoader::default());
     let mut context = Context::builder()
@@ -739,7 +739,7 @@ fn into_js_module() {
     let bar_count = Rc::new(RefCell::new(0));
     let dad_count = Rc::new(RefCell::new(0));
 
-    context.insert_data(Gc::new(GcRefCell::new(JsValue::undefined())));
+    context.insert_data(Rooted::new(GcRefCell::new(JsValue::undefined())));
 
     let module = unsafe {
         vec![

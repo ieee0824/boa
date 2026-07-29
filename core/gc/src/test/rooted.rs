@@ -59,6 +59,24 @@ fn edge_allocation_and_weak_promotion_register_only_explicit_roots() {
 }
 
 #[test]
+fn raw_round_trip_restores_root_registration() {
+    run_test(|| {
+        let root = Rooted::new(17_u32);
+        let raw = Rooted::into_raw(root);
+        assert!(registered_roots().is_empty());
+
+        // SAFETY: `raw` was just produced by `Rooted::into_raw` and has not
+        // been reconstructed elsewhere.
+        let root = unsafe { Rooted::from_raw(raw) };
+        assert_eq!(registered_roots().len(), 1);
+        assert_eq!(*root, 17);
+
+        drop(root);
+        assert!(registered_roots().is_empty());
+    });
+}
+
+#[test]
 fn rooted_fields_drop_safely_during_thread_teardown() {
     #[derive(Trace, Finalize)]
     struct Holder {

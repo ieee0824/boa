@@ -1,4 +1,4 @@
-use boa_gc::{Finalize, Gc, GcEdge, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace};
 
 use crate::{Context, JsResult, JsValue};
 
@@ -88,7 +88,7 @@ impl NativeCoroutine {
     {
         // Hopefully, this unsafe operation will be replaced by the `CoerceUnsized` API in the
         // future: https://github.com/rust-lang/rust/issues/18598
-        let ptr = Gc::into_raw(Gc::new(Coroutine {
+        let ptr = Rooted::into_raw(Rooted::new(Coroutine {
             f: closure,
             captures,
         }));
@@ -96,7 +96,7 @@ impl NativeCoroutine {
         // meaning this is safe.
         unsafe {
             Self {
-                inner: Rooted::from_gc(Gc::from_raw(ptr)),
+                inner: Rooted::from_raw(ptr),
             }
         }
     }
