@@ -21,7 +21,7 @@ pub(crate) use self::{
 ///
 /// Environments themselves are garbage collected,
 /// because they must be preserved for function calls.
-#[derive(Clone, Debug, Trace, Finalize)]
+#[derive(Clone, Debug, Finalize)]
 pub struct EnvironmentStack {
     stack: Vec<Environment>,
     global: Rooted<DeclarativeEnvironment>,
@@ -37,7 +37,7 @@ pub(crate) struct EnvironmentStackEdges {
 }
 
 /// A runtime environment.
-#[derive(Clone, Debug, Trace, Finalize)]
+#[derive(Clone, Debug, Finalize)]
 pub(crate) enum Environment {
     Declarative(Rooted<DeclarativeEnvironment>),
     Object(JsObject),
