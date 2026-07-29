@@ -16,6 +16,48 @@ impl<T: Trace + ?Sized> GcEdge<T> {
         Self { inner }
     }
 
+    /// Consumes the edge and returns its allocation pointer.
+    #[must_use]
+    pub fn into_raw(this: Self) -> std::ptr::NonNull<crate::GcBox<T>> {
+        Gc::into_raw(this.inner)
+    }
+
+    /// Reconstructs an edge previously consumed by [`Self::into_raw`].
+    ///
+    /// # Safety
+    /// `inner` must have been produced by `GcEdge::into_raw` for a compatible type.
+    #[must_use]
+    pub const unsafe fn from_raw(inner: std::ptr::NonNull<crate::GcBox<T>>) -> Self {
+        Self {
+            // SAFETY: Forwarded from this function's contract.
+            inner: unsafe { Gc::from_raw(inner) },
+        }
+    }
+
+    /// Returns true when two edges point to the same allocation.
+    #[must_use]
+    pub fn ptr_eq<U: Trace + ?Sized>(this: &Self, other: &GcEdge<U>) -> bool {
+        Gc::ptr_eq(&this.inner, &other.inner)
+    }
+
+    /// Returns true when the allocation contains a value of type `U`.
+    #[must_use]
+    pub fn is<U: Trace + 'static>(this: &Self) -> bool {
+        Gc::is::<U>(&this.inner)
+    }
+
+    /// Reinterprets an edge as another allocation type.
+    ///
+    /// # Safety
+    /// The caller must ensure the cast is valid.
+    #[must_use]
+    pub unsafe fn cast_unchecked<U: Trace + 'static>(this: Self) -> GcEdge<U> {
+        GcEdge {
+            // SAFETY: Forwarded from this function's contract.
+            inner: unsafe { Gc::cast_unchecked::<U>(this.inner) },
+        }
+    }
+
     /// Converts this heap edge into a registered external root.
     #[must_use]
     pub fn root(self) -> Rooted<T> {
@@ -26,6 +68,12 @@ impl<T: Trace + ?Sized> GcEdge<T> {
     #[must_use]
     pub fn as_gc(&self) -> &Gc<T> {
         &self.inner
+    }
+}
+
+impl<T: Trace + ?Sized> From<Gc<T>> for GcEdge<T> {
+    fn from(inner: Gc<T>) -> Self {
+        Self::from_gc(inner)
     }
 }
 

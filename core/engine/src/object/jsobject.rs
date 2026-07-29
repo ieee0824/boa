@@ -22,7 +22,7 @@ use crate::{
     property::{PropertyDescriptor, PropertyKey},
     value::PreferredType,
 };
-use boa_gc::{self, Finalize, Gc, GcRef, GcRefCell, GcRefMut, Trace};
+use boa_gc::{self, Finalize, Gc, GcEdge, GcRef, GcRefCell, GcRefMut, Trace};
 use core::ptr::fn_addr_eq;
 use std::collections::HashSet;
 use std::{
@@ -62,7 +62,7 @@ impl JsData for ErasedObjectData {}
 #[derive(Trace, Finalize)]
 #[boa_gc(unsafe_no_drop)]
 pub struct JsObject<T: NativeObject = ErasedObjectData> {
-    inner: Gc<VTableObject<T>>,
+    inner: GcEdge<VTableObject<T>>,
 }
 
 impl<T: NativeObject> Clone for JsObject<T> {
@@ -89,7 +89,7 @@ impl JsObject {
     /// Converts the `JsObject` into a raw pointer to its inner `GcBox<ErasedVTableObject>`.
     #[cfg(not(feature = "jsvalue-enum"))]
     pub(crate) fn into_raw(self) -> NonNull<GcBox<ErasedVTableObject>> {
-        Gc::into_raw(self.inner)
+        GcEdge::into_raw(self.inner)
     }
 
     /// Creates a new `JsObject` from a raw pointer.
@@ -100,7 +100,7 @@ impl JsObject {
     #[cfg(not(feature = "jsvalue-enum"))]
     pub(crate) unsafe fn from_raw(raw: NonNull<GcBox<ErasedVTableObject>>) -> Self {
         // SAFETY: The caller guaranteed the value to be a valid pointer to a `GcBox<ErasedVTableObject>`.
-        let inner = unsafe { Gc::from_raw(raw) };
+        let inner = unsafe { GcEdge::from_raw(raw) };
 
         JsObject { inner }
     }
@@ -124,7 +124,10 @@ impl JsObject {
             vtable,
         });
 
-        JsObject { inner }.upcast()
+        JsObject {
+            inner: inner.into(),
+        }
+        .upcast()
     }
 
     /// Creates a new ordinary object with its prototype set to the `Object` prototype.
@@ -176,7 +179,10 @@ impl JsObject {
             vtable: internal_methods,
         });
 
-        JsObject { inner }.upcast()
+        JsObject {
+            inner: inner.into(),
+        }
+        .upcast()
     }
 
     /// Creates a new object with the provided prototype and object data.
@@ -205,7 +211,10 @@ impl JsObject {
             vtable: internal_methods,
         });
 
-        JsObject { inner }.upcast()
+        JsObject {
+            inner: inner.into(),
+        }
+        .upcast()
     }
 
     /// Downcasts the object's inner data if the object is of type `T`.
@@ -235,7 +244,7 @@ impl JsObject {
         // object.
         // The pointer is guaranteed to be valid because we just created it.
         // `VTableObject<ErasedObjectData>` and `VTableObject<T>` have the same size and alignment.
-        let inner = unsafe { Gc::cast_unchecked::<VTableObject<T>>(self.inner) };
+        let inner = unsafe { GcEdge::cast_unchecked::<VTableObject<T>>(self.inner) };
 
         JsObject { inner }
     }
@@ -289,7 +298,7 @@ impl JsObject {
     #[must_use]
     #[track_caller]
     pub fn is<T: NativeObject>(&self) -> bool {
-        Gc::is::<VTableObject<T>>(&self.inner)
+        GcEdge::is::<VTableObject<T>>(&self.inner)
     }
 
     /// Checks if it's an ordinary object.
@@ -805,7 +814,7 @@ impl<T: NativeObject> JsObject<T> {
     }
 
     pub(crate) fn inner(&self) -> &Gc<VTableObject<T>> {
-        &self.inner
+        self.inner.as_gc()
     }
 
     /// Create a new private name with this object as the unique identifier.
@@ -822,7 +831,7 @@ impl<T: NativeObject> JsObject<T> {
     /// `JsValue`. To erase the pointer, call [`JsObject::upcast`].
     pub fn new<O: Into<Option<JsObject>>>(root_shape: &RootShape, prototype: O, data: T) -> Self {
         let internal_methods = data.internal_methods();
-        let inner = Gc::new(VTableObject {
+        let inner = GcEdge::from(Gc::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
                 properties: PropertyMap::from_prototype_with_shared_shape(
@@ -833,7 +842,7 @@ impl<T: NativeObject> JsObject<T> {
                 private_elements: ThinVec::new(),
             }),
             vtable: internal_methods,
-        });
+        }));
 
         Self { inner }
     }
@@ -844,7 +853,7 @@ impl<T: NativeObject> JsObject<T> {
     /// `JsValue`. To erase the pointer, call [`JsObject::upcast`].
     pub fn new_unique<O: Into<Option<JsObject>>>(prototype: O, data: T) -> Self {
         let internal_methods = data.internal_methods();
-        let inner = Gc::new(VTableObject {
+        let inner = GcEdge::from(Gc::new(VTableObject {
             object: GcRefCell::new(Object {
                 data: ObjectData::new(data),
                 properties: PropertyMap::from_prototype_unique_shape(prototype.into()),
@@ -852,7 +861,7 @@ impl<T: NativeObject> JsObject<T> {
                 private_elements: ThinVec::new(),
             }),
             vtable: internal_methods,
-        });
+        }));
 
         Self { inner }
     }
@@ -863,7 +872,7 @@ impl<T: NativeObject> JsObject<T> {
     pub fn upcast(self) -> JsObject {
         // SAFETY: The pointer is guaranteed to be valid.
         // `VTableObject<ErasedObjectData>` and `VTableObject<T>` have the same size and alignment.
-        let inner = unsafe { Gc::cast_unchecked::<ErasedVTableObject>(self.inner) };
+        let inner = unsafe { GcEdge::cast_unchecked::<ErasedVTableObject>(self.inner) };
 
         JsObject { inner }
     }
@@ -879,7 +888,7 @@ impl<T: NativeObject> AsRef<GcRefCell<Object<T>>> for JsObject<T> {
 impl<T: NativeObject> From<Gc<VTableObject<T>>> for JsObject<T> {
     #[inline]
     fn from(inner: Gc<VTableObject<T>>) -> Self {
-        Self { inner }
+        Self { inner: inner.into() }
     }
 }
 
