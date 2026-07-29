@@ -26,7 +26,7 @@ use std::fmt::Write as _;
 pub(crate) use opcode::{Instruction, InstructionIterator, Opcode};
 
 pub(crate) use {
-    call_frame::CallFrameFlags,
+    call_frame::{CallFrameFlags, SuspendedCallFrame},
     code_block::{
         CodeBlockFlags, Constant, Handler, create_function_object, create_function_object_fast,
     },
@@ -285,13 +285,16 @@ impl Stack {
 
     /// Get the async generator object for the given frame.
     #[track_caller]
-    pub(crate) fn async_generator_object(&self, frame: &CallFrame) -> Option<JsObject> {
+    pub(crate) fn async_generator_object<H>(&self, frame: &CallFrame<H>) -> Option<JsObject>
+    where
+        H: std::ops::Deref<Target = CodeBlock>,
+    {
         if !frame.code_block().is_async_generator() {
             return None;
         }
 
         self.stack
-            .get(frame.async_generator_object_register_index())
+            .get(frame.rp as usize + CallFrame::ASYNC_GENERATOR_OBJECT_REGISTER_INDEX)
             .expect("stack must have an async generator object")
             .as_object()
     }
@@ -580,7 +583,7 @@ impl Context {
             )
         };
 
-        println!("{}", frame.code_block);
+        println!("{}", &**frame.code_block());
         println!(
             "{msg:-^width$}",
             width = Self::COLUMN_WIDTH * Self::NUMBER_OF_COLUMNS - 10

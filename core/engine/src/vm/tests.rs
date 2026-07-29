@@ -498,3 +498,20 @@ fn long_object_chain_gc_trace_stack_overflow() {
         TestAction::inspect_context(|_| boa_gc::force_collect()),
     ]);
 }
+
+#[test]
+fn suspended_generator_code_survives_forced_collection() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function* values() {
+                yield 1;
+                return 2;
+            }
+
+            globalThis.generator = values();
+            generator.next();
+        "#}),
+        TestAction::inspect_context(|_| boa_gc::force_collect()),
+        TestAction::assert_eq("generator.next().value", 2),
+    ]);
+}

@@ -21,7 +21,9 @@ use crate::{
     string::StaticJsStrings,
     symbol::JsSymbol,
     value::JsValue,
-    vm::{CallFrame, CallFrameFlags, CompletionRecord, GeneratorResumeKind, Stack},
+    vm::{
+        CallFrame, CallFrameFlags, CompletionRecord, GeneratorResumeKind, Stack, SuspendedCallFrame,
+    },
 };
 use boa_gc::{Finalize, Trace, custom_trace};
 
@@ -59,7 +61,7 @@ unsafe impl Trace for GeneratorState {
 #[derive(Debug, Trace, Finalize)]
 pub(crate) struct GeneratorContext {
     pub(crate) stack: Stack,
-    pub(crate) call_frame: Option<CallFrame>,
+    pub(crate) call_frame: Option<SuspendedCallFrame>,
 }
 
 impl GeneratorContext {
@@ -81,7 +83,7 @@ impl GeneratorContext {
         }
 
         Self {
-            call_frame: Some(frame),
+            call_frame: Some(frame.into_edge()),
             stack,
         }
     }
@@ -94,7 +96,11 @@ impl GeneratorContext {
         context: &mut Context,
     ) -> CompletionRecord {
         std::mem::swap(&mut context.vm.stack, &mut self.stack);
-        let frame = self.call_frame.take().expect("should have a call frame");
+        let frame = self
+            .call_frame
+            .take()
+            .expect("should have a call frame")
+            .into_rooted();
         let rp = frame.rp;
         context.vm.push_frame(frame);
 
@@ -110,7 +116,7 @@ impl GeneratorContext {
         let result = context.run();
 
         std::mem::swap(&mut context.vm.stack, &mut self.stack);
-        self.call_frame = context.vm.pop_frame();
+        self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
         assert!(self.call_frame.is_some());
         result
     }
