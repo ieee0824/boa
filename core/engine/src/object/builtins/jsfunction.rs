@@ -132,7 +132,7 @@ impl JsFunction {
             inner: JsObject::from_proto_and_data(
                 None,
                 NativeFunctionObject {
-                    f: NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())),
+                    f: NativeFunction::from_fn_ptr(|_, _, _| Ok(JsValue::undefined())).to_edge(),
                     name: js_string!(),
                     constructor: constructor.then_some(ConstructorKind::Base),
                     realm: None,

@@ -53,13 +53,19 @@ struct RootEntry {
 
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
 thread_local!(static GC_ROOTS: RefCell<HashMap<usize, RootEntry>> = RefCell::new(HashMap::new()));
-thread_local!(static BOA_GC: RefCell<BoaGc> = RefCell::new( BoaGc {
-    config: GcConfig::default(),
-    runtime: GcRuntimeData::default(),
-    strongs: Vec::default(),
-    weaks: Vec::default(),
-    weak_maps: Vec::default(),
-}));
+thread_local!(static BOA_GC: RefCell<BoaGc> = {
+    // The collector can own traced values containing `Rooted` handles. Initialize
+    // the root registry first so it remains alive while the collector is dropped
+    // during thread teardown.
+    GC_ROOTS.with(|_| {});
+    RefCell::new(BoaGc {
+        config: GcConfig::default(),
+        runtime: GcRuntimeData::default(),
+        strongs: Vec::default(),
+        weaks: Vec::default(),
+        weak_maps: Vec::default(),
+    })
+});
 
 fn register_root(pointer: GcErasedPointer) {
     GC_ROOTS.with(|roots| {

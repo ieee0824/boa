@@ -53,7 +53,19 @@ where
 /// **Undefined Behaviour**.
 #[derive(Clone, Trace, Finalize)]
 pub struct SyntheticModuleInitializer {
-    inner: Gc<dyn TraceableCallback>,
+    inner: Rooted<dyn TraceableCallback>,
+}
+
+#[derive(Clone, Trace, Finalize)]
+struct SyntheticModuleInitializerEdge {
+    inner: GcEdge<dyn TraceableCallback>,
+}
+
+impl std::fmt::Debug for SyntheticModuleInitializerEdge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyntheticModuleInitializerEdge")
+            .finish_non_exhaustive()
+    }
 }
 
 impl std::fmt::Debug for SyntheticModuleInitializer {
@@ -128,14 +140,21 @@ impl SyntheticModuleInitializer {
         // meaning this is safe.
         unsafe {
             Self {
-                inner: Gc::from_raw(ptr),
+                inner: Rooted::from_gc(Gc::from_raw(ptr)),
             }
         }
     }
 
-    /// Calls this `SyntheticModuleInitializer`, forwarding the arguments to the corresponding function.
+    fn to_edge(&self) -> SyntheticModuleInitializerEdge {
+        SyntheticModuleInitializerEdge {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+}
+
+impl SyntheticModuleInitializerEdge {
     #[inline]
-    pub(crate) fn call(&self, module: &SyntheticModule, context: &mut Context) -> JsResult<()> {
+    fn call(&self, module: &SyntheticModule, context: &mut Context) -> JsResult<()> {
         self.inner.call(module, context)
     }
 }
@@ -174,7 +193,7 @@ impl ModuleStatus {
 pub struct SyntheticModule {
     #[unsafe_ignore_trace]
     export_names: FxHashSet<JsString>,
-    eval_steps: SyntheticModuleInitializer,
+    eval_steps: SyntheticModuleInitializerEdge,
     state: GcRefCell<ModuleStatus>,
 }
 
@@ -248,7 +267,7 @@ impl SyntheticModule {
     pub(super) fn new(names: FxHashSet<JsString>, eval_steps: SyntheticModuleInitializer) -> Self {
         Self {
             export_names: names,
-            eval_steps,
+            eval_steps: eval_steps.to_edge(),
             state: GcRefCell::default(),
         }
     }
