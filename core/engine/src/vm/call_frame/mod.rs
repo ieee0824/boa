@@ -2,7 +2,7 @@
 //!
 //! This module will provides everything needed to implement the `CallFrame`
 
-use super::ActiveRunnable;
+use super::{ActiveRunnable, ActiveRunnableEdge};
 use crate::{
     JsValue,
     builtins::iterable::IteratorRecord,
@@ -45,7 +45,7 @@ pub struct CallFrameLocation {
 
 /// A `CallFrame` holds the state of a function call.
 #[derive(Clone, Debug, Finalize)]
-pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack, R = Realm> {
+pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack, R = Realm, A = ActiveRunnable> {
     pub(crate) code_block: H,
     pub(crate) pc: u32,
     /// The register pointer, points to the first register in the stack.
@@ -67,7 +67,7 @@ pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack, R = Realm> {
     pub(crate) loop_iteration_count: u64,
 
     /// `[[ScriptOrModule]]`
-    pub(crate) active_runnable: Option<ActiveRunnable>,
+    pub(crate) active_runnable: Option<A>,
 
     /// \[\[Environment\]\]
     pub(crate) environments: E,
@@ -79,7 +79,7 @@ pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack, R = Realm> {
     pub(crate) flags: CallFrameFlags,
 }
 
-unsafe impl<H: Trace, E: Trace, R: Trace> Trace for CallFrame<H, E, R> {
+unsafe impl<H: Trace, E: Trace, R: Trace, A: Trace> Trace for CallFrame<H, E, R, A> {
     custom_trace!(this, mark, {
         mark(&this.code_block);
         mark(&this.iterators);
@@ -89,10 +89,11 @@ unsafe impl<H: Trace, E: Trace, R: Trace> Trace for CallFrame<H, E, R> {
     });
 }
 
-pub(crate) type SuspendedCallFrame = CallFrame<GcEdge<CodeBlock>, EnvironmentStackEdges, RealmEdge>;
+pub(crate) type SuspendedCallFrame =
+    CallFrame<GcEdge<CodeBlock>, EnvironmentStackEdges, RealmEdge, ActiveRunnableEdge>;
 
 /// ---- `CallFrame` public API ----
-impl<H, E, R> CallFrame<H, E, R>
+impl<H, E, R, A> CallFrame<H, E, R, A>
 where
     H: std::ops::Deref<Target = CodeBlock>,
 {
@@ -175,7 +176,7 @@ impl CallFrame {
             iterators,
             binding_stack,
             loop_iteration_count,
-            active_runnable,
+            active_runnable: active_runnable.map(|runnable| runnable.to_edge()),
             environments: environments.to_edges(),
             realm: realm.to_edge(),
             flags,
@@ -295,7 +296,7 @@ impl SuspendedCallFrame {
             iterators,
             binding_stack,
             loop_iteration_count,
-            active_runnable,
+            active_runnable: active_runnable.map(|runnable| runnable.to_rooted()),
             environments: environments.to_rooted(),
             realm: realm.to_rooted(),
             flags,
