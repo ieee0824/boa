@@ -18,6 +18,26 @@ impl Harness {
     }
 
     #[track_caller]
+    fn assert_threshold(bytes: usize) {
+        BOA_GC.with(|current| {
+            let gc = current.borrow();
+            assert_eq!(gc.config.threshold, bytes);
+        });
+    }
+
+    #[track_caller]
+    fn assert_collected_at_least(collections: usize) {
+        BOA_GC.with(|current| {
+            let gc = current.borrow();
+            assert!(
+                gc.runtime.collections >= collections,
+                "expected at least {collections} collections, got {}",
+                gc.runtime.collections
+            );
+        });
+    }
+
+    #[track_caller]
     fn assert_empty_gc() {
         BOA_GC.with(|current| {
             let gc = current.borrow();

@@ -62,3 +62,53 @@ fn gc_recursion() {
         Harness::assert_empty_gc();
     });
 }
+
+
+/// The collection threshold decides how much garbage piles up before a collection,
+/// and a collection walks the whole heap — everything allocated since the last one,
+/// live or not. Pinned because lowering it is a large slowdown that no other test
+/// would notice: measured on the omoikane benchmark, `1 MiB` put 40% of
+/// `closure-alloc`'s wall time inside the collector, and `4 MiB` took 21% off the shape.
+///
+/// Raising it further is not free either. `16 MiB` bought no more speed than `4 MiB` and
+/// cost 61% more peak RSS on an allocation-heavy workload, because a collection's cost
+/// grows with the garbage it has to walk past while the amount it reclaims does not.
+#[test]
+fn default_threshold_is_the_measured_one() {
+    run_test(|| {
+        Harness::assert_threshold(4 * 1024 * 1024);
+    });
+}
+
+/// The threshold has to gate collection rather than merely be recorded. Allocating
+/// well under it must not trigger one.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn allocating_under_the_threshold_does_not_collect() {
+    run_test(|| {
+        // 256 KiB of live data, comfortably inside a `4 MiB` threshold.
+        let mut held = Vec::new();
+        for _ in 0..256 {
+            held.push(Gc::new([0u8; 1024]));
+        }
+
+        Harness::assert_collections(0);
+        assert_eq!(held.len(), 256);
+    });
+}
+
+/// And allocating past it must, so the threshold is an upper bound on accumulated
+/// garbage rather than a number that happens never to be reached.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn allocating_past_the_threshold_collects() {
+    run_test(|| {
+        // Dropped immediately, so this is `8 MiB` of garbage against a `4 MiB` threshold
+        // and cannot be satisfied without collecting.
+        for _ in 0..8192 {
+            drop(Gc::new([0u8; 1024]));
+        }
+
+        Harness::assert_collected_at_least(1);
+    });
+}

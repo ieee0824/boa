@@ -64,8 +64,23 @@ struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            // Start at 1MB, the nursary size for V8 is ~1-8MB and SM can be up to 16MB
-            threshold: 1_048_576,
+            // A collection walks the whole heap, so it costs time proportional to
+            // everything allocated since the last one — live or not — while reclaiming
+            // only the garbage. The threshold sets how much garbage that is, and so
+            // trades collection frequency against the cost of each one.
+            //
+            // Measured on the omoikane benchmark: 1 MiB left `closure-alloc` spending
+            // 40% of its wall time in the collector, at 239 collections over 300,000
+            // iterations. 4 MiB cuts that to 27 collections and takes 21% off the
+            // shape, for 1.8% more peak RSS on an allocation-heavy workload and no
+            // measurable change on a page render. 16 MiB is no faster than 4 MiB and
+            // costs 61% more peak RSS, since by then the growth in what each
+            // collection must walk past has caught up with the drop in their number.
+            //
+            // The nursery is ~1-8MB in V8 and up to 16MB in SpiderMonkey, but both are
+            // generational and so never walk the accumulated garbage at all, which is
+            // why they can hold more of it without paying for it.
+            threshold: 4 * 1_048_576,
             used_space_percentage: 70,
         }
     }
