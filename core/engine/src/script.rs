@@ -19,7 +19,7 @@ use crate::{
     Context, HostDefined, JsResult, JsString, JsValue, Module, SpannedSourceText,
     bytecompiler::{ByteCompiler, global_declaration_instantiation_context},
     js_string,
-    realm::Realm,
+    realm::{Realm, RealmEdge},
     spanned_source_text::SourceText,
     vm::{ActiveRunnable, CallFrame, CallFrameFlags, CodeBlock},
 };
@@ -44,7 +44,7 @@ impl std::fmt::Debug for Script {
 
 #[derive(Trace, Finalize)]
 struct Inner {
-    realm: Realm,
+    realm: RealmEdge,
     #[unsafe_ignore_trace]
     source: boa_ast::Script,
     source_text: SourceText,
@@ -57,8 +57,8 @@ struct Inner {
 impl Script {
     /// Gets the realm of this script.
     #[must_use]
-    pub fn realm(&self) -> &Realm {
-        &self.inner.realm
+    pub fn realm(&self) -> Realm {
+        self.inner.realm.to_rooted()
     }
 
     /// Returns the [`ECMAScript specification`][spec] defined [`\[\[HostDefined\]\]`][`HostDefined`] field of the [`Module`].
@@ -98,9 +98,10 @@ impl Script {
 
         let source_text = SourceText::new(source);
 
+        let realm = realm.unwrap_or_else(|| context.realm().clone());
         Ok(Self {
             inner: Gc::new(Inner {
-                realm: realm.unwrap_or_else(|| context.realm().clone()),
+                realm: realm.to_edge(),
                 source: code,
                 source_text,
                 codeblock: GcRefCell::default(),
@@ -216,7 +217,7 @@ impl Script {
                 codeblock,
                 Some(ActiveRunnable::Script(self.clone())),
                 context.vm.environments.clone(),
-                self.inner.realm.clone(),
+                self.inner.realm.to_rooted(),
             )
             .with_env_fp(env_fp)
             .with_flags(CallFrameFlags::EXIT_EARLY),
