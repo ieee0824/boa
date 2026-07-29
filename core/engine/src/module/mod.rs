@@ -49,7 +49,7 @@ use crate::{
     builtins::promise::{PromiseCapability, PromiseState},
     environments::DeclarativeEnvironment,
     object::{JsObject, JsPromise},
-    realm::Realm,
+    realm::{Realm, RealmEdge},
 };
 
 mod loader;
@@ -77,7 +77,7 @@ impl std::fmt::Debug for Module {
 
 #[derive(Trace, Finalize)]
 struct ModuleRepr {
-    realm: Realm,
+    realm: RealmEdge,
     namespace: GcRefCell<Option<JsObject>>,
     kind: ModuleKind,
     host_defined: HostDefined,
@@ -174,7 +174,7 @@ impl Module {
 
         Ok(Self {
             inner: Gc::new(ModuleRepr {
-                realm,
+                realm: realm.to_edge(),
                 namespace: GcRefCell::default(),
                 kind: ModuleKind::SourceText(Box::new(src)),
                 host_defined: HostDefined::default(),
@@ -203,7 +203,7 @@ impl Module {
 
         Self {
             inner: Gc::new(ModuleRepr {
-                realm,
+                realm: realm.to_edge(),
                 namespace: GcRefCell::default(),
                 kind: ModuleKind::Synthetic(Box::new(synth)),
                 host_defined: HostDefined::default(),
@@ -250,8 +250,8 @@ impl Module {
     /// Gets the realm of this `Module`.
     #[inline]
     #[must_use]
-    pub fn realm(&self) -> &Realm {
-        &self.inner.realm
+    pub fn realm(&self) -> Realm {
+        self.inner.realm.to_rooted()
     }
 
     /// Returns the [`ECMAScript specification`][spec] defined [`\[\[HostDefined\]\]`][`HostDefined`] field of the [`Module`].
