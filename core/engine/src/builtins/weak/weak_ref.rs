@@ -1,4 +1,4 @@
-use boa_gc::{Finalize, Trace, WeakGc};
+use boa_gc::{Finalize, Trace, WeakGcEdge};
 
 use crate::{
     Context, JsArgs, JsNativeError, JsResult, JsString, JsValue,
@@ -87,7 +87,7 @@ impl BuiltInConstructor for WeakRef {
         let weak_ref = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
-            WeakGc::new_rooted(&target.root_inner()),
+            WeakGcEdge::new_rooted(&target.root_inner()),
         );
 
         // 4. Perform AddToKeptObjects(target).
@@ -111,7 +111,7 @@ impl WeakRef {
         let object = this.as_object();
         let weak_ref = object
             .as_ref()
-            .and_then(JsObject::downcast_ref::<WeakGc<ErasedVTableObject>>)
+            .and_then(JsObject::downcast_ref::<WeakGcEdge<ErasedVTableObject>>)
             .ok_or_else(|| {
                 JsNativeError::typ().with_message(
                     "WeakRef.prototype.deref: expected `this` to be a `WeakRef` object",

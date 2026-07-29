@@ -1,5 +1,8 @@
 use super::run_test;
-use crate::{Finalize, Gc, GcEdge, Rooted, Trace, WeakGc, registered_roots};
+use crate::{
+    Ephemeron, Finalize, Gc, GcEdge, Rooted, Trace, WeakGc, WeakGcEdge, registered_ephemeron_roots,
+    registered_roots,
+};
 
 #[test]
 fn explicit_roots_follow_handle_lifetimes() {
@@ -48,13 +51,63 @@ fn edge_allocation_and_weak_promotion_register_only_explicit_roots() {
         let edge = GcEdge::new(13_u32);
         assert!(registered_roots().is_empty());
 
-        let weak = WeakGc::new_edge(&edge);
+        let weak = WeakGcEdge::new_edge(&edge);
         let root = weak.upgrade_rooted().expect("edge is still live");
         assert_eq!(registered_roots().len(), 1);
         assert_eq!(*root, 13);
 
         drop(root);
         assert!(registered_roots().is_empty());
+    });
+}
+
+#[test]
+fn ephemeron_roots_follow_handle_lifetimes() {
+    run_test(|| {
+        assert!(registered_ephemeron_roots().is_empty());
+
+        let key = Rooted::new(19_u32);
+        let ephemeron = Ephemeron::new(&key, 23_u32);
+        let entries = registered_ephemeron_roots();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].handles, 1);
+
+        let edge = ephemeron.clone().into_edge();
+        let entries = registered_ephemeron_roots();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].handles, 1);
+        assert!(std::ptr::addr_eq(
+            entries[0].pointer.as_ptr(),
+            edge.erased_inner_ptr().as_ptr()
+        ));
+
+        let second_root = Ephemeron::from_edge(edge.clone());
+        assert_eq!(registered_ephemeron_roots()[0].handles, 2);
+        drop(second_root);
+        assert_eq!(registered_ephemeron_roots()[0].handles, 1);
+
+        drop(ephemeron);
+        assert!(registered_ephemeron_roots().is_empty());
+    });
+}
+
+#[test]
+fn weak_root_edge_conversions_update_ephemeron_registration() {
+    run_test(|| {
+        let key = Rooted::new(29_u32);
+        let weak = WeakGc::new(&key);
+        assert_eq!(registered_ephemeron_roots().len(), 1);
+
+        let edge = weak.into_edge();
+        assert!(registered_ephemeron_roots().is_empty());
+        assert_eq!(*edge.upgrade().expect("key remains live"), 29);
+
+        let weak = WeakGc::from_edge(edge);
+        assert_eq!(registered_ephemeron_roots().len(), 1);
+        assert_eq!(*weak.upgrade().expect("key remains live"), 29);
+
+        drop(weak);
+        assert!(registered_ephemeron_roots().is_empty());
     });
 }
 

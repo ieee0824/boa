@@ -1,10 +1,11 @@
-use crate::{Ephemeron, Finalize, Gc, GcEdge, Rooted, Trace};
-use std::hash::{Hash, Hasher};
+use crate::{Ephemeron, EphemeronEdge, Finalize, Gc, GcEdge, Rooted, Trace};
+use std::{
+    hash::{Hash, Hasher},
+    mem::ManuallyDrop,
+    ptr,
+};
 
-/// A weak reference to a [`Gc`].
-///
-/// This type allows keeping references to [`Gc`] managed values without keeping them alive for
-/// garbage collections. However, this also means [`WeakGc::upgrade`] could return `None` at any moment.
+/// An explicitly registered external weak handle.
 #[derive(Debug, Trace, Finalize)]
 #[repr(transparent)]
 pub struct WeakGc<T: Trace + ?Sized + 'static> {
@@ -12,61 +13,46 @@ pub struct WeakGc<T: Trace + ?Sized + 'static> {
 }
 
 impl<T: Trace + ?Sized> WeakGc<T> {
-    /// Creates a new weak pointer for a garbage collected value.
-    #[inline]
+    /// Creates an externally owned weak handle from a rooted key.
     #[must_use]
-    pub fn new(value: &Gc<T>) -> Self {
+    pub fn new(value: &Rooted<T>) -> Self {
         Self {
             inner: Ephemeron::new(value, ()),
         }
     }
 
-    /// Creates a new weak pointer from a heap edge.
-    #[inline]
+    /// Promotes an unregistered weak edge into an external weak root.
     #[must_use]
-    pub fn new_edge(value: &GcEdge<T>) -> Self {
-        Self::new(value.as_gc())
+    pub fn from_edge(edge: WeakGcEdge<T>) -> Self {
+        let edge = ManuallyDrop::new(edge);
+        // SAFETY: `edge` cannot run `Drop`, and its field is moved exactly once.
+        let inner = unsafe { ptr::read(&raw const edge.inner) };
+        Self {
+            inner: Ephemeron::from_edge(inner),
+        }
     }
 
-    /// Creates a new weak pointer from an explicitly rooted handle.
-    #[inline]
+    /// Converts this external weak root into a heap edge.
     #[must_use]
-    pub fn new_rooted(value: &Rooted<T>) -> Self {
-        Self::new(value.as_gc())
+    pub fn into_edge(self) -> WeakGcEdge<T> {
+        let this = ManuallyDrop::new(self);
+        // SAFETY: `this` cannot run `Drop`, and its field is moved exactly once.
+        let inner = unsafe { ptr::read(&raw const this.inner) };
+        WeakGcEdge {
+            inner: inner.into_edge(),
+        }
     }
 
-    /// Upgrade returns a `Gc` pointer for the internal value if the pointer is still live, or `None`
-    /// if the value was already garbage collected.
-    #[inline]
+    /// Upgrades to an explicitly registered strong root while the key is live.
     #[must_use]
-    pub fn upgrade(&self) -> Option<Gc<T>> {
+    pub fn upgrade(&self) -> Option<Rooted<T>> {
         self.inner.key()
     }
 
-    /// Upgrades this weak pointer into an unregistered heap edge.
-    #[inline]
-    #[must_use]
-    pub fn upgrade_edge(&self) -> Option<GcEdge<T>> {
-        self.upgrade().map(GcEdge::from)
-    }
-
-    /// Upgrades this weak pointer into an explicitly registered root.
-    #[inline]
-    #[must_use]
-    pub fn upgrade_rooted(&self) -> Option<Rooted<T>> {
-        self.upgrade().map(Rooted::from_gc)
-    }
-
-    /// Check if the [`WeakGc`] can be upgraded.
-    #[inline]
+    /// Returns whether the weak key is still live.
     #[must_use]
     pub fn is_upgradable(&self) -> bool {
         self.inner.has_value()
-    }
-
-    #[must_use]
-    pub(crate) const fn inner(&self) -> &Ephemeron<T, ()> {
-        &self.inner
     }
 }
 
@@ -78,16 +64,10 @@ impl<T: Trace> Clone for WeakGc<T> {
     }
 }
 
-impl<T: Trace> From<Ephemeron<T, ()>> for WeakGc<T> {
-    fn from(inner: Ephemeron<T, ()>) -> Self {
-        Self { inner }
-    }
-}
-
 impl<T: Trace> PartialEq for WeakGc<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self.upgrade(), other.upgrade()) {
-            (Some(a), Some(b)) => std::ptr::eq(a.as_ref(), b.as_ref()),
+            (Some(a), Some(b)) => Gc::ptr_eq(a.as_gc(), b.as_gc()),
             _ => false,
         }
     }
@@ -97,10 +77,114 @@ impl<T: Trace> Eq for WeakGc<T> {}
 
 impl<T: Trace> Hash for WeakGc<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        if let Some(obj) = self.upgrade() {
-            std::ptr::hash(obj.as_ref(), state);
+        if let Some(value) = self.upgrade() {
+            ptr::hash(value.as_gc().as_ref(), state);
         } else {
-            std::ptr::hash(self, state);
+            ptr::hash(self, state);
+        }
+    }
+}
+
+/// A weak reference to a [`Gc`].
+///
+/// This type allows keeping references to [`Gc`] managed values without keeping them alive for
+/// garbage collections. However, this also means [`WeakGcEdge::upgrade`] could return `None` at any moment.
+#[derive(Debug, Trace, Finalize)]
+#[repr(transparent)]
+pub struct WeakGcEdge<T: Trace + ?Sized + 'static> {
+    inner: EphemeronEdge<T, ()>,
+}
+
+impl<T: Trace + ?Sized> WeakGcEdge<T> {
+    /// Creates a new weak pointer for a garbage collected value.
+    #[inline]
+    #[must_use]
+    pub(crate) fn new_gc(value: &Gc<T>) -> Self {
+        Self {
+            inner: EphemeronEdge::new_gc(value, ()),
+        }
+    }
+
+    /// Creates a new weak pointer from a heap edge.
+    #[inline]
+    #[must_use]
+    pub fn new_edge(value: &GcEdge<T>) -> Self {
+        Self::new_gc(value.as_gc())
+    }
+
+    /// Creates a new weak heap edge from an explicitly rooted value.
+    #[inline]
+    #[must_use]
+    pub fn new_rooted(value: &Rooted<T>) -> Self {
+        Self::new_gc(value.as_gc())
+    }
+
+    /// Upgrade returns a `Gc` pointer for the internal value if the pointer is still live, or `None`
+    /// if the value was already garbage collected.
+    #[inline]
+    #[must_use]
+    pub fn upgrade(&self) -> Option<GcEdge<T>> {
+        self.inner.key()
+    }
+
+    /// Upgrades this weak pointer into an unregistered heap edge.
+    #[inline]
+    #[must_use]
+    pub fn upgrade_edge(&self) -> Option<GcEdge<T>> {
+        self.upgrade()
+    }
+
+    /// Upgrades this weak pointer into an explicitly registered root.
+    #[inline]
+    #[must_use]
+    pub fn upgrade_rooted(&self) -> Option<Rooted<T>> {
+        self.upgrade().map(GcEdge::root)
+    }
+
+    /// Check if the [`WeakGcEdge`] can be upgraded.
+    #[inline]
+    #[must_use]
+    pub fn is_upgradable(&self) -> bool {
+        self.inner.has_value()
+    }
+
+    #[must_use]
+    pub(crate) const fn inner(&self) -> &EphemeronEdge<T, ()> {
+        &self.inner
+    }
+}
+
+impl<T: Trace> Clone for WeakGcEdge<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
+impl<T: Trace> From<EphemeronEdge<T, ()>> for WeakGcEdge<T> {
+    fn from(inner: EphemeronEdge<T, ()>) -> Self {
+        Self { inner }
+    }
+}
+
+impl<T: Trace> PartialEq for WeakGcEdge<T> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self.upgrade(), other.upgrade()) {
+            (Some(a), Some(b)) => GcEdge::ptr_eq(&a, &b),
+            _ => false,
+        }
+    }
+}
+
+impl<T: Trace> Eq for WeakGcEdge<T> {}
+
+impl<T: Trace> Hash for WeakGcEdge<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        if let Some(obj) = self.upgrade() {
+            ptr::hash(obj.as_gc().as_ref(), state);
+        } else {
+            ptr::hash(self, state);
         }
     }
 }

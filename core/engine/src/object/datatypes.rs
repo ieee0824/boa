@@ -14,7 +14,7 @@ use std::{
     sync::atomic,
 };
 
-use boa_gc::{Ephemeron, Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGc, WeakMap};
+use boa_gc::{EphemeronEdge, Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge, WeakMap};
 
 use super::internal_methods::{InternalObjectMethods, ORDINARY_INTERNAL_METHODS};
 
@@ -205,9 +205,9 @@ impl<T: Trace + ?Sized> JsData for GcEdge<T> {}
 
 impl<T: Trace + ?Sized> JsData for Rooted<T> {}
 
-impl<T: Trace + ?Sized> JsData for WeakGc<T> {}
+impl<T: Trace + ?Sized> JsData for WeakGcEdge<T> {}
 
-impl<T: Trace + ?Sized, V: Trace> JsData for Ephemeron<T, V> {}
+impl<T: Trace + ?Sized, V: Trace> JsData for EphemeronEdge<T, V> {}
 
 impl<T: Trace + ?Sized> JsData for GcRefCell<T> {}
 

@@ -1,11 +1,99 @@
 #![allow(clippy::doc_link_with_quotes)]
 
 use crate::{
-    Allocator, Gc, Tracer, finalizer_safe,
+    Allocator, EphemeronPointer, Gc, GcEdge, Rooted, Tracer, finalizer_safe,
     internals::EphemeronBox,
+    register_ephemeron_root,
     trace::{Finalize, Trace},
+    unregister_ephemeron_root,
 };
-use std::ptr::NonNull;
+use std::{mem::ManuallyDrop, ptr, ptr::NonNull};
+
+/// An explicitly registered external owner of an ephemeron allocation.
+#[derive(Debug)]
+pub struct Ephemeron<K: Trace + ?Sized + 'static, V: Trace + 'static> {
+    inner: EphemeronEdge<K, V>,
+}
+
+impl<K: Trace + ?Sized, V: Trace + Clone> Ephemeron<K, V> {
+    /// Gets the stored value, or `None` if the key was collected.
+    #[must_use]
+    pub fn value(&self) -> Option<V> {
+        self.inner.value()
+    }
+
+    /// Gets the stored key as an explicitly registered root.
+    #[must_use]
+    pub fn key(&self) -> Option<Rooted<K>> {
+        self.inner.key().map(GcEdge::root)
+    }
+
+    /// Returns whether this ephemeron still has a live value.
+    #[must_use]
+    pub fn has_value(&self) -> bool {
+        self.inner.has_value()
+    }
+}
+
+impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
+    /// Creates and registers an externally owned ephemeron.
+    #[must_use]
+    pub fn new(key: &Rooted<K>, value: V) -> Self {
+        Self::from_edge(EphemeronEdge::new_gc(key.as_gc(), value))
+    }
+
+    /// Promotes a heap edge into an explicitly registered ephemeron root.
+    #[must_use]
+    pub fn from_edge(inner: EphemeronEdge<K, V>) -> Self {
+        register_ephemeron_root(inner.erased_inner_ptr());
+        Self { inner }
+    }
+
+    /// Converts this root into an unregistered heap edge.
+    #[must_use]
+    pub fn into_edge(self) -> EphemeronEdge<K, V> {
+        let this = ManuallyDrop::new(self);
+        unregister_ephemeron_root(this.inner.erased_inner_ptr());
+        // SAFETY: `this` cannot run `Drop`, and the field is moved exactly once.
+        unsafe { ptr::read(&raw const this.inner) }
+    }
+
+    /// Returns whether two roots refer to the same ephemeron allocation.
+    #[must_use]
+    pub fn ptr_eq(this: &Self, other: &Self) -> bool {
+        EphemeronEdge::ptr_eq(&this.inner, &other.inner)
+    }
+}
+
+impl<K: Trace + ?Sized, V: Trace> Clone for Ephemeron<K, V> {
+    fn clone(&self) -> Self {
+        Self::from_edge(self.inner.clone())
+    }
+}
+
+impl<K: Trace + ?Sized, V: Trace> Drop for Ephemeron<K, V> {
+    fn drop(&mut self) {
+        unregister_ephemeron_root(self.inner.erased_inner_ptr());
+    }
+}
+
+impl<K: Trace + ?Sized, V: Trace> Finalize for Ephemeron<K, V> {}
+
+unsafe impl<K: Trace + ?Sized, V: Trace> Trace for Ephemeron<K, V> {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        // SAFETY: Delegated to the valid inner edge.
+        unsafe { self.inner.trace(tracer) };
+    }
+
+    unsafe fn trace_non_roots(&self) {
+        // SAFETY: Delegated to the valid inner edge during compatibility migration.
+        unsafe { self.inner.trace_non_roots() };
+    }
+
+    fn run_finalizer(&self) {
+        self.inner.run_finalizer();
+    }
+}
 
 /// A key-value pair where the value becomes unaccesible when the key is garbage collected.
 ///
@@ -18,27 +106,27 @@ use std::ptr::NonNull;
 /// [eph]: https://docs.racket-lang.org/reference/ephemerons.html
 /// [acm]: https://dl.acm.org/doi/10.1145/263700.263733
 #[derive(Debug)]
-pub struct Ephemeron<K: Trace + ?Sized + 'static, V: Trace + 'static> {
+pub struct EphemeronEdge<K: Trace + ?Sized + 'static, V: Trace + 'static> {
     inner_ptr: NonNull<EphemeronBox<K, V>>,
 }
 
-impl<K: Trace + ?Sized, V: Trace + Clone> Ephemeron<K, V> {
-    /// Gets the stored value of this `Ephemeron`, or `None` if the key was already garbage collected.
+impl<K: Trace + ?Sized, V: Trace + Clone> EphemeronEdge<K, V> {
+    /// Gets the stored value of this `EphemeronEdge`, or `None` if the key was already garbage collected.
     ///
     /// This needs to return a clone of the value because holding a reference to it between
     /// garbage collection passes could drop the underlying allocation, causing an Use After Free.
     #[must_use]
     pub fn value(&self) -> Option<V> {
-        // SAFETY: this is safe because `Ephemeron` is tracked to always point to a valid pointer
+        // SAFETY: this is safe because `EphemeronEdge` is tracked to always point to a valid pointer
         // `inner_ptr`.
         unsafe { self.inner_ptr.as_ref().value().cloned() }
     }
 
-    /// Gets the stored key of this `Ephemeron`, or `None` if the key was already garbage collected.
+    /// Gets the stored key of this `EphemeronEdge`, or `None` if the key was already garbage collected.
     #[inline]
     #[must_use]
-    pub fn key(&self) -> Option<Gc<K>> {
-        // SAFETY: this is safe because `Ephemeron` is tracked to always point to a valid pointer
+    pub fn key(&self) -> Option<GcEdge<K>> {
+        // SAFETY: this is safe because `EphemeronEdge` is tracked to always point to a valid pointer
         // `inner_ptr`.
         let key_ptr = unsafe { self.inner_ptr.as_ref().key_ptr() }?;
 
@@ -48,34 +136,44 @@ impl<K: Trace + ?Sized, V: Trace + Clone> Ephemeron<K, V> {
         }
 
         // SAFETY: The gc pointer's reference count has been incremented, so this is safe.
-        Some(unsafe { Gc::from_raw(key_ptr) })
+        Some(GcEdge::from(unsafe { Gc::from_raw(key_ptr) }))
     }
 
-    /// Checks if the [`Ephemeron`] has a value.
+    /// Checks if the [`EphemeronEdge`] has a value.
     #[must_use]
     pub fn has_value(&self) -> bool {
-        // SAFETY: this is safe because `Ephemeron` is tracked to always point to a valid pointer
+        // SAFETY: this is safe because `EphemeronEdge` is tracked to always point to a valid pointer
         // `inner_ptr`.
         unsafe { self.inner_ptr.as_ref().value().is_some() }
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
-    /// Creates a new `Ephemeron`.
+impl<K: Trace + ?Sized, V: Trace> EphemeronEdge<K, V> {
+    /// Creates a new `EphemeronEdge`.
     #[must_use]
-    pub fn new(key: &Gc<K>, value: V) -> Self {
+    pub(crate) fn new_gc(key: &Gc<K>, value: V) -> Self {
         let inner_ptr = Allocator::alloc_ephemeron(EphemeronBox::new(key, value));
         Self { inner_ptr }
     }
 
-    /// Returns `true` if the two `Ephemeron`s point to the same allocation.
+    /// Creates an ephemeron edge from a heap key edge.
+    #[must_use]
+    pub fn new(key: &GcEdge<K>, value: V) -> Self {
+        Self::new_gc(key.as_gc(), value)
+    }
+
+    /// Returns `true` if the two `EphemeronEdge`s point to the same allocation.
     #[must_use]
     pub fn ptr_eq(this: &Self, other: &Self) -> bool {
-        std::ptr::addr_eq(this.inner(), other.inner())
+        ptr::addr_eq(this.inner(), other.inner())
     }
 
     pub(crate) fn inner_ptr(&self) -> NonNull<EphemeronBox<K, V>> {
         assert!(finalizer_safe());
+        self.inner_ptr
+    }
+
+    pub(crate) fn erased_inner_ptr(&self) -> EphemeronPointer {
         self.inner_ptr
     }
 
@@ -84,7 +182,7 @@ impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
         unsafe { self.inner_ptr().as_ref() }
     }
 
-    /// Constructs an `Ephemeron<K, V>` from a raw pointer.
+    /// Constructs an `EphemeronEdge<K, V>` from a raw pointer.
     ///
     /// # Safety
     ///
@@ -96,7 +194,7 @@ impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Finalize for Ephemeron<K, V> {
+impl<K: Trace + ?Sized, V: Trace> Finalize for EphemeronEdge<K, V> {
     fn finalize(&self) {
         // SAFETY: inner_ptr should be alive when calling finalize.
         // We don't call inner_ptr() to avoid overhead of calling finalizer_safe().
@@ -106,11 +204,11 @@ impl<K: Trace + ?Sized, V: Trace> Finalize for Ephemeron<K, V> {
     }
 }
 
-// SAFETY: `Ephemeron`s trace implementation only marks its inner box because we want to stop
+// SAFETY: `EphemeronEdge`s trace implementation only marks its inner box because we want to stop
 // tracing through weakly held pointers.
-unsafe impl<K: Trace + ?Sized, V: Trace> Trace for Ephemeron<K, V> {
+unsafe impl<K: Trace + ?Sized, V: Trace> Trace for EphemeronEdge<K, V> {
     unsafe fn trace(&self, _tracer: &mut Tracer) {
-        // SAFETY: We need to mark the inner box of the `Ephemeron` since it is reachable
+        // SAFETY: We need to mark the inner box of the `EphemeronEdge` since it is reachable
         // from a root and this means it cannot be dropped.
         unsafe {
             self.inner().mark();
@@ -126,16 +224,16 @@ unsafe impl<K: Trace + ?Sized, V: Trace> Trace for Ephemeron<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Clone for Ephemeron<K, V> {
+impl<K: Trace + ?Sized, V: Trace> Clone for EphemeronEdge<K, V> {
     fn clone(&self) -> Self {
         let ptr = self.inner_ptr();
         self.inner().inc_ref_count();
-        // SAFETY: `&self` is a valid Ephemeron pointer.
+        // SAFETY: `&self` is a valid EphemeronEdge pointer.
         unsafe { Self::from_raw(ptr) }
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Drop for Ephemeron<K, V> {
+impl<K: Trace + ?Sized, V: Trace> Drop for EphemeronEdge<K, V> {
     fn drop(&mut self) {
         if finalizer_safe() {
             Finalize::finalize(self);

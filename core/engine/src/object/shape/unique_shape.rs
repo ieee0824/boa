@@ -1,6 +1,6 @@
 use std::{cell::RefCell, fmt::Debug};
 
-use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGc};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge};
 
 use crate::property::PropertyKey;
 
@@ -267,7 +267,7 @@ where
 /// Represents a weak reference to [`UniqueShape`].
 #[derive(Debug, Clone, Trace, Finalize, PartialEq)]
 pub(crate) struct WeakUniqueShape {
-    inner: WeakGc<Inner>,
+    inner: WeakGcEdge<Inner>,
 }
 
 impl WeakUniqueShape {
@@ -278,7 +278,7 @@ impl WeakUniqueShape {
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
         self.inner.upgrade().map_or(0, |inner| {
-            let ptr: *const _ = inner.as_ref();
+            let ptr: *const _ = &raw const *inner;
             ptr as usize
         })
     }
@@ -289,7 +289,7 @@ impl WeakUniqueShape {
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<UniqueShape> {
         Some(UniqueShape {
-            inner: Rooted::from_gc(self.inner.upgrade()?),
+            inner: self.inner.upgrade()?.root(),
         })
     }
 }
@@ -301,7 +301,7 @@ where
     fn from(value: &UniqueShape<H>) -> Self {
         let rooted = value.inner.clone_rooted();
         WeakUniqueShape {
-            inner: WeakGc::new(rooted.as_gc()),
+            inner: WeakGcEdge::new_rooted(&rooted),
         }
     }
 }

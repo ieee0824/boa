@@ -7,7 +7,7 @@ mod tests;
 use std::{collections::hash_map::RandomState, hash::Hash};
 
 use bitflags::bitflags;
-use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGc, empty_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGcEdge, empty_trace};
 use indexmap::IndexMap;
 
 use crate::{JsObject, object::JsPrototype, property::PropertyKey};
@@ -213,7 +213,7 @@ where
         if let Some(shape) = self.forward_transitions().get_prototype(&prototype) {
             if let Some(inner) = shape.upgrade() {
                 return SharedShape {
-                    inner: Rooted::from_gc(inner),
+                    inner: inner.root(),
                 };
             }
 
@@ -242,7 +242,7 @@ where
         if let Some(shape) = self.forward_transitions().get_property(&key) {
             if let Some(inner) = shape.upgrade() {
                 return SharedShape {
-                    inner: Rooted::from_gc(inner),
+                    inner: inner.root(),
                 };
             }
 
@@ -293,7 +293,7 @@ where
 
                 return ChangeTransition {
                     shape: SharedShape {
-                        inner: Rooted::from_gc(inner),
+                        inner: inner.root(),
                     },
                     action,
                 };
@@ -505,7 +505,7 @@ where
 /// Represents a weak reference to [`SharedShape`].
 #[derive(Debug, Trace, Finalize, Clone, PartialEq)]
 pub(crate) struct WeakSharedShape {
-    inner: WeakGc<Inner>,
+    inner: WeakGcEdge<Inner>,
 }
 
 impl WeakSharedShape {
@@ -516,7 +516,7 @@ impl WeakSharedShape {
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
         self.inner.upgrade().map_or(0, |inner| {
-            let ptr: *const _ = inner.as_ref();
+            let ptr: *const _ = &raw const *inner;
             ptr as usize
         })
     }
@@ -527,7 +527,7 @@ impl WeakSharedShape {
     #[must_use]
     pub(crate) fn upgrade(&self) -> Option<SharedShape> {
         Some(SharedShape {
-            inner: Rooted::from_gc(self.inner.upgrade()?),
+            inner: self.inner.upgrade()?.root(),
         })
     }
 }
@@ -539,7 +539,7 @@ where
     fn from(value: &SharedShape<H>) -> Self {
         let rooted = value.inner.clone_rooted();
         WeakSharedShape {
-            inner: WeakGc::new(rooted.as_gc()),
+            inner: WeakGcEdge::new_rooted(&rooted),
         }
     }
 }
