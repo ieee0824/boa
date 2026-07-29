@@ -35,7 +35,7 @@ use crate::{
     js_string,
     module::ModuleKind,
     object::{FunctionObjectBuilder, JsPromise},
-    realm::Realm,
+    realm::RealmEdge,
     vm::{
         ActiveRunnable, CallFrame, CallFrameFlags, CodeBlock, CompletionRecord,
         create_function_object_fast,
@@ -201,7 +201,7 @@ impl ModuleStatus {
 struct SourceTextContext {
     codeblock: GcEdge<CodeBlock>,
     environments: EnvironmentStackEdges,
-    realm: Realm,
+    realm: RealmEdge,
 }
 
 impl std::fmt::Debug for SourceTextContext {
@@ -1761,7 +1761,7 @@ impl SourceTextModule {
                 context: SourceTextContext {
                     codeblock: codeblock.into_edge(),
                     environments: frame.environments.to_edges(),
-                    realm,
+                    realm: realm.to_edge(),
                 },
             },
             _ => unreachable!(
@@ -1805,7 +1805,7 @@ impl SourceTextModule {
             codeblock.root(),
             Some(ActiveRunnable::Module(module_self.clone())),
             environments,
-            realm,
+            realm.to_rooted(),
         )
         .with_env_fp(env_fp)
         .with_flags(CallFrameFlags::EXIT_EARLY);
