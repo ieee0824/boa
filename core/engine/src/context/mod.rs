@@ -3,6 +3,7 @@
 use std::{cell::Cell, path::Path, rc::Rc};
 
 use boa_ast::StatementList;
+use boa_gc::Rooted;
 use boa_interner::Interner;
 use boa_parser::source::ReadChar;
 pub use hooks::{DefaultHooks, HostHooks};
@@ -522,7 +523,7 @@ impl Context {
     pub fn enter_realm(&mut self, realm: Realm) -> Realm {
         self.vm
             .environments
-            .replace_global(realm.environment().clone());
+            .replace_global(Rooted::from_gc(realm.environment().clone()));
         std::mem::replace(&mut self.vm.realm, realm)
     }
 

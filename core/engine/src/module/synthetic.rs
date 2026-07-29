@@ -8,7 +8,7 @@ use crate::{
     builtins::promise::ResolvingFunctions,
     bytecompiler::ByteCompiler,
     class::{Class, ClassBuilder},
-    environments::{DeclarativeEnvironment, EnvironmentStack},
+    environments::{DeclarativeEnvironment, EnvironmentStack, EnvironmentStackEdges},
     js_string,
     object::JsPromise,
     vm::{ActiveRunnable, CallFrame, CodeBlock, source_info::SourcePath},
@@ -147,11 +147,11 @@ enum ModuleStatus {
     #[default]
     Unlinked,
     Linked {
-        environment: Gc<DeclarativeEnvironment>,
-        eval_context: (EnvironmentStack, GcEdge<CodeBlock>),
+        environment: GcEdge<DeclarativeEnvironment>,
+        eval_context: (EnvironmentStackEdges, GcEdge<CodeBlock>),
     },
     Evaluated {
-        environment: Gc<DeclarativeEnvironment>,
+        environment: GcEdge<DeclarativeEnvironment>,
         promise: JsPromise,
     },
 }
@@ -337,7 +337,7 @@ impl SyntheticModule {
 
         let cb = Rooted::new(compiler.finish());
 
-        let mut envs = EnvironmentStack::new(global_env);
+        let mut envs = EnvironmentStack::new(Rooted::from_gc(global_env));
         envs.push_module(module_scope);
 
         for locator in exports {
@@ -357,8 +357,8 @@ impl SyntheticModule {
         self.state
             .borrow_mut()
             .transition(|_| ModuleStatus::Linked {
-                environment: env,
-                eval_context: (envs, cb.into_edge()),
+                environment: env.into_edge(),
+                eval_context: (envs.to_edges(), cb.into_edge()),
             });
 
         // 5. Return unused.
@@ -389,6 +389,7 @@ impl SyntheticModule {
         // 1. Let moduleContext be a new ECMAScript code execution context.
 
         let realm = module_self.realm().clone();
+        let environments = environments.to_rooted();
 
         let env_fp = environments.len() as u32;
         let callframe = CallFrame::new_rooted(
@@ -442,11 +443,11 @@ impl SyntheticModule {
         promise
     }
 
-    pub(crate) fn environment(&self) -> Option<Gc<DeclarativeEnvironment>> {
+    pub(crate) fn environment(&self) -> Option<Rooted<DeclarativeEnvironment>> {
         match &*self.state.borrow() {
             ModuleStatus::Unlinked => None,
             ModuleStatus::Linked { environment, .. }
-            | ModuleStatus::Evaluated { environment, .. } => Some(environment.clone()),
+            | ModuleStatus::Evaluated { environment, .. } => Some(environment.clone().root()),
         }
     }
 }

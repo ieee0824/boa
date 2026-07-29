@@ -18,7 +18,10 @@ use crate::{
     },
     bytecompiler::FunctionCompiler,
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
-    environments::{EnvironmentStack, FunctionSlots, PrivateEnvironment, ThisBindingStatus},
+    environments::{
+        EnvironmentStack, EnvironmentStackEdges, FunctionSlots, PrivateEnvironment,
+        ThisBindingStatus,
+    },
     error::JsNativeError,
     js_error, js_string,
     native_function::NativeFunctionObject,
@@ -45,7 +48,7 @@ use boa_ast::{
     },
     scope::BindingLocatorScope,
 };
-use boa_gc::{self, Finalize, Gc, GcEdge, Rooted, Trace, custom_trace};
+use boa_gc::{self, Finalize, GcEdge, Rooted, Trace, custom_trace};
 use boa_interner::Sym;
 use boa_macros::js_str;
 use boa_parser::{Parser, Source};
@@ -169,7 +172,7 @@ pub struct OrdinaryFunction {
     pub(crate) code: GcEdge<CodeBlock>,
 
     /// The `[[Environment]]` internal slot.
-    pub(crate) environments: EnvironmentStack,
+    pub(crate) environments: EnvironmentStackEdges,
 
     /// The `[[HomeObject]]` internal slot.
     pub(crate) home_object: Option<JsObject>,
@@ -217,7 +220,7 @@ impl OrdinaryFunction {
     ) -> Self {
         Self {
             code: code.into_edge(),
-            environments,
+            environments: environments.to_edges(),
             home_object: None,
             script_or_module,
             realm,
@@ -233,7 +236,7 @@ impl OrdinaryFunction {
     }
 
     /// Push a private environment to the function.
-    pub(crate) fn push_private_environment(&mut self, environment: Gc<PrivateEnvironment>) {
+    pub(crate) fn push_private_environment(&mut self, environment: Rooted<PrivateEnvironment>) {
         self.environments.push_private(environment);
     }
 
@@ -1001,7 +1004,7 @@ pub(crate) fn function_call(
     }
 
     let code = function.code.clone().root();
-    let environments = function.environments.clone();
+    let environments = function.environments.to_rooted();
     let script_or_module = function.script_or_module.clone();
 
     drop(function);
@@ -1093,7 +1096,7 @@ fn function_construct(
     );
 
     let code = function.code.clone().root();
-    let environments = function.environments.clone();
+    let environments = function.environments.to_rooted();
     let script_or_module = function.script_or_module.clone();
     drop(function);
 

@@ -4,8 +4,12 @@
 
 use super::ActiveRunnable;
 use crate::{
-    JsValue, builtins::iterable::IteratorRecord, environments::EnvironmentStack, realm::Realm,
-    vm::CodeBlock, vm::SourcePath,
+    JsValue,
+    builtins::iterable::IteratorRecord,
+    environments::{EnvironmentStack, EnvironmentStackEdges},
+    realm::Realm,
+    vm::CodeBlock,
+    vm::SourcePath,
 };
 use boa_ast::Position;
 use boa_ast::scope::BindingLocator;
@@ -41,7 +45,7 @@ pub struct CallFrameLocation {
 
 /// A `CallFrame` holds the state of a function call.
 #[derive(Clone, Debug, Finalize)]
-pub struct CallFrame<H = Rooted<CodeBlock>> {
+pub struct CallFrame<H = Rooted<CodeBlock>, E = EnvironmentStack> {
     pub(crate) code_block: H,
     pub(crate) pc: u32,
     /// The register pointer, points to the first register in the stack.
@@ -66,7 +70,7 @@ pub struct CallFrame<H = Rooted<CodeBlock>> {
     pub(crate) active_runnable: Option<ActiveRunnable>,
 
     /// \[\[Environment\]\]
-    pub(crate) environments: EnvironmentStack,
+    pub(crate) environments: E,
 
     /// \[\[Realm\]\]
     pub(crate) realm: Realm,
@@ -75,7 +79,7 @@ pub struct CallFrame<H = Rooted<CodeBlock>> {
     pub(crate) flags: CallFrameFlags,
 }
 
-unsafe impl<H: Trace> Trace for CallFrame<H> {
+unsafe impl<H: Trace, E: Trace> Trace for CallFrame<H, E> {
     custom_trace!(this, mark, {
         mark(&this.code_block);
         mark(&this.iterators);
@@ -85,10 +89,10 @@ unsafe impl<H: Trace> Trace for CallFrame<H> {
     });
 }
 
-pub(crate) type SuspendedCallFrame = CallFrame<GcEdge<CodeBlock>>;
+pub(crate) type SuspendedCallFrame = CallFrame<GcEdge<CodeBlock>, EnvironmentStackEdges>;
 
 /// ---- `CallFrame` public API ----
-impl<H> CallFrame<H>
+impl<H, E> CallFrame<H, E>
 where
     H: std::ops::Deref<Target = CodeBlock>,
 {
@@ -172,7 +176,7 @@ impl CallFrame {
             binding_stack,
             loop_iteration_count,
             active_runnable,
-            environments,
+            environments: environments.to_edges(),
             realm,
             flags,
         }
@@ -292,7 +296,7 @@ impl SuspendedCallFrame {
             binding_stack,
             loop_iteration_count,
             active_runnable,
-            environments,
+            environments: environments.to_rooted(),
             realm,
             flags,
         }

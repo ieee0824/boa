@@ -515,3 +515,21 @@ fn suspended_generator_code_survives_forced_collection() {
         TestAction::assert_eq("generator.next().value", 2),
     ]);
 }
+
+#[test]
+fn captured_environment_survives_forced_collection() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function makeClosure() {
+                let captured = 41;
+                return function() {
+                    return captured + 1;
+                };
+            }
+
+            globalThis.closure = makeClosure();
+        "#}),
+        TestAction::inspect_context(|_| boa_gc::force_collect()),
+        TestAction::assert_eq("closure()", 42),
+    ]);
+}
