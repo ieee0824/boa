@@ -2,14 +2,14 @@ use std::{cell::Cell, rc::Rc};
 
 use super::run_test;
 use crate::{
-    Ephemeron, Finalize, Gc, GcBox, GcRefCell, Trace, WeakGc, force_collect,
-    internals::EphemeronBox, test::Harness,
+    Ephemeron, EphemeronEdge, Finalize, GcBox, GcEdge, GcRefCell, Rooted, Trace, WeakGc,
+    WeakGcEdge, force_collect, internals::EphemeronBox, test::Harness,
 };
 
 #[test]
 fn eph_weak_gc_test() {
     run_test(|| {
-        let gc_value = Gc::new(3);
+        let gc_value = Rooted::new(3);
 
         {
             let cloned_gc = gc_value.clone();
@@ -32,7 +32,7 @@ fn eph_weak_gc_test() {
 #[test]
 fn eph_ephemeron_test() {
     run_test(|| {
-        let gc_value = Gc::new(3);
+        let gc_value = Rooted::new(3);
 
         {
             let cloned_gc = gc_value.clone();
@@ -61,12 +61,12 @@ fn eph_ephemeron_test() {
 #[test]
 fn eph_allocation_chains() {
     run_test(|| {
-        let gc_value = Gc::new(String::from("foo"));
+        let gc_value = Rooted::new(String::from("foo"));
 
         {
             let cloned_gc = gc_value.clone();
-            let weak = WeakGc::new(&cloned_gc);
-            let wrap = Gc::new(weak);
+            let weak = WeakGcEdge::new_rooted(&cloned_gc);
+            let wrap = Rooted::new(weak);
 
             assert_eq!(wrap.upgrade().as_deref().map(String::as_str), Some("foo"));
 
@@ -92,11 +92,11 @@ fn eph_allocation_chains() {
 #[test]
 fn eph_basic_alloc_dump_test() {
     run_test(|| {
-        let gc_value = Gc::new(String::from("gc here"));
-        let _gc_two = Gc::new("hmmm");
+        let gc_value = Rooted::new(String::from("gc here"));
+        let _gc_two = Rooted::new("hmmm");
 
         let eph = Ephemeron::new(&gc_value, 4);
-        let _fourth = Gc::new("tail");
+        let _fourth = Rooted::new("tail");
 
         assert_eq!(eph.value(), Some(4));
     });
@@ -105,7 +105,7 @@ fn eph_basic_alloc_dump_test() {
 #[test]
 fn eph_basic_upgrade_test() {
     run_test(|| {
-        let init_gc = Gc::new(String::from("foo"));
+        let init_gc = Rooted::new(String::from("foo"));
 
         let weak = WeakGc::new(&init_gc);
 
@@ -121,7 +121,7 @@ fn eph_basic_upgrade_test() {
 #[test]
 fn eph_basic_clone_test() {
     run_test(|| {
-        let init_gc = Gc::new(String::from("bar"));
+        let init_gc = Rooted::new(String::from("bar"));
 
         let weak = WeakGc::new(&init_gc);
 
@@ -143,17 +143,18 @@ fn eph_basic_clone_test() {
 fn eph_self_referential() {
     #[derive(Trace, Finalize, Clone)]
     struct InnerCell {
-        inner: GcRefCell<Option<Ephemeron<InnerCell, TestCell>>>,
+        inner: GcRefCell<Option<EphemeronEdge<InnerCell, TestCell>>>,
     }
     #[derive(Trace, Finalize, Clone)]
     struct TestCell {
-        inner: Gc<InnerCell>,
+        inner: GcEdge<InnerCell>,
     }
     run_test(|| {
+        let root_inner = Rooted::new(InnerCell {
+            inner: GcRefCell::new(None),
+        });
         let root = TestCell {
-            inner: Gc::new(InnerCell {
-                inner: GcRefCell::new(None),
-            }),
+            inner: root_inner.clone().into_edge(),
         };
         let root_size = size_of::<GcBox<InnerCell>>();
 
@@ -161,8 +162,8 @@ fn eph_self_referential() {
 
         {
             // Generate a self-referential ephemeron
-            let eph = Ephemeron::new(&root.inner, root.clone());
-            *root.inner.inner.borrow_mut() = Some(eph.clone());
+            let eph = Ephemeron::new(&root_inner, root.clone());
+            *root.inner.inner.borrow_mut() = Some(eph.clone().into_edge());
 
             assert!(eph.value().is_some());
             Harness::assert_exact_bytes_allocated(56);
@@ -180,32 +181,32 @@ fn eph_self_referential() {
 fn eph_self_referential_chain() {
     #[derive(Trace, Finalize, Clone)]
     struct TestCell {
-        inner: Gc<GcRefCell<Option<Ephemeron<u8, TestCell>>>>,
+        inner: GcEdge<GcRefCell<Option<EphemeronEdge<u8, TestCell>>>>,
     }
     run_test(|| {
-        let root = Gc::new(GcRefCell::new(None));
+        let root = Rooted::new(GcRefCell::new(None));
         let root_size = size_of::<GcBox<GcRefCell<Option<Ephemeron<u8, TestCell>>>>>();
 
         Harness::assert_exact_bytes_allocated(root_size);
 
-        let watched = Gc::new(0);
+        let watched = Rooted::new(0);
 
         {
             // Generate a self-referential loop of weak and non-weak pointers
             let chain1 = TestCell {
-                inner: Gc::new(GcRefCell::new(None)),
+                inner: GcEdge::new(GcRefCell::new(None)),
             };
             let chain2 = TestCell {
-                inner: Gc::new(GcRefCell::new(None)),
+                inner: GcEdge::new(GcRefCell::new(None)),
             };
 
             let eph_start = Ephemeron::new(&watched, chain1.clone());
             let eph_chain2 = Ephemeron::new(&watched, chain2.clone());
 
-            *chain1.inner.borrow_mut() = Some(eph_chain2.clone());
-            *chain2.inner.borrow_mut() = Some(eph_start.clone());
+            *chain1.inner.borrow_mut() = Some(eph_chain2.clone().into_edge());
+            *chain2.inner.borrow_mut() = Some(eph_start.clone().into_edge());
 
-            *root.borrow_mut() = Some(eph_start.clone());
+            *root.borrow_mut() = Some(eph_start.clone().into_edge());
 
             force_collect();
 
@@ -245,7 +246,7 @@ fn eph_finalizer() {
             inner: Rc::new(Cell::new(0)),
         };
 
-        let key = Gc::new(50u32);
+        let key = Rooted::new(50u32);
         let eph = Ephemeron::new(&key, val.clone());
         assert!(eph.has_value());
         // finalize hasn't been run
@@ -278,8 +279,8 @@ fn eph_gc_finalizer() {
             inner: Rc::new(Cell::new(0)),
         };
 
-        let key = Gc::new(50u32);
-        let eph = Ephemeron::new(&key, Gc::new(val.clone()));
+        let key = Rooted::new(50u32);
+        let eph = Ephemeron::new(&key, GcEdge::new(val.clone()));
         assert!(eph.has_value());
         // finalize hasn't been run
         assert_eq!(val.inner.get(), 0);
@@ -297,22 +298,23 @@ fn eph_strong_self_reference() {
     type Inner = GcRefCell<(Option<TestCell>, Option<TestCell>)>;
     #[derive(Trace, Finalize, Clone)]
     struct TestCell {
-        inner: Gc<Inner>,
+        inner: GcEdge<Inner>,
     }
     run_test(|| {
+        let root_inner = Rooted::new(GcRefCell::new((None, None)));
         let root = TestCell {
-            inner: Gc::new(GcRefCell::new((None, None))),
+            inner: root_inner.clone().into_edge(),
         };
         let root_size = size_of::<GcBox<Inner>>();
 
         Harness::assert_exact_bytes_allocated(root_size);
 
-        let watched = Gc::new(0);
+        let watched = Rooted::new(0);
         let watched_size = size_of::<GcBox<i32>>();
 
         {
             let eph = Ephemeron::new(&watched, root.clone());
-            let eph_size = size_of::<EphemeronBox<Gc<i32>, TestCell>>();
+            let eph_size = size_of::<EphemeronBox<i32, TestCell>>();
 
             root.inner.borrow_mut().0 = Some(root.clone());
             root.inner.borrow_mut().1 = Some(root.clone());

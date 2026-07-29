@@ -36,7 +36,10 @@ pub use crate::trace::{Finalize, Trace, Tracer};
 pub use boa_macros::{Finalize, Trace};
 pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
-pub use pointers::{Ephemeron, Gc, GcEdge, GcErased, GcErasedEdge, Rooted, WeakGc, WeakMap};
+pub use pointers::{
+    Ephemeron, EphemeronEdge, Gc, GcEdge, GcErased, GcErasedEdge, Rooted, WeakGc, WeakGcEdge,
+    WeakMap,
+};
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
@@ -51,13 +54,24 @@ struct RootEntry {
     handles: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EphemeronRootEntry {
+    // Read by the marker after the compatibility migration is complete. Tests
+    // exercise it now so registration cannot silently drift from the handle.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pointer: EphemeronPointer,
+    handles: usize,
+}
+
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
 thread_local!(static GC_ROOTS: RefCell<HashMap<usize, RootEntry>> = RefCell::new(HashMap::new()));
+thread_local!(static EPHEMERON_ROOTS: RefCell<HashMap<usize, EphemeronRootEntry>> = RefCell::new(HashMap::new()));
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // The collector can own traced values containing `Rooted` handles. Initialize
     // the root registry first so it remains alive while the collector is dropped
     // during thread teardown.
     GC_ROOTS.with(|_| {});
+    EPHEMERON_ROOTS.with(|_| {});
     RefCell::new(BoaGc {
         config: GcConfig::default(),
         runtime: GcRuntimeData::default(),
@@ -95,9 +109,46 @@ fn unregister_root(pointer: GcErasedPointer) {
     });
 }
 
+fn ephemeron_pointer_key(pointer: EphemeronPointer) -> usize {
+    pointer.as_ptr().cast::<()>().addr()
+}
+
+fn register_ephemeron_root(pointer: EphemeronPointer) {
+    EPHEMERON_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        let key = ephemeron_pointer_key(pointer);
+        roots
+            .entry(key)
+            .and_modify(|entry| entry.handles += 1)
+            .or_insert(EphemeronRootEntry {
+                pointer,
+                handles: 1,
+            });
+    });
+}
+
+fn unregister_ephemeron_root(pointer: EphemeronPointer) {
+    EPHEMERON_ROOTS.with(|roots| {
+        let mut roots = roots.borrow_mut();
+        let key = ephemeron_pointer_key(pointer);
+        let entry = roots
+            .get_mut(&key)
+            .expect("attempted to unregister an unknown ephemeron root");
+        entry.handles -= 1;
+        if entry.handles == 0 {
+            roots.remove(&key);
+        }
+    });
+}
+
 #[cfg(test)]
 fn registered_roots() -> Vec<RootEntry> {
     GC_ROOTS.with(|roots| roots.borrow().values().copied().collect())
+}
+
+#[cfg(test)]
+fn registered_ephemeron_roots() -> Vec<EphemeronRootEntry> {
+    EPHEMERON_ROOTS.with(|roots| roots.borrow().values().copied().collect())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -233,7 +284,7 @@ impl Allocator {
         let weak_map = WeakMap {
             inner: Gc::new(GcRefCell::new(RawWeakMap::new())),
         };
-        let weak = WeakGc::new(&weak_map.inner);
+        let weak = WeakGc::from_edge(WeakGcEdge::new_gc(&weak_map.inner));
 
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();

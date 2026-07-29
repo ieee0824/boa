@@ -1,12 +1,12 @@
 // Implementation taken partly from https://docs.rs/hashbrown/0.14.0/src/hashbrown/lib.rs.html,
-// but with some adjustments to use `Ephemeron<K,V>` instead of `(K,V)`
+// but with some adjustments to use `EphemeronEdge<K,V>` instead of `(K,V)`
 
 use hashbrown::{
     DefaultHashBuilder, HashTable, TryReserveError,
     hash_table::{Entry as RawEntry, Iter as RawIter},
 };
 
-use crate::{Allocator, Ephemeron, Finalize, Gc, GcRefCell, Rooted, Trace, custom_trace};
+use crate::{Allocator, EphemeronEdge, Finalize, Gc, GcRefCell, Rooted, Trace, custom_trace};
 use std::{fmt, hash::BuildHasher, marker::PhantomData};
 
 /// A map that holds weak references to its keys and is traced by the garbage collector.
@@ -56,7 +56,7 @@ impl<K: Trace + ?Sized, V: Trace + Clone> WeakMap<K, V> {
     }
 }
 
-/// A hash map where the bucket type is an <code>[Ephemeron]\<K, V\></code>.
+/// A hash map where the bucket type is an <code>[EphemeronEdge]\<K, V\></code>.
 ///
 /// This data structure allows associating a <code>[Gc]\<K\></code> with a value `V` that will be
 /// invalidated when the `Gc<K>` gets collected. In other words, all key entries on the map are weakly
@@ -67,7 +67,7 @@ where
     V: Trace + 'static,
 {
     hash_builder: S,
-    table: HashTable<Ephemeron<K, V>>,
+    table: HashTable<EphemeronEdge<K, V>>,
 }
 
 impl<K, V, S> Finalize for RawWeakMap<K, V, S>
@@ -169,7 +169,7 @@ where
     }
 
     /// An iterator visiting all entries in arbitrary order.
-    /// The iterator element type is <code>[Ephemeron]<K, V></code>.
+    /// The iterator element type is <code>[EphemeronEdge]<K, V></code>.
     pub(crate) fn iter(&self) -> Iter<'_, K, V> {
         Iter {
             inner: self.table.iter(),
@@ -198,12 +198,12 @@ where
     /// Retains only the elements specified by the predicate. Keeps the
     /// allocated memory for reuse.
     ///
-    /// In other words, remove all ephemerons <code>[Ephemeron]<K, V></code> such that
+    /// In other words, remove all ephemerons <code>[EphemeronEdge]<K, V></code> such that
     /// `f(&eph)` returns `false`.
     /// The elements are visited in unsorted (and unspecified) order.
     pub(crate) fn retain<F>(&mut self, mut f: F)
     where
-        F: FnMut(&Ephemeron<K, V>) -> bool,
+        F: FnMut(&EphemeronEdge<K, V>) -> bool,
     {
         // SAFETY:
         // - `item` is only used internally, which means it outlives self.
@@ -297,7 +297,7 @@ where
     ///
     /// If the map did have this key present, the value is updated, and the old
     /// value is returned. The key is not updated.
-    pub(crate) fn insert(&mut self, k: &Gc<K>, v: V) -> Option<Ephemeron<K, V>> {
+    pub(crate) fn insert(&mut self, k: &Gc<K>, v: V) -> Option<EphemeronEdge<K, V>> {
         let hash = make_hash_from_gc(&self.hash_builder, k);
         let hasher = make_hasher(&self.hash_builder);
         let entry = self.table.entry(hash, equivalent_key(k), hasher);
@@ -309,7 +309,7 @@ where
             RawEntry::Vacant(vacant_entry) => (None, vacant_entry),
         };
 
-        slot.insert(Ephemeron::new(k, v));
+        slot.insert(EphemeronEdge::new_gc(k, v));
         old
     }
 
@@ -336,8 +336,8 @@ where
     K: Trace + ?Sized + 'static,
     V: Trace + 'static,
 {
-    inner: RawIter<'a, Ephemeron<K, V>>,
-    marker: PhantomData<&'a Ephemeron<K, V>>,
+    inner: RawIter<'a, EphemeronEdge<K, V>>,
+    marker: PhantomData<&'a EphemeronEdge<K, V>>,
 }
 
 impl<K, V> Clone for Iter<'_, K, V>
@@ -370,7 +370,7 @@ where
     K: Trace + ?Sized + 'static,
     V: Trace + 'static,
 {
-    type Item = &'a Ephemeron<K, V>;
+    type Item = &'a EphemeronEdge<K, V>;
 
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
@@ -394,7 +394,7 @@ where
     }
 }
 
-fn make_hasher<K, V, S>(hash_builder: &S) -> impl Fn(&Ephemeron<K, V>) -> u64 + '_
+fn make_hasher<K, V, S>(hash_builder: &S) -> impl Fn(&EphemeronEdge<K, V>) -> u64 + '_
 where
     S: BuildHasher,
     K: Trace + ?Sized + 'static,
@@ -403,7 +403,7 @@ where
     move |val| make_hash_from_eph::<K, V, S>(hash_builder, val)
 }
 
-fn make_hash_from_eph<K, V, S>(hash_builder: &S, eph: &Ephemeron<K, V>) -> u64
+fn make_hash_from_eph<K, V, S>(hash_builder: &S, eph: &EphemeronEdge<K, V>) -> u64
 where
     S: BuildHasher,
     K: Trace + ?Sized + 'static,
@@ -435,7 +435,7 @@ where
     state.finish()
 }
 
-fn equivalent_key<K, V>(k: &Gc<K>) -> impl Fn(&Ephemeron<K, V>) -> bool + '_
+fn equivalent_key<K, V>(k: &Gc<K>) -> impl Fn(&EphemeronEdge<K, V>) -> bool + '_
 where
     K: Trace + ?Sized + 'static,
     V: Trace + 'static,

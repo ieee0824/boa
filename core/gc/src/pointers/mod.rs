@@ -8,10 +8,10 @@ mod weak;
 mod weak_map;
 
 pub use edge::GcEdge;
-pub use ephemeron::Ephemeron;
+pub use ephemeron::{Ephemeron, EphemeronEdge};
 pub use gc::{Gc, GcErased, GcErasedEdge};
 pub use rooted::Rooted;
-pub use weak::WeakGc;
+pub use weak::{WeakGc, WeakGcEdge};
 pub use weak_map::WeakMap;
 
 pub(crate) use gc::NonTraceable;

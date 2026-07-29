@@ -1,6 +1,6 @@
-use super::{GcEdge, Rooted};
+use super::{GcEdge, Rooted, WeakGcEdge};
 use crate::{
-    Allocator, Ephemeron, GcErasedPointer, Tracer, WeakGc, custom_trace, finalizer_safe,
+    Allocator, EphemeronEdge, GcErasedPointer, Tracer, custom_trace, finalizer_safe,
     internals::{EphemeronBox, GcBox, VTable},
     trace::{Finalize, Trace},
 };
@@ -278,22 +278,22 @@ impl<T: Trace + ?Sized> Gc<T> {
         }
     }
 
-    /// Constructs a new `Gc<T>` while giving you a `WeakGc<T>` to the allocation, to allow
+    /// Constructs a new `Gc<T>` while giving you a `WeakGcEdge<T>` to the allocation, to allow
     /// constructing a T which holds a weak pointer to itself.
     ///
     /// Since the new `Gc<T>` is not fully-constructed until `Gc<T>::new_cyclic` returns, calling
-    /// [`upgrade`][WeakGc::upgrade]  on the weak reference inside the closure will fail and result
+    /// [`upgrade`][WeakGcEdge::upgrade] on the weak reference inside the closure will fail and result
     /// in a `None` value.
     #[must_use]
     pub fn new_cyclic<F>(data_fn: F) -> Self
     where
-        F: FnOnce(&WeakGc<T>) -> T,
+        F: FnOnce(&WeakGcEdge<T>) -> T,
         T: Sized,
     {
         // SAFETY: The newly allocated ephemeron is only live here, meaning `Ephemeron` is the
         // sole owner of the allocation after passing it to `from_raw`, making this operation safe.
         let weak = unsafe {
-            Ephemeron::from_raw(Allocator::alloc_ephemeron(EphemeronBox::new_empty())).into()
+            EphemeronEdge::from_raw(Allocator::alloc_ephemeron(EphemeronBox::new_empty())).into()
         };
 
         let gc = Self::new(data_fn(&weak));

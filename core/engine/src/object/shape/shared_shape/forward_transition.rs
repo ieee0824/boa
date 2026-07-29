@@ -1,6 +1,6 @@
 use std::fmt::Debug;
 
-use boa_gc::{Finalize, GcRefCell, Rooted, Trace, WeakGc};
+use boa_gc::{Finalize, GcRefCell, Rooted, Trace, WeakGcEdge};
 use rustc_hash::FxHashMap;
 
 use crate::object::JsPrototype;
@@ -10,7 +10,7 @@ use super::{Inner as SharedShapeInner, TransitionKey};
 /// Maps transition key type to a [`SharedShapeInner`] transition.
 #[derive(Debug, Trace, Finalize)]
 struct TransitionMap<T: Debug + Trace + Finalize> {
-    map: FxHashMap<T, WeakGc<SharedShapeInner>>,
+    map: FxHashMap<T, WeakGcEdge<SharedShapeInner>>,
 
     /// This counts the number of insertions after a prune operation.
     insertion_count_since_prune: u8,
@@ -62,7 +62,7 @@ impl ForwardTransition {
             properties.map.retain(|_, v| v.is_upgradable());
         }
 
-        properties.map.insert(key, WeakGc::new(value.as_gc()));
+        properties.map.insert(key, WeakGcEdge::new_rooted(value));
     }
 
     /// Insert a prototype transition.
@@ -74,24 +74,24 @@ impl ForwardTransition {
             prototypes.map.retain(|_, v| v.is_upgradable());
         }
 
-        prototypes.map.insert(key, WeakGc::new(value.as_gc()));
+        prototypes.map.insert(key, WeakGcEdge::new_rooted(value));
     }
 
     /// Get a property transition, return [`None`] otherwise.
-    pub(super) fn get_property(&self, key: &TransitionKey) -> Option<WeakGc<SharedShapeInner>> {
+    pub(super) fn get_property(&self, key: &TransitionKey) -> Option<WeakGcEdge<SharedShapeInner>> {
         let this = self.inner.borrow();
         let transitions = this.properties.as_ref()?;
         transitions.map.get(key).cloned()
     }
 
     /// Get a prototype transition, return [`None`] otherwise.
-    pub(super) fn get_prototype(&self, key: &JsPrototype) -> Option<WeakGc<SharedShapeInner>> {
+    pub(super) fn get_prototype(&self, key: &JsPrototype) -> Option<WeakGcEdge<SharedShapeInner>> {
         let this = self.inner.borrow();
         let transitions = this.prototypes.as_ref()?;
         transitions.map.get(key).cloned()
     }
 
-    /// Prunes the [`WeakGc`]s that have been garbage collected.
+    /// Prunes the [`WeakGcEdge`]s that have been garbage collected.
     pub(super) fn prune_property_transitions(&self) {
         let mut this = self.inner.borrow_mut();
         let Some(transitions) = this.properties.as_deref_mut() else {
@@ -102,7 +102,7 @@ impl ForwardTransition {
         transitions.map.retain(|_, v| v.is_upgradable());
     }
 
-    /// Prunes the [`WeakGc`]s that have been garbage collected.
+    /// Prunes the [`WeakGcEdge`]s that have been garbage collected.
     pub(super) fn prune_prototype_transitions(&self) {
         let mut this = self.inner.borrow_mut();
         let Some(transitions) = this.prototypes.as_deref_mut() else {
