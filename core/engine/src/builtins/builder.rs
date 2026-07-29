@@ -105,7 +105,7 @@ impl<S: ApplyToObject + IsConstructor> ApplyToObject for Callable<S> {
                 .expect("Builtin must be a function object");
             function.f = NativeFunction::from_fn_ptr(self.function).to_edge();
             function.constructor = S::IS_CONSTRUCTOR.then_some(ConstructorKind::Base);
-            function.realm = Some(self.realm);
+            function.realm = Some(self.realm.to_edge());
         }
         object.insert(
             StaticJsStrings::LENGTH,
@@ -438,7 +438,7 @@ impl BuiltInConstructorWithPrototype<'_> {
                 .expect("Builtin must be a function object");
             function.f = NativeFunction::from_fn_ptr(self.function).to_edge();
             function.constructor = Some(ConstructorKind::Base);
-            function.realm = Some(self.realm.clone());
+            function.realm = Some(self.realm.to_edge());
         }
 
         let mut object = self.constructor.borrow_mut();
@@ -470,7 +470,7 @@ impl BuiltInConstructorWithPrototype<'_> {
                 .expect("Builtin must be a function object");
             function.f = NativeFunction::from_fn_ptr(self.function).to_edge();
             function.constructor = Some(ConstructorKind::Base);
-            function.realm = Some(self.realm.clone());
+            function.realm = Some(self.realm.to_edge());
         }
 
         let mut object = self.constructor.borrow_mut();
@@ -521,7 +521,7 @@ impl BuiltInCallable<'_> {
                 f: NativeFunction::from_fn_ptr(self.function).to_edge(),
                 name: self.name.clone(),
                 constructor: None,
-                realm: Some(self.realm.clone()),
+                realm: Some(self.realm.to_edge()),
             },
             vec![JsValue::new(self.length), JsValue::new(self.name)],
         );

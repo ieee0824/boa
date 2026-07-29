@@ -11,7 +11,7 @@ use crate::{
     native_function::NativeFunctionObject,
     object::{CONSTRUCTOR, JsObject, PROTOTYPE, PrivateElement, PrivateName},
     property::{PropertyDescriptor, PropertyDescriptorBuilder, PropertyKey, PropertyNameKind},
-    realm::Realm,
+    realm::{Realm, RealmEdge},
     string::StaticJsStrings,
     value::Type,
 };
@@ -821,7 +821,10 @@ impl JsObject {
         }
 
         if let Some(f) = self.downcast_ref::<NativeFunctionObject>() {
-            return Ok(f.realm.clone().unwrap_or_else(|| context.realm().clone()));
+            return Ok(f
+                .realm
+                .as_ref()
+                .map_or_else(|| context.realm().clone(), RealmEdge::to_rooted));
         }
 
         if let Some(bound) = self.downcast_ref::<BoundFunction>() {

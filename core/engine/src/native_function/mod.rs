@@ -22,7 +22,7 @@ use crate::{
             get_prototype_from_constructor,
         },
     },
-    realm::Realm,
+    realm::{Realm, RealmEdge},
 };
 
 #[cfg(feature = "experimental")]
@@ -83,7 +83,7 @@ pub struct NativeFunctionObject {
     pub(crate) constructor: Option<ConstructorKind>,
 
     /// The [`Realm`] in which the function is defined, or `None` if the realm is uninitialized.
-    pub(crate) realm: Option<Realm>,
+    pub(crate) realm: Option<RealmEdge>,
 }
 
 // SAFETY: this traces all fields that need to be traced by the GC.
@@ -404,7 +404,7 @@ pub(crate) fn native_function_call(
         .shadow_stack
         .push_native(pc, name, native_source_info);
 
-    let mut realm = realm.unwrap_or_else(|| context.realm().clone());
+    let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
     context.vm.native_active_function = Some(this_function_object);
@@ -459,7 +459,7 @@ fn native_function_construct(
         .shadow_stack
         .push_native(pc, name, native_source_info);
 
-    let mut realm = realm.unwrap_or_else(|| context.realm().clone());
+    let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
     context.vm.native_active_function = Some(this_function_object);
@@ -521,6 +521,20 @@ mod tests {
         let result = function
             .call(&JsValue::undefined(), &[], &mut Context::default())
             .expect("native closure should remain callable while externally owned");
+        assert_eq!(result, JsValue::new(42));
+    }
+
+    #[test]
+    fn heap_stored_native_function_realm_survives_forced_collection() {
+        let mut context = Context::default();
+        let function = NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::new(42)))
+            .to_js_function(context.realm());
+
+        boa_gc::force_collect();
+
+        let result = function
+            .call(&JsValue::undefined(), &[], &mut context)
+            .expect("native function realm edge should be promoted for the call");
         assert_eq!(result, JsValue::new(42));
     }
 }

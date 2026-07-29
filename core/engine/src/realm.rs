@@ -28,20 +28,43 @@ use rustc_hash::FxHashMap;
 /// Representation of a Realm.
 ///
 /// In the specification these are called Realm Records.
-#[derive(Clone, Trace, Finalize)]
-pub struct Realm {
-    inner: Gc<Inner>,
+#[doc(hidden)]
+pub trait RealmHandle: Clone + Trace + std::ops::Deref<Target = RealmInner> {
+    fn as_inner(&self) -> &RealmInner;
 }
 
-impl Eq for Realm {}
-
-impl PartialEq for Realm {
-    fn eq(&self, other: &Self) -> bool {
-        Gc::ptr_eq(&self.inner, &other.inner)
+impl RealmHandle for Rooted<RealmInner> {
+    fn as_inner(&self) -> &RealmInner {
+        self
     }
 }
 
-impl std::fmt::Debug for Realm {
+impl RealmHandle for GcEdge<RealmInner> {
+    fn as_inner(&self) -> &RealmInner {
+        self
+    }
+}
+
+/// Representation of a Realm.
+///
+/// The default handle is an explicit native root. Heap-owned records use an
+/// internal edge specialization.
+#[derive(Clone, Trace, Finalize)]
+pub struct Realm<H: RealmHandle = Rooted<RealmInner>> {
+    inner: H,
+}
+
+pub(crate) type RealmEdge = Realm<GcEdge<RealmInner>>;
+
+impl<H: RealmHandle> Eq for Realm<H> {}
+
+impl<H: RealmHandle> PartialEq for Realm<H> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.inner.as_inner(), other.inner.as_inner())
+    }
+}
+
+impl<H: RealmHandle> std::fmt::Debug for Realm<H> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Realm")
             .field("intrinsics", &self.inner.intrinsics)
@@ -52,8 +75,9 @@ impl std::fmt::Debug for Realm {
     }
 }
 
+#[doc(hidden)]
 #[derive(Trace, Finalize)]
-struct Inner {
+pub struct RealmInner {
     intrinsics: Intrinsics,
 
     /// The global declarative environment of this realm.
@@ -74,6 +98,17 @@ struct Inner {
     host_defined: GcRefCell<HostDefined>,
 }
 
+impl std::fmt::Debug for RealmInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealmInner")
+            .field("intrinsics", &self.intrinsics)
+            .field("environment", &self.environment)
+            .field("global_object", &self.global_object)
+            .field("global_this", &self.global_this)
+            .finish_non_exhaustive()
+    }
+}
+
 impl Realm {
     /// Create a new [`Realm`].
     #[inline]
@@ -90,7 +125,7 @@ impl Realm {
         let scope = Scope::new_global();
 
         let realm = Self {
-            inner: Gc::new(Inner {
+            inner: Rooted::new(RealmInner {
                 intrinsics,
                 environment,
                 scope,
@@ -108,6 +143,14 @@ impl Realm {
         Ok(realm)
     }
 
+    pub(crate) fn to_edge(&self) -> RealmEdge {
+        RealmEdge {
+            inner: self.inner.clone().into_edge(),
+        }
+    }
+}
+
+impl<H: RealmHandle> Realm<H> {
     /// Gets the intrinsics of this `Realm`.
     #[inline]
     #[must_use]
@@ -252,8 +295,16 @@ impl Realm {
     }
 
     pub(crate) fn addr(&self) -> *const () {
-        let ptr: *const _ = &raw const *self.inner;
+        let ptr: *const _ = self.inner.as_inner();
         ptr.cast()
+    }
+}
+
+impl RealmEdge {
+    pub(crate) fn to_rooted(&self) -> Realm {
+        Realm {
+            inner: self.inner.clone().root(),
+        }
     }
 }
 
