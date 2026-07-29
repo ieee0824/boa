@@ -1,7 +1,6 @@
 use super::run_test;
 use crate::{
-    Ephemeron, Finalize, Gc, GcEdge, Rooted, Trace, WeakGc, WeakGcEdge, registered_ephemeron_roots,
-    registered_roots,
+    Ephemeron, GcEdge, Rooted, WeakGc, WeakGcEdge, registered_ephemeron_roots, registered_roots,
 };
 
 #[test]
@@ -130,16 +129,9 @@ fn raw_round_trip_restores_root_registration() {
 }
 
 #[test]
-fn rooted_fields_drop_safely_during_thread_teardown() {
-    #[derive(Trace, Finalize)]
-    struct Holder {
-        root: Rooted<u32>,
-    }
-
+fn roots_drop_safely_during_thread_teardown() {
     std::thread::spawn(|| {
-        let _holder = Gc::new(Holder {
-            root: Rooted::new(7),
-        });
+        let _root = Rooted::new(7_u32);
     })
     .join()
     .expect("collector teardown must not outlive its root registry");

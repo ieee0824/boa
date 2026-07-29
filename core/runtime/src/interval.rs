@@ -8,7 +8,7 @@ use boa_engine::value::{IntegerOrInfinity, Nullable};
 use boa_engine::{
     Context, Finalize, IntoJsFunctionCopied, JsData, JsResult, JsValue, Trace, js_error, js_string,
 };
-use boa_gc::{GcRefCell, Rooted};
+use boa_gc::{GcEdge, GcRefCell};
 use std::collections::HashSet;
 
 #[cfg(test)]
@@ -25,13 +25,13 @@ struct IntervalInnerState {
 impl IntervalInnerState {
     /// Get the interval handler map from the context, or add it to the context if not
     /// present.
-    fn from_context(context: &mut Context) -> Rooted<GcRefCell<Self>> {
-        if !context.has_data::<Rooted<GcRefCell<IntervalInnerState>>>() {
-            context.insert_data(Rooted::new(GcRefCell::new(Self::default())));
+    fn from_context(context: &mut Context) -> GcEdge<GcRefCell<Self>> {
+        if !context.has_data::<GcEdge<GcRefCell<IntervalInnerState>>>() {
+            context.insert_data(GcEdge::new(GcRefCell::new(Self::default())));
         }
 
         context
-            .get_data::<Rooted<GcRefCell<Self>>>()
+            .get_data::<GcEdge<GcRefCell<Self>>>()
             .expect("Should have inserted.")
             .clone()
     }
@@ -61,7 +61,7 @@ impl IntervalInnerState {
 /// Inner handler function for handling intervals and timeout.
 #[allow(clippy::too_many_arguments)]
 fn handle(
-    handler_map: Rooted<GcRefCell<IntervalInnerState>>,
+    handler_map: GcEdge<GcRefCell<IntervalInnerState>>,
     id: u32,
     function_ref: JsFunction,
     args: Vec<JsValue>,

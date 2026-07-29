@@ -4,11 +4,11 @@
 use boa_engine::interop::ContextData;
 use boa_engine::object::builtins::JsFunction;
 use boa_engine::{Context, IntoJsFunctionCopied, Module, Source, js_string};
-use boa_gc::Rooted;
+use boa_gc::GcEdge;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-fn callback_from_js(ContextData(r): ContextData<Rooted<AtomicUsize>>, result: usize) {
+fn callback_from_js(ContextData(r): ContextData<GcEdge<AtomicUsize>>, result: usize) {
     r.store(result, Ordering::Relaxed);
 }
 
@@ -19,7 +19,7 @@ fn gcd_callback() {
 
     // Create the engine.
     let context = &mut Context::default();
-    let result = Rooted::new(AtomicUsize::new(0));
+    let result = GcEdge::new(AtomicUsize::new(0));
     context.insert_data(result.clone());
 
     // Load the JavaScript code.
