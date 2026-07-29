@@ -12,7 +12,7 @@ use crate::{
     object::JsObject,
     value::TryFromJs,
 };
-use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+use boa_gc::{Finalize, GcRefCell, Rooted, Trace};
 use std::cell::RefCell;
 use std::{future::Future, pin::Pin, task};
 
@@ -1070,7 +1070,7 @@ impl JsPromise {
             }
         }
 
-        let state = Gc::new(GcRefCell::new(Inner {
+        let state = Rooted::new(GcRefCell::new(Inner {
             result: None,
             task: None,
         }));
@@ -1083,7 +1083,7 @@ impl JsPromise {
                     finish(state, Ok(args.get_or_undefined(0).clone()));
                     Ok(JsValue::undefined())
                 },
-                state,
+                state.into_edge(),
             )
         };
 
@@ -1096,7 +1096,7 @@ impl JsPromise {
                     finish(state, Err(err));
                     Ok(JsValue::undefined())
                 },
-                state,
+                state.into_edge(),
             )
         };
 
@@ -1373,7 +1373,7 @@ impl TryIntoJs for JsPromise {
 ///
 /// The only way to construct an instance of `JsFuture` is by calling [`JsPromise::into_js_future`].
 pub struct JsFuture {
-    inner: Gc<GcRefCell<Inner>>,
+    inner: Rooted<GcRefCell<Inner>>,
 }
 
 impl std::fmt::Debug for JsFuture {
