@@ -18,7 +18,7 @@ use boa_ast::{
     },
     scope::BindingLocator,
 };
-use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
 use boa_interner::Interner;
 use boa_macros::js_str;
 use dynify::Dynify;
@@ -1665,7 +1665,7 @@ impl SourceTextModule {
 
             compiler.compile_module_item_list(self.code.source.items());
 
-            (Gc::new(compiler.finish()), functions)
+            (Rooted::new(compiler.finish()), functions)
         };
 
         // 8. Let moduleContext be a new ECMAScript code execution context.
@@ -1679,7 +1679,7 @@ impl SourceTextModule {
         // 13. Set the VariableEnvironment of moduleContext to module.[[Environment]].
         // 14. Set the LexicalEnvironment of moduleContext to module.[[Environment]].
         // 15. Set the PrivateEnvironment of moduleContext to null.
-        let call_frame = CallFrame::new(
+        let call_frame = CallFrame::new_rooted(
             codeblock.clone(),
             Some(ActiveRunnable::Module(module_self.clone())),
             envs,
@@ -1759,7 +1759,7 @@ impl SourceTextModule {
                 environment: env,
                 info,
                 context: SourceTextContext {
-                    codeblock: codeblock.into(),
+                    codeblock: codeblock.into_edge(),
                     environments: frame.environments.clone(),
                     realm,
                 },

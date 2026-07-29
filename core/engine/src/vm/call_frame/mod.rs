@@ -9,7 +9,7 @@ use crate::{
 };
 use boa_ast::Position;
 use boa_ast::scope::BindingLocator;
-use boa_gc::{Finalize, Gc, GcEdge, Rooted, Trace, custom_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
 use boa_string::JsString;
 use thin_vec::ThinVec;
 
@@ -123,21 +123,7 @@ impl CallFrame {
     pub(crate) const PROMISE_CAPABILITY_REJECT_REGISTER_INDEX: usize = 2;
     pub(crate) const ASYNC_GENERATOR_OBJECT_REGISTER_INDEX: usize = 3;
 
-    /// Creates a new `CallFrame` with the provided `CodeBlock`.
-    pub(crate) fn new(
-        code_block: Gc<CodeBlock>,
-        active_runnable: Option<ActiveRunnable>,
-        environments: EnvironmentStack,
-        realm: Realm,
-    ) -> Self {
-        Self::new_rooted(
-            Rooted::from_gc(code_block),
-            active_runnable,
-            environments,
-            realm,
-        )
-    }
-
+    /// Creates an active `CallFrame` with a rooted `CodeBlock`.
     pub(crate) fn new_rooted(
         code_block: Rooted<CodeBlock>,
         active_runnable: Option<ActiveRunnable>,

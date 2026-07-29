@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use rustc_hash::FxHashMap;
 
-use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
 use boa_parser::{Parser, Source, source::ReadChar};
 
 use crate::{
@@ -48,7 +48,7 @@ struct Inner {
     #[unsafe_ignore_trace]
     source: boa_ast::Script,
     source_text: SourceText,
-    codeblock: GcRefCell<Option<Gc<CodeBlock>>>,
+    codeblock: GcRefCell<Option<GcEdge<CodeBlock>>>,
     loaded_modules: GcRefCell<FxHashMap<JsString, Module>>,
     host_defined: HostDefined,
     path: Option<PathBuf>,
@@ -114,11 +114,11 @@ impl Script {
     /// Compiles the codeblock of this script.
     ///
     /// This is a no-op if this has been called previously.
-    pub fn codeblock(&self, context: &mut Context) -> JsResult<Gc<CodeBlock>> {
+    pub fn codeblock(&self, context: &mut Context) -> JsResult<Rooted<CodeBlock>> {
         let mut codeblock = self.inner.codeblock.borrow_mut();
 
         if let Some(codeblock) = &*codeblock {
-            return Ok(codeblock.clone());
+            return Ok(codeblock.clone().root());
         }
 
         let mut annex_b_function_names = Vec::new();
@@ -154,9 +154,9 @@ impl Script {
         compiler.global_declaration_instantiation(&self.inner.source);
         compiler.compile_statement_list(self.inner.source.statements(), true, false);
 
-        let cb = Gc::new(compiler.finish());
+        let cb = Rooted::new(compiler.finish());
 
-        *codeblock = Some(cb.clone());
+        *codeblock = Some(cb.clone().into_edge());
 
         Ok(cb)
     }
@@ -212,7 +212,7 @@ impl Script {
 
         let env_fp = context.vm.environments.len() as u32;
         context.vm.push_frame_with_stack(
-            CallFrame::new(
+            CallFrame::new_rooted(
                 codeblock,
                 Some(ActiveRunnable::Script(self.clone())),
                 context.vm.environments.clone(),

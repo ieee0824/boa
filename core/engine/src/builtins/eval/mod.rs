@@ -27,7 +27,7 @@ use boa_ast::{
     operations::{ContainsSymbol, contains, contains_arguments},
     scope::Scope,
 };
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_parser::{Parser, Source};
 
 use super::{BuiltInBuilder, IntrinsicObject};
@@ -313,7 +313,7 @@ impl Eval {
 
         compiler.compile_statement_list(body.statements(), true, false);
 
-        let code_block = Gc::new(compiler.finish());
+        let code_block = Rooted::new(compiler.finish());
 
         // Strict calls don't need extensions, since all strict eval calls push a new
         // function environment before evaluating.
@@ -325,7 +325,7 @@ impl Eval {
         let environments = context.vm.environments.clone();
         let realm = context.realm().clone();
         context.vm.push_frame_with_stack(
-            CallFrame::new(code_block, None, environments, realm)
+            CallFrame::new_rooted(code_block, None, environments, realm)
                 .with_env_fp(env_fp)
                 .with_flags(CallFrameFlags::EXIT_EARLY),
             JsValue::undefined(),

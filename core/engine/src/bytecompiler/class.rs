@@ -13,18 +13,18 @@ use boa_ast::{
     property::{MethodDefinitionKind, PropertyName},
     scope::Scope,
 };
-use boa_gc::Gc;
+use boa_gc::Rooted;
 use boa_interner::Sym;
 use thin_vec::ThinVec;
 
 // Static class elements that are initialized at a later time in the class creation.
 enum StaticElement {
     // A static class block with it's function code.
-    StaticBlock(Gc<CodeBlock>),
+    StaticBlock(Rooted<CodeBlock>),
 
     // A static class field with it's function code, an optional name index and the information if the function is an anonymous function.
     StaticField {
-        code: Gc<CodeBlock>,
+        code: Rooted<CodeBlock>,
         name_index: StaticFieldName,
         is_anonymous_function: bool,
     },
@@ -156,7 +156,7 @@ impl ByteCompiler<'_> {
             class.super_ref.is_some(),
         );
 
-        let code = Gc::new(compiler.finish());
+        let code = Rooted::new(compiler.finish());
         let index = self.push_function_to_constants(code);
 
         let class_register = self.register_allocator.alloc();
@@ -440,7 +440,7 @@ impl ByteCompiler<'_> {
 
                     field_compiler.code_block_flags |= CodeBlockFlags::IN_CLASS_FIELD_INITIALIZER;
 
-                    let code = Gc::new(field_compiler.finish());
+                    let code = Rooted::new(field_compiler.finish());
                     let index = self.push_function_to_constants(code);
 
                     let dst = self.register_allocator.alloc();
@@ -486,7 +486,7 @@ impl ByteCompiler<'_> {
 
                     field_compiler.code_block_flags |= CodeBlockFlags::IN_CLASS_FIELD_INITIALIZER;
 
-                    let code = Gc::new(field_compiler.finish());
+                    let code = Rooted::new(field_compiler.finish());
                     let index = self.push_function_to_constants(code);
                     let dst = self.register_allocator.alloc();
                     self.emit_get_function(&dst, index);
@@ -542,7 +542,7 @@ impl ByteCompiler<'_> {
                     field_compiler.code_block_flags |= CodeBlockFlags::IN_CLASS_FIELD_INITIALIZER;
 
                     let code = field_compiler.finish();
-                    let code = Gc::new(code);
+                    let code = Rooted::new(code);
 
                     static_elements.push(StaticElement::StaticField {
                         code,
@@ -586,7 +586,7 @@ impl ByteCompiler<'_> {
                     field_compiler.code_block_flags |= CodeBlockFlags::IN_CLASS_FIELD_INITIALIZER;
 
                     let code = field_compiler.finish();
-                    let code = Gc::new(code);
+                    let code = Rooted::new(code);
 
                     static_elements.push(StaticElement::StaticField {
                         code,
@@ -629,7 +629,7 @@ impl ByteCompiler<'_> {
                         );
                     }
 
-                    let code = Gc::new(compiler.finish());
+                    let code = Rooted::new(compiler.finish());
                     static_elements.push(StaticElement::StaticBlock(code));
                 }
             }

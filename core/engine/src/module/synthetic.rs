@@ -1,5 +1,5 @@
 use boa_ast::scope::Scope;
-use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Trace};
+use boa_gc::{Finalize, Gc, GcEdge, GcRefCell, Rooted, Trace};
 use rustc_hash::FxHashSet;
 
 use super::{BindingName, ResolveExportError, ResolvedBinding};
@@ -335,7 +335,7 @@ impl SyntheticModule {
 
         module_scope.escape_all_bindings();
 
-        let cb = Gc::new(compiler.finish());
+        let cb = Rooted::new(compiler.finish());
 
         let mut envs = EnvironmentStack::new(global_env);
         envs.push_module(module_scope);
@@ -358,7 +358,7 @@ impl SyntheticModule {
             .borrow_mut()
             .transition(|_| ModuleStatus::Linked {
                 environment: env,
-                eval_context: (envs, cb.into()),
+                eval_context: (envs, cb.into_edge()),
             });
 
         // 5. Return unused.
