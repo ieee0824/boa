@@ -237,14 +237,6 @@ impl Finalize for GcErased {
     fn finalize(&self) {}
 }
 
-// SAFETY: We only have one transparent field in GcErased that needs trace,
-//         so this is safe.
-unsafe impl Trace for GcErased {
-    custom_trace!(this, mark, {
-        mark(&this.inner);
-    });
-}
-
 impl Clone for GcErased {
     #[inline]
     fn clone(&self) -> Self {
