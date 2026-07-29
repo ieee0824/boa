@@ -73,6 +73,19 @@ impl<T: NativeObject> Clone for JsObject<T> {
     }
 }
 
+/// A heap-external, explicitly registered JavaScript object handle.
+pub(crate) struct RootedJsObject<T: NativeObject = ErasedObjectData> {
+    inner: Rooted<VTableObject<T>>,
+}
+
+impl<T: NativeObject> Clone for RootedJsObject<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+        }
+    }
+}
+
 /// An `Object` that has an additional `vtable` with its internal methods.
 // We have to skip implementing `Debug` for this because not using the
 // implementation of `Debug` for `JsObject` could easily cause stack overflows,
@@ -870,6 +883,22 @@ impl<T: NativeObject> JsObject<T> {
         let inner = unsafe { GcEdge::cast_unchecked::<ErasedVTableObject>(self.inner) };
 
         JsObject { inner }
+    }
+
+    /// Promotes this heap edge to an explicitly registered external handle.
+    pub(crate) fn root(self) -> RootedJsObject<T> {
+        RootedJsObject {
+            inner: self.inner.root(),
+        }
+    }
+}
+
+impl<T: NativeObject> RootedJsObject<T> {
+    /// Clones this root as a heap edge while keeping the root registered.
+    pub(crate) fn to_edge(&self) -> JsObject<T> {
+        JsObject {
+            inner: GcEdge::from(self.inner.as_gc().clone()),
+        }
     }
 }
 

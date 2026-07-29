@@ -7,7 +7,7 @@ use crate::{
     builtins::{Array, OrdinaryObject, iterable::IteratorPrototypes, uri::UriFunctions},
     js_string,
     object::{
-        CONSTRUCTOR, JsFunction, JsFunctionEdge, JsObject, Object, PROTOTYPE,
+        CONSTRUCTOR, JsFunction, JsFunctionEdge, JsObject, Object, PROTOTYPE, RootedJsObject,
         internal_methods::immutable_prototype::IMMUTABLE_PROTOTYPE_EXOTIC_INTERNAL_METHODS,
         shape::{RootShape, shared_shape::template::ObjectTemplate},
     },
@@ -109,6 +109,13 @@ impl StandardConstructor {
     #[must_use]
     pub fn prototype(&self) -> JsObject {
         self.prototype.clone()
+    }
+
+    /// Return the explicitly rooted prototype object.
+    #[inline]
+    #[must_use]
+    pub(crate) fn rooted_prototype(&self) -> RootedJsObject {
+        self.prototype.clone().root()
     }
 
     /// Return the constructor object.
@@ -1411,32 +1418,35 @@ impl ObjectTemplates {
 
         // pre-initialize used shapes.
         let ordinary_object =
-            ObjectTemplate::with_prototype(root_shape, constructors.object().prototype());
+            ObjectTemplate::with_prototype(root_shape, &constructors.object().rooted_prototype());
         let mut array = ObjectTemplate::new(root_shape);
         let length_property_key: PropertyKey = js_string!("length").into();
         array.property(
             length_property_key.clone(),
             Attribute::WRITABLE | Attribute::PERMANENT | Attribute::NON_ENUMERABLE,
         );
-        array.set_prototype(constructors.array().prototype());
+        array.set_rooted_prototype(&constructors.array().rooted_prototype());
 
-        let number = ObjectTemplate::with_prototype(root_shape, constructors.number().prototype());
-        let symbol = ObjectTemplate::with_prototype(root_shape, constructors.symbol().prototype());
-        let bigint = ObjectTemplate::with_prototype(root_shape, constructors.bigint().prototype());
+        let number =
+            ObjectTemplate::with_prototype(root_shape, &constructors.number().rooted_prototype());
+        let symbol =
+            ObjectTemplate::with_prototype(root_shape, &constructors.symbol().rooted_prototype());
+        let bigint =
+            ObjectTemplate::with_prototype(root_shape, &constructors.bigint().rooted_prototype());
         let boolean =
-            ObjectTemplate::with_prototype(root_shape, constructors.boolean().prototype());
+            ObjectTemplate::with_prototype(root_shape, &constructors.boolean().rooted_prototype());
         let mut string = ObjectTemplate::new(root_shape);
         string.property(
             length_property_key.clone(),
             Attribute::READONLY | Attribute::PERMANENT | Attribute::NON_ENUMERABLE,
         );
-        string.set_prototype(constructors.string().prototype());
+        string.set_rooted_prototype(&constructors.string().rooted_prototype());
 
         let mut regexp_without_proto = ObjectTemplate::new(root_shape);
         regexp_without_proto.property(js_string!("lastIndex").into(), Attribute::WRITABLE);
 
         let mut regexp = regexp_without_proto.clone();
-        regexp.set_prototype(constructors.regexp().prototype());
+        regexp.set_rooted_prototype(&constructors.regexp().rooted_prototype());
 
         let name_property_key: PropertyKey = js_string!("name").into();
         let mut function = ObjectTemplate::new(root_shape);
@@ -1462,11 +1472,13 @@ impl ObjectTemplates {
 
         let function_with_prototype_without_proto = function_with_prototype.clone();
 
-        function.set_prototype(constructors.function().prototype());
-        function_with_prototype.set_prototype(constructors.function().prototype());
-        async_function.set_prototype(constructors.async_function().prototype());
-        generator_function.set_prototype(constructors.generator_function().prototype());
-        async_generator_function.set_prototype(constructors.async_generator_function().prototype());
+        function.set_rooted_prototype(&constructors.function().rooted_prototype());
+        function_with_prototype.set_rooted_prototype(&constructors.function().rooted_prototype());
+        async_function.set_rooted_prototype(&constructors.async_function().rooted_prototype());
+        generator_function
+            .set_rooted_prototype(&constructors.generator_function().rooted_prototype());
+        async_generator_function
+            .set_rooted_prototype(&constructors.async_generator_function().rooted_prototype());
 
         let mut function_prototype = ordinary_object.clone();
         function_prototype.property(
