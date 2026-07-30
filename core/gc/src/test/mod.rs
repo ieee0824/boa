@@ -63,6 +63,27 @@ impl Harness {
             assert_eq!(gc.runtime.bytes_allocated, bytes);
         });
     }
+
+    /// Asserts how many strong allocations the collector is still holding.
+    #[track_caller]
+    fn assert_strong_allocations(count: usize) {
+        BOA_GC.with(|current| {
+            let gc = current.borrow();
+            assert_eq!(
+                gc.strongs.len(),
+                count,
+                "expected {count} strong allocations, got {}",
+                gc.strongs.len()
+            );
+        });
+    }
+
+    /// Makes every subsequent allocation trigger a collection.
+    fn collect_on_every_allocation() {
+        BOA_GC.with(|current| {
+            current.borrow_mut().config.threshold = 0;
+        });
+    }
 }
 
 #[track_caller]

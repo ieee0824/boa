@@ -27,7 +27,6 @@ use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     mem,
     ptr::NonNull,
 };
@@ -46,35 +45,25 @@ type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
 type ErasedWeakMapBoxPointer = NonNull<dyn ErasedWeakMapBox>;
 type RootProviderPointer = NonNull<dyn Trace>;
 
-#[derive(Debug, Clone, Copy)]
-struct RootEntry {
-    // Read by the marker after the compatibility migration is complete. Tests
-    // exercise it now so registration cannot silently drift from the handle.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pointer: GcErasedPointer,
-    handles: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EphemeronRootEntry {
-    // Read by the marker after the compatibility migration is complete. Tests
-    // exercise it now so registration cannot silently drift from the handle.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pointer: EphemeronPointer,
-    handles: usize,
-}
-
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
 thread_local!(static GC_SUSPENDED: Cell<usize> = const { Cell::new(0) });
-thread_local!(static GC_ROOTS: RefCell<HashMap<usize, RootEntry>> = RefCell::new(HashMap::new()));
+// Set while the collector is tearing the whole heap down. Root counts live in the
+// allocation headers, so a handle dropped after its allocation was freed must not touch
+// them. During a sweep this cannot happen — an allocation a root points at is kept — but
+// teardown frees everything regardless of what still points at it.
+thread_local!(static GC_TEARDOWN: Cell<bool> = const { Cell::new(false) });
 thread_local!(static ROOT_PROVIDERS: RefCell<Vec<(usize, RootProviderPointer)>> = RefCell::new(Vec::new()));
-thread_local!(static EPHEMERON_ROOTS: RefCell<HashMap<usize, EphemeronRootEntry>> = RefCell::new(HashMap::new()));
+// How many allocations currently have at least one registered root. Maintained
+// alongside the per-allocation counts so that "are there any roots" and the tests'
+// whole-registry assertions stay O(1).
+thread_local!(static ROOTED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) });
+thread_local!(static ROOTED_EPHEMERONS: Cell<usize> = const { Cell::new(0) });
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // The collector can own traced values containing `Rooted` handles. Initialize
-    // the root registry first so it remains alive while the collector is dropped
+    // the root bookkeeping first so it remains alive while the collector is dropped
     // during thread teardown.
-    GC_ROOTS.with(|_| {});
-    EPHEMERON_ROOTS.with(|_| {});
+    ROOTED_ALLOCATIONS.with(|_| {});
+    ROOTED_EPHEMERONS.with(|_| {});
     ROOT_PROVIDERS.with(|_| {});
     RefCell::new(BoaGc {
         config: GcConfig::default(),
@@ -85,64 +74,66 @@ thread_local!(static BOA_GC: RefCell<BoaGc> = {
     })
 });
 
+/// Registers one root pointing at `pointer`.
+///
+/// The count lives in the allocation's own header, so this is a counter increment
+/// rather than a side-table insertion.
 fn register_root(pointer: GcErasedPointer) {
-    GC_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = pointer.as_ptr().addr();
-        roots
-            .entry(key)
-            .and_modify(|entry| entry.handles += 1)
-            .or_insert(RootEntry {
-                pointer,
-                handles: 1,
-            });
-    });
+    if teardown_in_progress() {
+        return;
+    }
+
+    // SAFETY: a caller holding a handle to the allocation proves the pointer is valid.
+    if unsafe { pointer.as_ref() }.header.register_root() {
+        ROOTED_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 fn unregister_root(pointer: GcErasedPointer) {
-    GC_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = pointer.as_ptr().addr();
-        let entry = roots
-            .get_mut(&key)
-            .expect("attempted to unregister an unknown GC root");
-        entry.handles -= 1;
-        if entry.handles == 0 {
-            roots.remove(&key);
-        }
-    });
-}
+    if teardown_in_progress() {
+        return;
+    }
 
-fn ephemeron_pointer_key(pointer: EphemeronPointer) -> usize {
-    pointer.as_ptr().cast::<()>().addr()
+    // SAFETY: a caller holding a handle to the allocation proves the pointer is valid.
+    if unsafe { pointer.as_ref() }.header.unregister_root() {
+        ROOTED_ALLOCATIONS.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .checked_sub(1)
+                    .expect("rooted allocation count underflowed"),
+            );
+        });
+    }
 }
 
 fn register_ephemeron_root(pointer: EphemeronPointer) {
-    EPHEMERON_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = ephemeron_pointer_key(pointer);
-        roots
-            .entry(key)
-            .and_modify(|entry| entry.handles += 1)
-            .or_insert(EphemeronRootEntry {
-                pointer,
-                handles: 1,
-            });
-    });
+    if teardown_in_progress() {
+        return;
+    }
+
+    // SAFETY: a caller holding a handle to the ephemeron proves the pointer is valid.
+    if unsafe { pointer.as_ref() }.header().register_root() {
+        ROOTED_EPHEMERONS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 fn unregister_ephemeron_root(pointer: EphemeronPointer) {
-    EPHEMERON_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = ephemeron_pointer_key(pointer);
-        let entry = roots
-            .get_mut(&key)
-            .expect("attempted to unregister an unknown ephemeron root");
-        entry.handles -= 1;
-        if entry.handles == 0 {
-            roots.remove(&key);
-        }
-    });
+    if teardown_in_progress() {
+        return;
+    }
+
+    // SAFETY: a caller holding a handle to the ephemeron proves the pointer is valid.
+    if unsafe { pointer.as_ref() }.header().unregister_root() {
+        ROOTED_EPHEMERONS.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .checked_sub(1)
+                    .expect("rooted ephemeron count underflowed"),
+            );
+        });
+    }
 }
 
 /// Suspends collection for as long as the guard is alive.
@@ -184,6 +175,28 @@ impl Drop for NoGcScope {
 
 fn collection_suspended() -> bool {
     GC_SUSPENDED.with(Cell::get) > 0
+}
+
+/// Whether the collector is freeing the entire heap, so allocation headers may already
+/// be gone and must not be touched by root bookkeeping.
+fn teardown_in_progress() -> bool {
+    GC_TEARDOWN.with(Cell::get)
+}
+
+/// Marks the whole-heap teardown window for the root bookkeeping.
+struct TeardownGuard;
+
+impl TeardownGuard {
+    fn new() -> Self {
+        GC_TEARDOWN.with(|teardown| teardown.set(true));
+        Self
+    }
+}
+
+impl Drop for TeardownGuard {
+    fn drop(&mut self) {
+        GC_TEARDOWN.with(|teardown| teardown.set(false));
+    }
 }
 
 /// A registration of a heap-external structure that owns garbage collected roots.
@@ -265,14 +278,30 @@ impl Drop for TemporaryEphemeronRoot {
     }
 }
 
+/// The number of allocations with at least one registered root.
 #[cfg(test)]
-fn registered_roots() -> Vec<RootEntry> {
-    GC_ROOTS.with(|roots| roots.borrow().values().copied().collect())
+fn registered_root_count() -> usize {
+    ROOTED_ALLOCATIONS.with(Cell::get)
 }
 
+/// The number of ephemerons with at least one registered root.
 #[cfg(test)]
-fn registered_ephemeron_roots() -> Vec<EphemeronRootEntry> {
-    EPHEMERON_ROOTS.with(|roots| roots.borrow().values().copied().collect())
+fn registered_ephemeron_root_count() -> usize {
+    ROOTED_EPHEMERONS.with(Cell::get)
+}
+
+/// How many registered roots point at `pointer`.
+#[cfg(test)]
+fn root_handles(pointer: GcErasedPointer) -> u32 {
+    // SAFETY: the caller holds a handle to the allocation, so the pointer is valid.
+    unsafe { pointer.as_ref() }.header.root_count()
+}
+
+/// How many registered roots point at the ephemeron `pointer`.
+#[cfg(test)]
+fn ephemeron_root_handles(pointer: EphemeronPointer) -> u32 {
+    // SAFETY: the caller holds a handle to the ephemeron, so the pointer is valid.
+    unsafe { pointer.as_ref() }.header().root_count()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -395,14 +424,13 @@ impl Allocator {
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
 
-            Self::manage_state(&mut gc);
-            // A collection can mark the allocation through its temporary root even though it is
-            // not in the heap vector yet. Clear that mark before publishing it to the heap.
-            // SAFETY: `ptr` remains owned by this allocation path.
-            unsafe { ptr.as_ref() }.header.unmark();
-
+            // Publish the allocation before the collection that `manage_state` may run.
+            // Roots are found by walking the heap, so an allocation the collector cannot
+            // see is one whose contents it would not keep alive.
             gc.strongs.push(erased);
             gc.runtime.bytes_allocated += element_size;
+
+            Self::manage_state(&mut gc);
 
             drop(temporary_root);
             ptr
@@ -421,12 +449,12 @@ impl Allocator {
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
 
-            Self::manage_state(&mut gc);
-            // SAFETY: `ptr` remains owned by this allocation path.
-            unsafe { ptr.as_ref() }.header.unmark();
-
+            // Publish before the collection that `manage_state` may run, for the same
+            // reason as in `alloc_gc`.
             gc.weaks.push(erased);
             gc.runtime.bytes_allocated += element_size;
+
+            Self::manage_state(&mut gc);
 
             drop(temporary_root);
             ptr
@@ -561,12 +589,16 @@ impl Collector {
 
         // === Preliminary mark phase ===
         //
-        // 0. Trace every explicitly registered strong root.
-        GC_ROOTS.with(|roots| {
-            for root in roots.borrow().values() {
-                tracer.enqueue(root.pointer);
+        // 0. Trace every explicitly registered strong root. The registration lives in
+        // each allocation's header, so finding the roots is one pass reading a counter
+        // rather than tracing every object's fields to work out which handles are
+        // internal to the heap.
+        for node in strongs {
+            // SAFETY: node must be valid as this phase cannot drop any node.
+            if unsafe { node.as_ref() }.header.is_rooted() {
+                tracer.enqueue(*node);
             }
-        });
+        }
         // 0.0. Trace every registered heap-external root provider, such as the VM's
         // value stack, which holds roots without registering them one by one.
         ROOT_PROVIDERS.with(|providers| {
@@ -604,12 +636,13 @@ impl Collector {
         //
         // 1. Mark explicitly registered ephemeron roots, then get the naive list of ephemerons
         // that are supposedly dead or whose key is dead.
-        EPHEMERON_ROOTS.with(|roots| {
-            for root in roots.borrow().values() {
-                // SAFETY: registered roots point to live collector allocations.
-                unsafe { root.pointer.as_ref() }.header().mark();
+        for eph in weaks {
+            // SAFETY: node must be valid as this phase cannot drop any node.
+            let header = unsafe { eph.as_ref() }.header();
+            if header.is_rooted() {
+                header.mark();
             }
-        });
+        }
 
         for eph in weaks {
             // SAFETY: node must be valid as this phase cannot drop any node.
@@ -728,7 +761,10 @@ impl Collector {
                 // with a usable backtrace, rather than reading freed memory.
                 *total_allocated -= node_ref.size();
                 node_ref.header.poison();
-                eprintln!("[#330] collected {}", node_ref.type_name());
+                #[allow(clippy::print_stderr, reason = "temporary #330 diagnostic")]
+                {
+                    eprintln!("[#330] collected {}", node_ref.type_name());
+                }
 
                 false
             } else {
@@ -769,6 +805,11 @@ impl Collector {
 
     // Clean up the heap when BoaGc is dropped
     fn dump(gc: &mut BoaGc) {
+        // Everything here is freed regardless of what still points at it, so a handle
+        // dropped along the way must not reach into an allocation's header to update its
+        // root count.
+        let _teardown = TeardownGuard::new();
+
         // Weak maps have to be dropped first, since the process dereferences GcBoxes.
         // This can be done without initializing a dropguard since no GcBox's are being dropped.
         for node in mem::take(&mut gc.weak_maps) {

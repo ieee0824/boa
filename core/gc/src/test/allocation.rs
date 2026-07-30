@@ -3,6 +3,51 @@ use boa_macros::{Finalize, Trace};
 use super::{Harness, run_test};
 use crate::{GcBox, GcEdge, GcRefCell, Rooted, force_collect};
 
+#[derive(Debug, Finalize, Trace)]
+struct EdgeHolder {
+    leaf: Option<GcEdge<u32>>,
+}
+
+#[test]
+fn only_rooted_allocations_start_the_mark_phase() {
+    run_test(|| {
+        let leaf = GcEdge::new(1_u32);
+        let holder = Rooted::new(EdgeHolder {
+            leaf: Some(leaf.clone()),
+        });
+        // Nothing roots this one, and no rooted allocation points at it.
+        let _orphan = GcEdge::new(2_u32);
+
+        Harness::assert_strong_allocations(3);
+
+        force_collect();
+
+        // The leaf survives because a rooted allocation has an edge to it. The orphan
+        // does not, even though a handle to it is still in scope: a heap edge is not a
+        // root. Its handle must not be dereferenced after this point.
+        Harness::assert_strong_allocations(2);
+        assert_eq!(**holder.leaf.as_ref().expect("the leaf is set"), 1);
+    });
+}
+
+#[test]
+fn an_allocation_survives_the_collection_it_triggers() {
+    run_test(|| {
+        Harness::collect_on_every_allocation();
+
+        // Allocating the holder runs a collection while the holder is the only thing
+        // pointing at the leaf, and while the holder itself is reachable only through the
+        // temporary root the allocator registers for it.
+        let holder = Rooted::new(EdgeHolder {
+            leaf: Some(GcEdge::new(41_u32)),
+        });
+
+        Harness::assert_collected_at_least(1);
+        Harness::assert_strong_allocations(2);
+        assert_eq!(**holder.leaf.as_ref().expect("the leaf is set"), 41);
+    });
+}
+
 #[test]
 fn gc_basic_cell_allocation() {
     run_test(|| {
