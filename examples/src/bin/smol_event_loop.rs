@@ -108,7 +108,8 @@ impl JobExecutor for Queue {
         Box::pin(async move {
             let mut group = FutureGroup::new();
             loop {
-                for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
+                let jobs = std::mem::take(&mut *self.async_jobs.borrow_mut());
+                for job in jobs {
                     if job.is_exclusive() {
                         while let Some(result) = group.next().await {
                             if let Err(error) = result {

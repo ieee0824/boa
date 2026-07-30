@@ -655,7 +655,8 @@ impl JobExecutor for Executor {
             let mut group = FutureGroup::new();
 
             loop {
-                for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
+                let jobs = mem::take(&mut *self.async_jobs.borrow_mut());
+                for job in jobs {
                     if job.is_exclusive() {
                         while let Some(result) = group.next().await {
                             if let Err(error) = result {
