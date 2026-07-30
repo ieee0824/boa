@@ -1,7 +1,7 @@
 //! A garbage collected cell implementation
 
 use crate::{
-    Tracer,
+    Tracer, begin_writing_borrow, end_writing_borrow,
     trace::{Finalize, Trace},
 };
 use std::marker::PhantomData;
@@ -187,6 +187,7 @@ impl<T: ?Sized> GcRefCell<T> {
             return Err(BorrowMutError);
         }
         self.borrow.set(self.borrow.get().set_writing());
+        begin_writing_borrow();
 
         // SAFETY: This is safe as the value is rooted if it was not previously rooted,
         // so it cannot be dropped.
@@ -405,6 +406,7 @@ impl Drop for BorrowGcRefMut<'_> {
     fn drop(&mut self) {
         debug_assert_eq!(self.borrow.get().borrowed(), BorrowState::Writing);
         self.borrow.set(BorrowFlag(UNUSED));
+        end_writing_borrow();
     }
 }
 

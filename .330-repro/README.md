@@ -12,13 +12,14 @@ cargo build -p boa_cli
 BOA_GC_DIAGNOSE_ROOTS=1 BOA_GC_THRESHOLD=0 ./target/debug/boa .330-repro/fail-01-loop-nested-literal.js
 ```
 
-Three diagnostic environment variables, all added on this branch:
+Four diagnostic environment variables, all added on this branch:
 
 | Variable | Effect |
 |---|---|
 | `BOA_GC_THRESHOLD=<bytes>` | Forces the collection threshold and **keeps it forced**. `0` collects on every allocation. Without the pinning, `manage_state` grows the threshold after the first collection and the run silently stops being adversarial. |
 | `BOA_GC_DIAGNOSE_ROOTS=1` | The sweep leaks and poisons what it would have freed, for both strong allocations and ephemerons. A handle that outlived its allocation then panics at its own dereference, naming the type, instead of reading freed memory. |
 | `BOA_GC_POISON_TRACE=<type name fragment>` | Prints a backtrace when an allocation of a matching type is reclaimed. That backtrace is the allocation site that triggered the collection, so it names the operation that was holding the value in a local — which the dereference-side report cannot show. |
+| `BOA_GC_DIAGNOSE_WRITING_ALLOC=1` | Stops at the first GC allocation made while any `GcRefCell` writing borrow is active and prints its allocation-side backtrace. `NoGcScope` windows are excluded because collection is intentionally suspended there. |
 
 `BOA_GC_THRESHOLD=0` is far harsher than any real configuration. It is what turns a
 timing-dependent crash into a deterministic one: every window where native code holds a
@@ -49,10 +50,24 @@ every object reachable only through its properties does not.
 `fail-01` was one instance of this, in the shape transition table, and is fixed: the weak
 reference is now allocated before the borrow rather than inside it.
 
-## What still fails
+## Current implementation state (2026-07-30)
 
-Scripts that build several properties on one object still fail, on the same path and for
-the same reason as `fail-01` did, one level up:
+The writing-borrow allocation detector described below is now implemented. It found two
+sites immediately:
+
+1. `Script::codeblock` held the script's code-block cache writing borrow throughout
+   compilation, including the final `CodeBlock` allocation. It now checks the cache under
+   a shared borrow and takes the writing borrow only to publish the finished edge.
+2. `validate_and_apply_property_descriptor` held the target object writing borrow while
+   creating a new shape. A first attempt to prepare the transition under a shared borrow
+   and apply it later was reverted: it let the shape report an existing slot while the
+   storage was still empty. The eventual fix must preserve the atomic shape/storage
+   update invariant while moving only the allocation outside the writing borrow.
+
+The second site remains the first unresolved report. This branch is diagnostic work, is
+not a merge candidate, and must not be merged as-is.
+
+The original second failure was:
 
 ```
 #330: dereferenced a `VTableObject<OrdinaryObject>` the collector already reclaimed
@@ -74,10 +89,28 @@ read from VM registers, and registers are inside the traced value stack — `pus
 grows it with `resize_with`, so the register range is within the `Vec`'s length, and the
 stack provider was measured enqueueing from it. The value stack is not the problem.
 
-### Finding the rest
+## Continuation plan
 
-Worth building next: count active `Writing` borrows in a thread local, and have the
-allocator report a backtrace when it allocates while that count is non-zero. That turns
-this class from a silent reclamation into an enumerable list of sites, which is what
-sizing the remaining work needs. Each site is then fixed locally by hoisting the
-allocation out of the borrow, as `ForwardTransition::insert_property` now does.
+Continue in this exact order:
+
+1. Run formatting, `boa_gc` tests, engine check, and Clippy for the detector and the two
+   current fixes.
+2. Run every `.330-repro/pass-*.js` and `.330-repro/fail-*.js` with
+   `BOA_GC_DIAGNOSE_WRITING_ALLOC=1`, `BOA_GC_DIAGNOSE_ROOTS=1`, and
+   `BOA_GC_THRESHOLD=0`.
+3. For each newly reported site, move only the allocation-producing work before the
+   writing borrow. Do not hide a site with `NoGcScope`; VM execution is not a bounded
+   allocation window.
+4. Repeat until the complete reproducer set is clean at the fixed zero threshold, then
+   run `boa_gc`, `boa_engine`, `boa_runtime`, all-features/all-targets checks, and Clippy
+   with warnings denied.
+5. Integrate the verified functional fixes with `feat/registered-roots-collector`. Remove
+   every `TEMPORARY #330 DIAGNOSTIC` path, all diagnostic environment variables, poison
+   behavior, and `.330-repro/` before making PR #50 reviewable.
+6. Run the full GitHub CI and do not merge until every required check has completed
+   successfully.
+7. Measure collection cost with the #315 stage-2 method and verify the required reduction,
+   then run the omoikane full suite, Acid3 100/100, and WPT with zero regression.
+
+PR #50 remains draft throughout steps 1-5. Its merge is forbidden until steps 6-7 are
+proven, not merely started.

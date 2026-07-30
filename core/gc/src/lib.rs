@@ -47,6 +47,12 @@ type RootProviderPointer = NonNull<dyn Trace>;
 
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
 thread_local!(static GC_SUSPENDED: Cell<usize> = const { Cell::new(0) });
+// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+//
+// A collection cannot trace through a `GcRefCell` while its value is mutably
+// borrowed. Track those borrows so allocation sites that could collect in that
+// state can be enumerated instead of failing later and elsewhere.
+thread_local!(static ACTIVE_WRITING_BORROWS: Cell<usize> = const { Cell::new(0) });
 // Set while the collector is tearing the whole heap down. Root counts live in the
 // allocation headers, so a handle dropped after its allocation was freed must not touch
 // them. During a sweep this cannot happen — an allocation a root points at is kept — but
@@ -175,6 +181,46 @@ impl Drop for NoGcScope {
 
 fn collection_suspended() -> bool {
     GC_SUSPENDED.with(Cell::get) > 0
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+pub(crate) fn begin_writing_borrow() {
+    ACTIVE_WRITING_BORROWS.with(|active| active.set(active.get() + 1));
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+pub(crate) fn end_writing_borrow() {
+    ACTIVE_WRITING_BORROWS.with(|active| {
+        active.set(
+            active
+                .get()
+                .checked_sub(1)
+                .expect("unbalanced `GcRefCell` writing borrow"),
+        );
+    });
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+fn diagnose_allocation_during_writing_borrow<T>() {
+    if collection_suspended() || ACTIVE_WRITING_BORROWS.with(Cell::get) == 0 {
+        return;
+    }
+
+    thread_local!(static ENABLED: bool = std::env::var_os("BOA_GC_DIAGNOSE_WRITING_ALLOC").is_some());
+    if !ENABLED.with(|enabled| *enabled) {
+        return;
+    }
+
+    panic!(
+        "#330: allocated `{}` while a `GcRefCell` writing borrow was active\n{}",
+        std::any::type_name::<T>(),
+        std::backtrace::Backtrace::force_capture(),
+    );
+}
+
+#[cfg(test)]
+pub(crate) fn active_writing_borrows() -> usize {
+    ACTIVE_WRITING_BORROWS.with(Cell::get)
 }
 
 /// Whether the collector is freeing the entire heap, so allocation headers may already
@@ -449,6 +495,7 @@ struct Allocator;
 impl Allocator {
     /// Allocate a new garbage collected value to the Garbage Collector's heap.
     fn alloc_gc<T: Trace>(value: GcBox<T>) -> NonNull<GcBox<T>> {
+        diagnose_allocation_during_writing_borrow::<T>();
         let element_size = size_of_val::<GcBox<T>>(&value);
         // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
         let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
@@ -474,6 +521,7 @@ impl Allocator {
     fn alloc_ephemeron<K: Trace + ?Sized, V: Trace>(
         value: EphemeronBox<K, V>,
     ) -> NonNull<EphemeronBox<K, V>> {
+        diagnose_allocation_during_writing_borrow::<EphemeronBox<K, V>>();
         let element_size = size_of_val::<EphemeronBox<K, V>>(&value);
         // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
         let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };

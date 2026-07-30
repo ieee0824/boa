@@ -1,5 +1,23 @@
 use super::run_test;
-use crate::{GcEdge, GcRefCell, Rooted};
+use crate::{GcEdge, GcRefCell, Rooted, active_writing_borrows};
+
+#[test]
+fn tracks_active_writing_borrows() {
+    run_test(|| {
+        let first = GcRefCell::new(1);
+        let second = GcRefCell::new(2);
+
+        assert_eq!(active_writing_borrows(), 0);
+        let first_borrow = first.borrow_mut();
+        assert_eq!(active_writing_borrows(), 1);
+        let second_borrow = second.borrow_mut();
+        assert_eq!(active_writing_borrows(), 2);
+        drop(first_borrow);
+        assert_eq!(active_writing_borrows(), 1);
+        drop(second_borrow);
+        assert_eq!(active_writing_borrows(), 0);
+    });
+}
 
 #[test]
 fn boa_borrow_mut_test() {
