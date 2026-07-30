@@ -356,6 +356,12 @@ impl Context {
                 .into());
         }
 
+        // The builder holds the class's prototype, constructor and shapes in locals until
+        // `register_class` links them into the realm, so a collection in that window
+        // would see no root for any of them. Registering one class allocates a bounded
+        // amount, so suspending collection across it is the cheapest correct answer.
+        let _no_gc = boa_gc::NoGcScope::new();
+
         let mut class_builder = ClassBuilder::new::<C>(self);
         C::init(&mut class_builder)?;
 

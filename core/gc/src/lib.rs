@@ -345,7 +345,10 @@ impl Default for GcConfig {
 /// Lets a run force a tiny collection threshold so that missing root
 /// registrations surface immediately instead of depending on allocation timing.
 fn diagnostic_threshold() -> Option<usize> {
-    std::env::var("BOA_GC_THRESHOLD").ok()?.parse().ok()
+    thread_local!(static FORCED: Option<usize> = std::env::var("BOA_GC_THRESHOLD")
+        .ok()
+        .and_then(|value| value.parse().ok()));
+    FORCED.with(|forced| *forced)
 }
 
 /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
@@ -489,6 +492,15 @@ impl Allocator {
 
         if gc.runtime.bytes_allocated > gc.config.threshold {
             Collector::collect(gc);
+
+            // TEMPORARY #330 DIAGNOSTIC — remove before merging.
+            //
+            // A forced threshold must stay forced. Letting it grow below would make a
+            // run that asked to collect on every allocation stop doing so after the
+            // first collection, which is the opposite of what the diagnostic is for.
+            if diagnostic_threshold().is_some() {
+                return;
+            }
 
             // Post collection check
             // If the allocated bytes are still above the threshold, increase the threshold.
@@ -791,6 +803,15 @@ impl Collector {
                 header.unmark();
 
                 true
+            } else if diagnose_roots() {
+                // TEMPORARY #330 DIAGNOSTIC — remove before merging.
+                //
+                // Leak and poison rather than free, for the same reason as the strong
+                // allocations above.
+                *total_allocated -= size_of_val(eph_ref);
+                header.poison();
+
+                false
             } else {
                 // SAFETY: The algorithm ensures only unmarked/unreachable pointers are dropped.
                 // The caller must ensure all pointers were allocated by `Box::into_raw(Box::new(..))`.

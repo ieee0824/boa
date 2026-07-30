@@ -507,6 +507,12 @@ impl<'realm> FunctionObjectBuilder<'realm> {
 pub struct ObjectInitializer<'ctx> {
     context: &'ctx mut Context,
     object: JsObject,
+
+    /// The object under construction, and every function installed on it, are reachable
+    /// only through this builder until [`Self::build`] hands them over. Nothing registers
+    /// them as roots, so collection has to wait for the builder to finish. Building one
+    /// object allocates a bounded amount.
+    _no_gc: boa_gc::NoGcScope,
 }
 
 impl<'ctx> ObjectInitializer<'ctx> {
@@ -514,7 +520,11 @@ impl<'ctx> ObjectInitializer<'ctx> {
     #[inline]
     pub fn new(context: &'ctx mut Context) -> Self {
         let object = JsObject::with_object_proto(context.intrinsics());
-        Self { context, object }
+        Self {
+            context,
+            object,
+            _no_gc: boa_gc::NoGcScope::new(),
+        }
     }
 
     /// Create a new `ObjectBuilder` with custom [`NativeObject`] data.
@@ -524,7 +534,11 @@ impl<'ctx> ObjectInitializer<'ctx> {
             context.intrinsics().constructors().object().prototype(),
             data,
         );
-        Self { context, object }
+        Self {
+            context,
+            object,
+            _no_gc: boa_gc::NoGcScope::new(),
+        }
     }
 
     /// Create a new `ObjectBuilder` with custom [`NativeObject`] data and custom prototype.
@@ -535,7 +549,11 @@ impl<'ctx> ObjectInitializer<'ctx> {
     ) -> Self {
         let object =
             JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), proto, data);
-        Self { context, object }
+        Self {
+            context,
+            object,
+            _no_gc: boa_gc::NoGcScope::new(),
+        }
     }
 
     /// Add a function to the object.
@@ -620,6 +638,8 @@ impl<'ctx> ObjectInitializer<'ctx> {
 #[derive(Debug)]
 pub struct ConstructorBuilder<'ctx> {
     context: &'ctx mut Context,
+    /// See [`ObjectInitializer`]'s field of the same name.
+    _no_gc: boa_gc::NoGcScope,
     function: NativeFunction,
     constructor_object: Object<OrdinaryObject>,
     has_prototype_property: bool,
@@ -638,6 +658,7 @@ impl<'ctx> ConstructorBuilder<'ctx> {
     pub fn new(context: &'ctx mut Context, function: NativeFunction) -> ConstructorBuilder<'ctx> {
         Self {
             context,
+            _no_gc: boa_gc::NoGcScope::new(),
             function,
             constructor_object: Object {
                 data: ObjectData::new(OrdinaryObject),

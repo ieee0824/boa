@@ -99,6 +99,22 @@ impl<K: Trace + ?Sized, V: Trace> EphemeronBox<K, V> {
     }
 }
 
+impl<K: Trace + ?Sized, V: Trace> EphemeronBox<K, V> {
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    ///
+    /// Reports an ephemeron the collector reclaimed while a handle to it was still in
+    /// use, which means the holder is not registered as a root.
+    pub(crate) fn assert_not_reclaimed(&self) {
+        if crate::diagnose_roots() {
+            assert!(
+                !self.header.is_poisoned(),
+                "#330: accessed an ephemeron the collector already reclaimed — its \
+                 holder is not registered as a GC root"
+            );
+        }
+    }
+}
+
 pub(crate) trait ErasedEphemeronBox {
     /// Gets the header of the `EphemeronBox`.
     fn header(&self) -> &GcHeader;

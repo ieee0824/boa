@@ -122,13 +122,15 @@ impl Realm {
     /// Create a new [`Realm`].
     #[inline]
     pub fn create(hooks: &dyn HostHooks, root_shape: &RootShape) -> JsResult<Self> {
-        // The intrinsics, the global object and the global `this` are held only in these
-        // locals until `RealmInner` is allocated as a root below, so a collection in that
-        // window would see no root for any of them. Bootstrap allocates a bounded amount,
-        // so suspending collection across it is the cheapest correct answer.
-        let realm = {
-            let _no_gc = boa_gc::NoGcScope::new();
+        // Bootstrap holds what it builds in locals and only links it into the heap at the
+        // end: the intrinsics, global object and global `this` until `RealmInner` is
+        // allocated as a root, and then each builtin's constructor, prototype and property
+        // storage until `initialize` installs them. A collection in either window would
+        // see no root for any of it. Creating a realm allocates a bounded amount, so
+        // suspending collection across it is the cheapest correct answer.
+        let _no_gc = boa_gc::NoGcScope::new();
 
+        let realm = {
             let intrinsics = Intrinsics::uninit(root_shape).ok_or_else(|| {
                 JsNativeError::typ().with_message("failed to create the realm intrinsics")
             })?;

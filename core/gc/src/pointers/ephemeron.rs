@@ -114,7 +114,11 @@ impl<K: Trace + ?Sized, V: Trace + Clone> EphemeronEdge<K, V> {
     pub fn value(&self) -> Option<V> {
         // SAFETY: this is safe because `EphemeronEdge` is tracked to always point to a valid pointer
         // `inner_ptr`.
-        unsafe { self.inner_ptr.as_ref().value().cloned() }
+        // SAFETY: the pointer stays valid while this handle is live.
+        let inner = unsafe { self.inner_ptr.as_ref() };
+        inner.assert_not_reclaimed();
+        // SAFETY: forwarded from this function's existing contract.
+        unsafe { inner.value() }.cloned()
     }
 
     /// Gets the stored key of this `EphemeronEdge`, or `None` if the key was already garbage collected.
@@ -123,7 +127,11 @@ impl<K: Trace + ?Sized, V: Trace + Clone> EphemeronEdge<K, V> {
     pub fn key(&self) -> Option<GcEdge<K>> {
         // SAFETY: this is safe because `EphemeronEdge` is tracked to always point to a valid pointer
         // `inner_ptr`.
-        let key_ptr = unsafe { self.inner_ptr.as_ref().key_ptr() }?;
+        // SAFETY: the pointer stays valid while this handle is live.
+        let inner = unsafe { self.inner_ptr.as_ref() };
+        inner.assert_not_reclaimed();
+        // SAFETY: the pointer stays valid while this handle is live.
+        let key_ptr = unsafe { inner.key_ptr() }?;
 
         // SAFETY: the key remains owned by the collector while this ephemeron is live.
         Some(GcEdge::from(unsafe { Gc::from_raw(key_ptr) }))
@@ -134,7 +142,11 @@ impl<K: Trace + ?Sized, V: Trace + Clone> EphemeronEdge<K, V> {
     pub fn has_value(&self) -> bool {
         // SAFETY: this is safe because `EphemeronEdge` is tracked to always point to a valid pointer
         // `inner_ptr`.
-        unsafe { self.inner_ptr.as_ref().value().is_some() }
+        // SAFETY: the pointer stays valid while this handle is live.
+        let inner = unsafe { self.inner_ptr.as_ref() };
+        inner.assert_not_reclaimed();
+        // SAFETY: forwarded from this function's existing contract.
+        unsafe { inner.value() }.is_some()
     }
 }
 
