@@ -901,7 +901,8 @@ fn async_module_entry_propagates_suspension_without_top_level_await() {
 
 #[test]
 fn async_module_entry_preserves_non_tla_dependency_order() {
-    let loader = Rc::new(SimpleModuleLoader::new(Path::new(".")).unwrap());
+    let root = std::env::current_dir().unwrap();
+    let loader = Rc::new(SimpleModuleLoader::new(&root).unwrap());
     let mut context = Context::builder()
         .module_loader(loader.clone())
         .build()
@@ -910,7 +911,6 @@ fn async_module_entry_preserves_non_tla_dependency_order() {
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
-    let root = std::env::current_dir().unwrap();
     let dependency = Module::parse(
         Source::from_reader(
             &b"globalThis.order = ['dependency-before']; export const value = suspend() + 1; order.push('dependency-after')"[..],
@@ -1032,12 +1032,12 @@ fn async_module_entry_reports_evaluation_and_load_errors() {
 
 #[test]
 fn async_module_entry_preserves_mixed_tla_dependency_order() {
-    let loader = Rc::new(SimpleModuleLoader::new(Path::new(".")).unwrap());
+    let root = std::env::current_dir().unwrap();
+    let loader = Rc::new(SimpleModuleLoader::new(&root).unwrap());
     let mut context = Context::builder()
         .module_loader(loader.clone())
         .build()
         .unwrap();
-    let root = std::env::current_dir().unwrap();
     let dependency = Module::parse(
         Source::from_reader(
             &b"globalThis.mixedOrder = ['dependency-before']; await Promise.resolve(); mixedOrder.push('dependency-after'); export const value = 20"[..],
