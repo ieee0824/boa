@@ -895,17 +895,10 @@ impl Context {
         self.vm.stack.truncate_to_frame(&self.vm.frame);
 
         let result = self.vm.take_return_value();
-        if self
-            .vm
-            .native_call_continuations
-            .last()
-            .is_some_and(|boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == self.vm.frames.len()))
-        {
-            let boundary = self
-                .vm
-                .native_call_continuations
-                .pop()
-                .expect("a native continuation boundary was checked above");
+        let frame_depth = self.vm.frames.len();
+        if let Some(boundary) = self.vm.native_call_continuations.pop_if(
+            |boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == frame_depth),
+        ) {
             self.vm.pop_frame().expect("callback frame must exist");
             let continuation_depth = self.vm.native_call_continuations.len();
             self.vm.native_call_continuation_active = true;
@@ -1003,20 +996,10 @@ impl Context {
     }
 
     fn handle_native_continuation_throw(&mut self) -> Option<ControlFlow<CompletionRecord>> {
-        if !self
-            .vm
-            .native_call_continuations
-            .last()
-            .is_some_and(|boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == self.vm.frames.len()))
-        {
-            return None;
-        }
-
-        let boundary = self
-            .vm
-            .native_call_continuations
-            .pop()
-            .expect("a native continuation boundary was checked above");
+        let frame_depth = self.vm.frames.len();
+        let boundary = self.vm.native_call_continuations.pop_if(
+            |boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == frame_depth),
+        )?;
         self.vm.environments.truncate(self.vm.frame.env_fp as usize);
         self.vm.stack.truncate_to_frame(&self.vm.frame);
         self.vm.pop_frame().expect("callback frame must exist");
