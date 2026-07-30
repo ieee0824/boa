@@ -9,7 +9,7 @@ use crate::{
     builtins::promise::{PromiseCapability, ResolvingFunctions},
     environments::EnvironmentStack,
     module::ModuleEdge,
-    native_function::NativeCallSuspension,
+    native_function::{NativeCallContinuation, NativeCallSuspension},
     object::{JsFunction, JsFunctionEdge},
     realm::Realm,
     script::{Script, ScriptEdge},
@@ -17,6 +17,9 @@ use crate::{
 use boa_gc::{Finalize, Rooted, Trace, custom_trace};
 use shadow_stack::ShadowStack;
 use std::{future::Future, ops::ControlFlow, pin::Pin, task};
+
+#[cfg(test)]
+use std::{cell::Cell, rc::Rc};
 
 #[cfg(feature = "trace")]
 use crate::sys::time::Instant;
@@ -98,6 +101,13 @@ pub struct Vm {
 
     /// A synchronous native call waiting for an out-of-band host result.
     pub(crate) pending_native_call: Option<NativeCallSuspension>,
+
+    pub(crate) native_call_continuations: Vec<NativeCallBoundary>,
+
+    pub(crate) native_call_continuation_active: bool,
+
+    #[cfg(test)]
+    pub(crate) instruction_count: Rc<Cell<u64>>,
 
     /// realm holds both the global object and the environment
     pub(crate) realm: Realm,
@@ -489,6 +499,10 @@ impl Vm {
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
+            native_call_continuations: Vec::new(),
+            native_call_continuation_active: false,
+            #[cfg(test)]
+            instruction_count: Rc::new(Cell::new(0)),
             realm,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
@@ -623,6 +637,18 @@ impl Vm {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct NativeCallBoundary {
+    pub(crate) target: NativeCallBoundaryTarget,
+    pub(crate) continuation: NativeCallContinuation,
+}
+
+#[derive(Debug)]
+pub(crate) enum NativeCallBoundaryTarget {
+    FrameDepth(usize),
+    NativePlaceholder(JsObject),
+}
+
 #[allow(clippy::print_stdout)]
 #[cfg(feature = "trace")]
 impl Context {
@@ -722,10 +748,42 @@ impl Context {
         placeholder: &JsObject,
         result: JsResult<JsValue>,
     ) -> ControlFlow<CompletionRecord> {
+        let continuation = self
+            .vm
+            .native_call_continuations
+            .last()
+            .and_then(|boundary| match &boundary.target {
+                NativeCallBoundaryTarget::NativePlaceholder(target)
+                    if JsObject::equals(target, placeholder) =>
+                {
+                    Some(())
+                }
+                _ => None,
+            })
+            .and_then(|()| self.vm.native_call_continuations.pop());
+
         match result {
             Ok(value) => {
                 if self.vm.stack.replace_object(placeholder, value) {
-                    ControlFlow::Continue(())
+                    if let Some(boundary) = continuation {
+                        let value = self.vm.stack.pop();
+                        let continuation_depth = self.vm.native_call_continuations.len();
+                        let continuation_was_active = self.vm.native_call_continuation_active;
+                        self.vm.native_call_continuation_active = true;
+                        let result = boundary.continuation.call(Ok(value), self);
+                        self.vm.native_call_continuation_active = continuation_was_active;
+                        match result {
+                            Ok(value) => {
+                                if self.vm.native_call_continuations.len() == continuation_depth {
+                                    self.vm.stack.push(value);
+                                }
+                                ControlFlow::Continue(())
+                            }
+                            Err(error) => self.handle_error(error),
+                        }
+                    } else {
+                        ControlFlow::Continue(())
+                    }
                 } else {
                     self.handle_error(
                         JsNativeError::error()
@@ -737,10 +795,39 @@ impl Context {
                 }
             }
             Err(error) => {
-                self.vm
+                if self
+                    .vm
                     .stack
-                    .replace_object(placeholder, JsValue::undefined());
-                self.handle_error(error)
+                    .replace_object(placeholder, JsValue::undefined())
+                {
+                    if let Some(boundary) = continuation {
+                        drop(self.vm.stack.pop());
+                        let continuation_depth = self.vm.native_call_continuations.len();
+                        let continuation_was_active = self.vm.native_call_continuation_active;
+                        self.vm.native_call_continuation_active = true;
+                        let result = boundary.continuation.call(Err(error), self);
+                        self.vm.native_call_continuation_active = continuation_was_active;
+                        match result {
+                            Ok(value) => {
+                                if self.vm.native_call_continuations.len() == continuation_depth {
+                                    self.vm.stack.push(value);
+                                }
+                                ControlFlow::Continue(())
+                            }
+                            Err(error) => self.handle_error(error),
+                        }
+                    } else {
+                        self.handle_error(error)
+                    }
+                } else {
+                    self.handle_error(
+                        JsNativeError::error()
+                            .with_message(
+                                "suspended native call result was consumed before VM suspension",
+                            )
+                            .into(),
+                    )
+                }
             }
         }
     }
@@ -756,6 +843,11 @@ impl Context {
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
     {
+        #[cfg(test)]
+        self.vm
+            .instruction_count
+            .set(self.vm.instruction_count.get() + 1);
+
         #[cfg(feature = "fuzz")]
         {
             if self.instructions_remaining == 0 {
@@ -829,6 +921,32 @@ impl Context {
         self.vm.stack.truncate_to_frame(&self.vm.frame);
 
         let result = self.vm.take_return_value();
+        let frame_depth = self.vm.frames.len();
+        if let Some(boundary) = self.vm.native_call_continuations.pop_if(
+            |boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == frame_depth),
+        ) {
+            self.vm.pop_frame().expect("callback frame must exist");
+            let continuation_depth = self.vm.native_call_continuations.len();
+            let continuation_was_active = self.vm.native_call_continuation_active;
+            self.vm.native_call_continuation_active = true;
+            let continuation_result = boundary.continuation.call(Ok(result), self);
+            self.vm.native_call_continuation_active = continuation_was_active;
+            return match continuation_result {
+                Ok(value) => {
+                    if self.vm.native_call_continuations.len() == continuation_depth {
+                        if self.vm.frames.is_empty() || exit_early {
+                            return ControlFlow::Break(CompletionRecord::Normal(value));
+                        }
+                        self.vm.stack.push(value);
+                    }
+                    ControlFlow::Continue(())
+                }
+                Err(error) if self.vm.frames.is_empty() || exit_early => {
+                    ControlFlow::Break(CompletionRecord::Throw(error))
+                }
+                Err(error) => self.handle_error(error),
+            };
+        }
         if exit_early {
             return ControlFlow::Break(CompletionRecord::Normal(result));
         }
@@ -860,6 +978,10 @@ impl Context {
             );
         }
 
+        if let Some(result) = self.handle_native_continuation_throw() {
+            return result;
+        }
+
         let mut env_fp = self.vm.frame().env_fp;
         if self.vm.frame().exit_early() {
             self.vm.environments.truncate(env_fp as usize);
@@ -883,6 +1005,10 @@ impl Context {
                 return ControlFlow::Continue(());
             }
 
+            if let Some(result) = self.handle_native_continuation_throw() {
+                return result;
+            }
+
             if exit_early {
                 return ControlFlow::Break(CompletionRecord::Throw(
                     self.vm
@@ -900,6 +1026,42 @@ impl Context {
         self.vm.environments.truncate(env_fp as usize);
         self.vm.stack.truncate_to_frame(&frame);
         ControlFlow::Continue(())
+    }
+
+    fn handle_native_continuation_throw(&mut self) -> Option<ControlFlow<CompletionRecord>> {
+        let frame_depth = self.vm.frames.len();
+        let boundary = self.vm.native_call_continuations.pop_if(
+            |boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == frame_depth),
+        )?;
+        self.vm.environments.truncate(self.vm.frame.env_fp as usize);
+        self.vm.stack.truncate_to_frame(&self.vm.frame);
+        let exit_early = self.vm.frame().exit_early();
+        self.vm.pop_frame().expect("callback frame must exist");
+        let error = self
+            .vm
+            .pending_exception
+            .take()
+            .expect("a thrown completion must have an exception");
+        let continuation_depth = self.vm.native_call_continuations.len();
+        let continuation_was_active = self.vm.native_call_continuation_active;
+        self.vm.native_call_continuation_active = true;
+        let continuation_result = boundary.continuation.call(Err(error), self);
+        self.vm.native_call_continuation_active = continuation_was_active;
+        Some(match continuation_result {
+            Ok(value) => {
+                if self.vm.native_call_continuations.len() == continuation_depth {
+                    if self.vm.frames.is_empty() || exit_early {
+                        return Some(ControlFlow::Break(CompletionRecord::Normal(value)));
+                    }
+                    self.vm.stack.push(value);
+                }
+                ControlFlow::Continue(())
+            }
+            Err(error) if self.vm.frames.is_empty() || exit_early => {
+                ControlFlow::Break(CompletionRecord::Throw(error))
+            }
+            Err(error) => self.handle_error(error),
+        })
     }
 
     /// Runs the current frame to completion, yielding to the caller each time `budget`
@@ -933,18 +1095,25 @@ impl Context {
                 ControlFlow::Break(value) => return value,
             }
 
-            if let Some(suspension) = self.vm.pending_native_call.take() {
+            while let Some(suspension) = self.vm.pending_native_call.take() {
                 let placeholder = suspension.placeholder();
-                if !self.vm.stack.contains_object(&placeholder) {
+                let placeholder_was_consumed = !self.vm.stack.contains_object(&placeholder);
+                if placeholder_was_consumed {
                     let error = JsNativeError::error()
                         .with_message("native call cannot suspend from this execution path")
                         .into();
                     let _ = suspension.resume(Err(error));
                 }
                 let result = suspension.wait().await;
-                if let ControlFlow::Break(value) =
+                let completion = if placeholder_was_consumed {
+                    match result {
+                        Ok(_) => unreachable!("the rejected suspension completed successfully"),
+                        Err(error) => self.handle_error(error),
+                    }
+                } else {
                     self.apply_native_call_completion(&placeholder, result)
-                {
+                };
+                if let ControlFlow::Break(value) = completion {
                     return value;
                 }
             }

@@ -421,7 +421,9 @@ impl JsObject {
 
         let result = context.run().consume();
 
-        context.vm.pop_frame().expect("frame must exist");
+        if context.vm.frames.len() > frame_index {
+            context.vm.pop_frame().expect("frame must exist");
+        }
 
         result
     }
@@ -476,7 +478,9 @@ impl JsObject {
         }
 
         let result = context.run_async_with_budget(budget).await.consume();
-        context.vm.pop_frame().expect("frame must exist");
+        if context.vm.frames.len() > frame_index {
+            context.vm.pop_frame().expect("frame must exist");
+        }
         result
     }
 

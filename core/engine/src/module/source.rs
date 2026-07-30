@@ -1203,7 +1203,7 @@ impl SourceTextModule {
         }
 
         // 12. If module.[[PendingAsyncDependencies]] > 0 or module.[[HasTLA]] is true, then
-        if pending_async_dependencies > 0 || self.code.has_tla {
+        if pending_async_dependencies > 0 || self.code.has_tla || context.async_jobs_enabled {
             // a. Assert: module.[[AsyncEvaluation]] is false and was never previously set to true.
             {
                 let ModuleStatus::Evaluating {
@@ -1314,8 +1314,9 @@ impl SourceTextModule {
             &*self.status.borrow(),
             ModuleStatus::Evaluating { .. } | ModuleStatus::EvaluatingAsync { .. }
         ));
-        // 2. Assert: module.[[HasTLA]] is true.
-        debug_assert!(self.code.has_tla);
+        // Async host entry points also route modules without top-level await
+        // through this job so native calls in their bodies can suspend.
+        debug_assert!(self.code.has_tla || context.async_jobs_enabled);
 
         // 3. Let capability be ! NewPromiseCapability(%Promise%).
         let capability = PromiseCapability::new(
@@ -2024,7 +2025,7 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) {
 
         // b. Else if m.[[HasTLA]] is true, then
         let has_tla = m_src.code.has_tla;
-        if has_tla {
+        if has_tla || context.async_jobs_enabled {
             // i. Perform ExecuteAsyncModule(m).
             m_src.execute_async(&m, context);
         } else {
