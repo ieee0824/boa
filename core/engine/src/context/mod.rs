@@ -202,7 +202,8 @@ impl Context {
 
     /// Suspends the currently executing synchronous native call.
     ///
-    /// The native function must return normally after calling this method. During
+    /// After calling this method, the native function must not re-enter the VM or call JavaScript;
+    /// it must return normally and immediately so that the suspension can propagate. During
     /// [`Script::evaluate_async`](crate::Script::evaluate_async), execution then waits for the
     /// returned handle to be completed and uses that completion as the native call's result.
     pub fn suspend_native_call(&mut self) -> JsResult<NativeCallSuspension> {
