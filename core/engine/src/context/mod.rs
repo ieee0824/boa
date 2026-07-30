@@ -528,12 +528,9 @@ impl Context {
     #[allow(clippy::future_not_send)]
     pub async fn run_jobs_async(&mut self) -> JsResult<()> {
         let executor = self.job_executor();
-        self.async_jobs_enabled = true;
-        let result = executor
+        executor
             .run_jobs_async(&crate::job::AsyncContext::new(&mut *self))
-            .await;
-        self.async_jobs_enabled = false;
-        result
+            .await
     }
 
     /// Abstract operation [`ClearKeptObjects`][clear].

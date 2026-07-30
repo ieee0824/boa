@@ -292,7 +292,10 @@ impl GenericJob {
 pub type BoxedFuture<'a> = Pin<Box<dyn Future<Output = JsResult<JsValue>> + 'a>>;
 
 /// Mutable execution-context storage shared by asynchronous jobs.
-pub struct AsyncContext<'a>(RefCell<Option<&'a mut Context>>);
+pub struct AsyncContext<'a> {
+    context: RefCell<Option<&'a mut Context>>,
+    previous_async_jobs_enabled: bool,
+}
 
 impl Debug for AsyncContext<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -303,26 +306,41 @@ impl Debug for AsyncContext<'_> {
 impl<'a> AsyncContext<'a> {
     /// Creates async job context storage from an execution context.
     pub fn new(context: &'a mut Context) -> Self {
-        Self(RefCell::new(Some(context)))
+        Self::with_async_jobs_enabled(context, true)
+    }
+
+    /// Creates async job context storage without enabling asynchronous suspension.
+    pub fn new_sync(context: &'a mut Context) -> Self {
+        Self::with_async_jobs_enabled(context, false)
+    }
+
+    fn with_async_jobs_enabled(context: &'a mut Context, async_jobs_enabled: bool) -> Self {
+        let previous_async_jobs_enabled = context.async_jobs_enabled;
+        context.async_jobs_enabled = async_jobs_enabled;
+
+        Self {
+            context: RefCell::new(Some(context)),
+            previous_async_jobs_enabled,
+        }
     }
 
     /// Immutably borrows the execution context.
     pub fn borrow(&self) -> Ref<'_, Context> {
-        Ref::map(self.0.borrow(), |context| {
+        Ref::map(self.context.borrow(), |context| {
             context.as_deref().expect("execution context is in use")
         })
     }
 
     /// Mutably borrows the execution context until the returned guard is dropped.
     pub fn borrow_mut(&self) -> RefMut<'_, Context> {
-        RefMut::map(self.0.borrow_mut(), |context| {
+        RefMut::map(self.context.borrow_mut(), |context| {
             context.as_deref_mut().expect("execution context is in use")
         })
     }
 
     pub(crate) fn take(&self) -> ContextLease<'_, 'a> {
         let context = self
-            .0
+            .context
             .borrow_mut()
             .take()
             .expect("execution context is already in use");
@@ -354,7 +372,15 @@ impl std::ops::DerefMut for ContextLease<'_, '_> {
 
 impl Drop for ContextLease<'_, '_> {
     fn drop(&mut self) {
-        self.owner.0.replace(self.context.take());
+        self.owner.context.replace(self.context.take());
+    }
+}
+
+impl Drop for AsyncContext<'_> {
+    fn drop(&mut self) {
+        if let Some(context) = self.context.get_mut().as_deref_mut() {
+            context.async_jobs_enabled = self.previous_async_jobs_enabled;
+        }
     }
 }
 
@@ -417,7 +443,9 @@ impl NativeAsyncJob {
         }
     }
 
-    const fn is_exclusive(&self) -> bool {
+    /// Returns whether this async job requires exclusive access to the context while pending.
+    #[must_use]
+    pub const fn is_exclusive(&self) -> bool {
         self.exclusive
     }
 
@@ -563,7 +591,7 @@ impl PromiseJob {
         match self.0 {
             PromiseJobInner::Sync(job) => job.call(context),
             PromiseJobInner::Async { job, .. } => {
-                future::block_on(job.call(&AsyncContext::new(context)))
+                future::block_on(job.call(&AsyncContext::new_sync(context)))
             }
         }
     }
@@ -798,7 +826,7 @@ impl JobExecutor for SimpleJobExecutor {
     }
 
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        future::block_on(self.run_jobs_async(&AsyncContext::new(context)))
+        future::block_on(self.run_jobs_async(&AsyncContext::new_sync(context)))
     }
 
     fn run_jobs_async<'a>(self: Rc<Self>, context: &'a AsyncContext<'_>) -> JobExecutorFuture<'a> {

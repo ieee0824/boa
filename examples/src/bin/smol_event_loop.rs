@@ -105,7 +105,7 @@ impl JobExecutor for Queue {
     // While the sync flavor of `run_jobs` will block the current thread until all the jobs have finished...
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
         smol::block_on(
-            smol::LocalExecutor::new().run(self.run_jobs_async(&AsyncContext::new(context))),
+            smol::LocalExecutor::new().run(self.run_jobs_async(&AsyncContext::new_sync(context))),
         )
     }
 
@@ -115,7 +115,13 @@ impl JobExecutor for Queue {
             let mut group = FutureGroup::new();
             loop {
                 for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
-                    group.insert(job.call(context));
+                    if job.is_exclusive() {
+                        if let Err(err) = job.call(context).await {
+                            eprintln!("Uncaught {err}");
+                        }
+                    } else {
+                        group.insert(job.call(context));
+                    }
                 }
 
                 if group.is_empty()

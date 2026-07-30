@@ -3,6 +3,7 @@ use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
     Context, JsNativeError, JsNativeErrorKind, JsValue, Module, NativeFunction, Script, TestAction,
+    job::{AsyncContext, JobExecutor, SimpleJobExecutor},
     js_string,
     native_function::{NativeCallAlreadyResumed, NativeCallSuspension},
     object::{FunctionObjectBuilder, ObjectInitializer},
@@ -123,6 +124,44 @@ fn async_jobs_propagate_suspension_from_nested_promise_reaction() {
         .resume(Ok(JsValue::from(41)))
         .unwrap();
     future::block_on(jobs).unwrap();
+
+    assert_eq!(
+        context
+            .global_object()
+            .get(js_string!("result"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn direct_job_executor_run_jobs_async_enables_async_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.result = 0; Promise.resolve().then(() => suspend() + 1).then(value => result = value)",
+        ))
+        .unwrap();
+
+    let executor = context
+        .downcast_job_executor::<SimpleJobExecutor>()
+        .unwrap();
+    {
+        let async_context = AsyncContext::new(&mut context);
+        let mut jobs = Box::pin(executor.run_jobs_async(&async_context));
+
+        assert!(future::block_on(future::poll_once(jobs.as_mut())).is_none());
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::from(41)))
+            .unwrap();
+        future::block_on(jobs).unwrap();
+    }
 
     assert_eq!(
         context

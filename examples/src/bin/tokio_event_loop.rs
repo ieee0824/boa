@@ -110,8 +110,10 @@ impl JobExecutor for Queue {
             .build()
             .unwrap();
 
-        task::LocalSet::default()
-            .block_on(&runtime, self.run_jobs_async(&AsyncContext::new(context)))
+        task::LocalSet::default().block_on(
+            &runtime,
+            self.run_jobs_async(&AsyncContext::new_sync(context)),
+        )
     }
 
     // ...the async flavor won't, which allows concurrent execution with external async tasks.
@@ -120,7 +122,13 @@ impl JobExecutor for Queue {
             let mut group = FutureGroup::new();
             loop {
                 for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
-                    group.insert(job.call(context));
+                    if job.is_exclusive() {
+                        if let Err(err) = job.call(context).await {
+                            eprintln!("Uncaught {err}");
+                        }
+                    } else {
+                        group.insert(job.call(context));
+                    }
                 }
 
                 if group.is_empty()

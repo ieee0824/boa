@@ -644,7 +644,7 @@ impl JobExecutor for Executor {
     }
 
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        future::block_on(self.run_jobs_async(&AsyncContext::new(context)))
+        future::block_on(self.run_jobs_async(&AsyncContext::new_sync(context)))
     }
 
     fn run_jobs_async<'a>(
@@ -656,7 +656,13 @@ impl JobExecutor for Executor {
 
             loop {
                 for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
-                    group.insert(job.call(context));
+                    if job.is_exclusive() {
+                        if let Err(e) = job.call(context).await {
+                            self.printer.print(uncaught_job_error(&e));
+                        }
+                    } else {
+                        group.insert(job.call(context));
+                    }
                 }
 
                 if self.is_empty(&mut context.borrow_mut()) && group.is_empty() {
