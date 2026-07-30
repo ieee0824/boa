@@ -353,6 +353,37 @@ fn diagnostic_threshold() -> Option<usize> {
 
 /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
 ///
+/// When set to a type name fragment, the collector reports where it was when it
+/// reclaimed an allocation of that type. That is the allocation site that triggered the
+/// collection, so the backtrace names the operation that was holding the value in a
+/// local at the time — which is what the dereference-side report cannot show.
+fn poison_trace_filter() -> Option<&'static str> {
+    thread_local!(static FILTER: Option<&'static str> = std::env::var("BOA_GC_POISON_TRACE")
+        .ok()
+        .map(|value| &*Box::leak(value.into_boxed_str())));
+    FILTER.with(|filter| *filter)
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+fn report_poison(type_name: &str) {
+    let Some(filter) = poison_trace_filter() else {
+        return;
+    };
+    if !type_name.contains(filter) {
+        return;
+    }
+
+    #[allow(clippy::print_stderr, reason = "temporary #330 diagnostic")]
+    {
+        eprintln!(
+            "[#330] reclaimed {type_name} while collecting here:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+///
 /// When set, the collector leaks and poisons what it would have freed, so a missing
 /// root registration surfaces as a panic at the offending dereference.
 pub(crate) fn diagnose_roots() -> bool {
@@ -773,10 +804,7 @@ impl Collector {
                 // with a usable backtrace, rather than reading freed memory.
                 *total_allocated -= node_ref.size();
                 node_ref.header.poison();
-                #[allow(clippy::print_stderr, reason = "temporary #330 diagnostic")]
-                {
-                    eprintln!("[#330] collected {}", node_ref.type_name());
-                }
+                report_poison(node_ref.type_name());
 
                 false
             } else {
