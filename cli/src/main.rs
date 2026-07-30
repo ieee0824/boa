@@ -647,34 +647,39 @@ impl JobExecutor for Executor {
         future::block_on(self.run_jobs_async(&RefCell::new(context)))
     }
 
-    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()> {
-        let mut group = FutureGroup::new();
+    fn run_jobs_async<'a>(
+        self: Rc<Self>,
+        context: &'a RefCell<&mut Context>,
+    ) -> boa_engine::job::JobExecutorFuture<'a> {
+        Box::pin(async move {
+            let mut group = FutureGroup::new();
 
-        loop {
-            for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
-                group.insert(job.call(context));
-            }
+            loop {
+                for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
+                    group.insert(job.call(context));
+                }
 
-            if self.is_empty(&mut context.borrow_mut()) && group.is_empty() {
-                return Ok(());
-            }
+                if self.is_empty(&mut context.borrow_mut()) && group.is_empty() {
+                    return Ok(());
+                }
 
-            if let Some(Err(e)) = future::poll_once(group.next()).await.flatten() {
-                self.printer.print(uncaught_job_error(&e));
-            }
+                if let Some(Err(e)) = future::poll_once(group.next()).await.flatten() {
+                    self.printer.print(uncaught_job_error(&e));
+                }
 
-            {
-                let context = &mut context.borrow_mut();
-                self.drain_timeout_jobs(context);
-                self.drain_generic_jobs(context);
+                {
+                    let context = &mut context.borrow_mut();
+                    self.drain_timeout_jobs(context);
+                    self.drain_generic_jobs(context);
 
-                let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
-                for job in jobs {
-                    if let Err(e) = job.call(context) {
-                        self.printer.print(uncaught_job_error(&e));
+                    let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
+                    for job in jobs {
+                        if let Err(e) = job.call(context) {
+                            self.printer.print(uncaught_job_error(&e));
+                        }
                     }
                 }
             }
-        }
+        })
     }
 }

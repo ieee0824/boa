@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use boa_engine::{
     Context, JsNativeError, JsResult, JsString, JsValue, Module,
     builtins::promise::PromiseState,
-    job::{Job, JobExecutor, NativeAsyncJob, PromiseJob},
+    job::{Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
     js_string,
     module::ModuleLoader,
 };
@@ -174,28 +174,33 @@ impl JobExecutor for Queue {
     }
 
     // ...the async flavor won't, which allows concurrent execution with external async tasks.
-    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()> {
-        let mut group = FutureGroup::new();
-        loop {
-            for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
-                group.insert(job.call(context));
+    fn run_jobs_async<'a>(
+        self: Rc<Self>,
+        context: &'a RefCell<&mut Context>,
+    ) -> JobExecutorFuture<'a> {
+        Box::pin(async move {
+            let mut group = FutureGroup::new();
+            loop {
+                for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
+                    group.insert(job.call(context));
+                }
+
+                if group.is_empty() && self.promise_jobs.borrow().is_empty() {
+                    // Both queues are empty. We can exit.
+                    return Ok(());
+                }
+
+                // We have some jobs pending on the microtask queue. Try to poll the pending
+                // tasks once to see if any of them finished, and run the pending microtasks
+                // otherwise.
+                if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
+                    eprintln!("Uncaught {err}");
+                };
+
+                // Only one macrotask can be executed before the next drain of the microtask queue.
+                self.drain_jobs(&mut context.borrow_mut());
+                future::yield_now().await
             }
-
-            if group.is_empty() && self.promise_jobs.borrow().is_empty() {
-                // Both queues are empty. We can exit.
-                return Ok(());
-            }
-
-            // We have some jobs pending on the microtask queue. Try to poll the pending
-            // tasks once to see if any of them finished, and run the pending microtasks
-            // otherwise.
-            if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
-                eprintln!("Uncaught {err}");
-            };
-
-            // Only one macrotask can be executed before the next drain of the microtask queue.
-            self.drain_jobs(&mut context.borrow_mut());
-            future::yield_now().await
-        }
+        })
     }
 }

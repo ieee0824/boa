@@ -3,7 +3,7 @@ use boa_engine::job::{GenericJob, TimeoutJob};
 use boa_engine::{
     Context, JsArgs, JsNativeError, JsResult, JsValue, Script, Source,
     context::ContextBuilder,
-    job::{Job, JobExecutor, NativeAsyncJob, PromiseJob},
+    job::{Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
     js_string,
     native_function::NativeFunction,
     property::Attribute,
@@ -108,32 +108,37 @@ impl JobExecutor for Queue {
     }
 
     // ...the async flavor won't, which allows concurrent execution with external async tasks.
-    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()> {
-        let mut group = FutureGroup::new();
-        loop {
-            for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
-                group.insert(job.call(context));
-            }
+    fn run_jobs_async<'a>(
+        self: Rc<Self>,
+        context: &'a RefCell<&mut Context>,
+    ) -> JobExecutorFuture<'a> {
+        Box::pin(async move {
+            let mut group = FutureGroup::new();
+            loop {
+                for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
+                    group.insert(job.call(context));
+                }
 
-            if group.is_empty()
-                && self.async_jobs.borrow().is_empty()
-                && self.timeout_jobs.borrow().is_empty()
-                && self.generic_jobs.borrow().is_empty()
-            {
-                // All queues are empty. We can exit.
-                return Ok(());
-            }
+                if group.is_empty()
+                    && self.async_jobs.borrow().is_empty()
+                    && self.timeout_jobs.borrow().is_empty()
+                    && self.generic_jobs.borrow().is_empty()
+                {
+                    // All queues are empty. We can exit.
+                    return Ok(());
+                }
 
-            // We could have some jobs pending on the microtask queue. Try to poll the pending
-            // tasks once to see if any of them finished.
-            if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
-                eprintln!("Uncaught {err}");
-            }
+                // We could have some jobs pending on the microtask queue. Try to poll the pending
+                // tasks once to see if any of them finished.
+                if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
+                    eprintln!("Uncaught {err}");
+                }
 
-            // Only one macrotask can be executed before the next drain of the microtask queue.
-            self.drain_jobs(&mut context.borrow_mut());
-            future::yield_now().await;
-        }
+                // Only one macrotask can be executed before the next drain of the microtask queue.
+                self.drain_jobs(&mut context.borrow_mut());
+                future::yield_now().await;
+            }
+        })
     }
 }
 
