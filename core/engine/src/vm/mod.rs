@@ -631,8 +631,14 @@ impl Vm {
 
 #[derive(Debug)]
 pub(crate) struct NativeCallBoundary {
-    pub(crate) frame_depth: usize,
+    pub(crate) target: NativeCallBoundaryTarget,
     pub(crate) continuation: NativeCallContinuation,
+}
+
+#[derive(Debug)]
+pub(crate) enum NativeCallBoundaryTarget {
+    FrameDepth(usize),
+    NativePlaceholder(JsObject),
 }
 
 #[allow(clippy::print_stdout)]
@@ -734,10 +740,41 @@ impl Context {
         placeholder: &JsObject,
         result: JsResult<JsValue>,
     ) -> ControlFlow<CompletionRecord> {
+        let continuation = self
+            .vm
+            .native_call_continuations
+            .last()
+            .and_then(|boundary| match &boundary.target {
+                NativeCallBoundaryTarget::NativePlaceholder(target)
+                    if JsObject::equals(target, placeholder) =>
+                {
+                    Some(())
+                }
+                _ => None,
+            })
+            .and_then(|()| self.vm.native_call_continuations.pop());
+
         match result {
             Ok(value) => {
                 if self.vm.stack.replace_object(placeholder, value) {
-                    ControlFlow::Continue(())
+                    if let Some(boundary) = continuation {
+                        let value = self.vm.stack.pop();
+                        let continuation_depth = self.vm.native_call_continuations.len();
+                        self.vm.native_call_continuation_active = true;
+                        let result = boundary.continuation.call(Ok(value), self);
+                        self.vm.native_call_continuation_active = false;
+                        match result {
+                            Ok(value) => {
+                                if self.vm.native_call_continuations.len() == continuation_depth {
+                                    self.vm.stack.push(value);
+                                }
+                                ControlFlow::Continue(())
+                            }
+                            Err(error) => self.handle_error(error),
+                        }
+                    } else {
+                        ControlFlow::Continue(())
+                    }
                 } else {
                     self.handle_error(
                         JsNativeError::error()
@@ -752,7 +789,24 @@ impl Context {
                 self.vm
                     .stack
                     .replace_object(placeholder, JsValue::undefined());
-                self.handle_error(error)
+                if let Some(boundary) = continuation {
+                    drop(self.vm.stack.pop());
+                    let continuation_depth = self.vm.native_call_continuations.len();
+                    self.vm.native_call_continuation_active = true;
+                    let result = boundary.continuation.call(Err(error), self);
+                    self.vm.native_call_continuation_active = false;
+                    match result {
+                        Ok(value) => {
+                            if self.vm.native_call_continuations.len() == continuation_depth {
+                                self.vm.stack.push(value);
+                            }
+                            ControlFlow::Continue(())
+                        }
+                        Err(error) => self.handle_error(error),
+                    }
+                } else {
+                    self.handle_error(error)
+                }
             }
         }
     }
@@ -845,7 +899,7 @@ impl Context {
             .vm
             .native_call_continuations
             .last()
-            .is_some_and(|boundary| boundary.frame_depth == self.vm.frames.len())
+            .is_some_and(|boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == self.vm.frames.len()))
         {
             let boundary = self
                 .vm
@@ -953,7 +1007,7 @@ impl Context {
             .vm
             .native_call_continuations
             .last()
-            .is_some_and(|boundary| boundary.frame_depth == self.vm.frames.len())
+            .is_some_and(|boundary| matches!(boundary.target, NativeCallBoundaryTarget::FrameDepth(depth) if depth == self.vm.frames.len()))
         {
             return None;
         }

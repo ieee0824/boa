@@ -211,7 +211,7 @@ impl Context {
     /// [`Script::evaluate_async`](crate::Script::evaluate_async), execution then waits for the
     /// returned handle to be completed and uses that completion as the native call's result.
     pub fn suspend_native_call(&mut self) -> JsResult<NativeCallSuspension> {
-        if self.vm.native_active_function.is_none() && !self.vm.native_call_continuation_active {
+        if self.vm.native_active_function.is_none() {
             return Err(JsNativeError::error()
                 .with_message("native call suspension requires an active native function")
                 .into());
@@ -250,7 +250,7 @@ impl Context {
         args: &[JsValue],
         continuation: NativeCallContinuation,
     ) -> JsResult<JsValue> {
-        if self.vm.native_active_function.is_none() {
+        if self.vm.native_active_function.is_none() && !self.vm.native_call_continuation_active {
             return Err(JsNativeError::error()
                 .with_message("native call continuation requires an active native function")
                 .into());
@@ -260,6 +260,17 @@ impl Context {
         self.vm.stack.push(callback.clone());
         self.vm.stack.calling_convention_push_arguments(args);
         if callback.__call__(args.len()).resolve(self)? {
+            if let Some(suspension) = self.vm.pending_native_call.as_ref() {
+                self.vm
+                    .native_call_continuations
+                    .push(crate::vm::NativeCallBoundary {
+                        target: crate::vm::NativeCallBoundaryTarget::NativePlaceholder(
+                            suspension.placeholder(),
+                        ),
+                        continuation,
+                    });
+                return Ok(JsValue::undefined());
+            }
             let result = self.vm.stack.pop();
             return continuation.call(Ok(result), self);
         }
@@ -267,7 +278,7 @@ impl Context {
         self.vm
             .native_call_continuations
             .push(crate::vm::NativeCallBoundary {
-                frame_depth: self.vm.frames.len(),
+                target: crate::vm::NativeCallBoundaryTarget::FrameDepth(self.vm.frames.len()),
                 continuation,
             });
         Ok(JsValue::undefined())
