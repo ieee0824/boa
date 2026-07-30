@@ -2,15 +2,15 @@ use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
-    Context, JsNativeError, JsNativeErrorKind, JsResult, JsValue, Module, NativeFunction, Script,
-    TestAction,
+    Context, JsNativeError, JsNativeErrorKind, JsResult, JsString, JsValue, Module, NativeFunction,
+    Script, TestAction,
     context::HostHooks,
     job::{
         AsyncContext, BoxedFuture, Job, JobCallback, JobExecutor, JobExecutorFuture,
         SimpleJobExecutor,
     },
     js_string,
-    module::SimpleModuleLoader,
+    module::{ModuleLoader, Referrer, SimpleModuleLoader},
     native_function::{NativeCallAlreadyResumed, NativeCallContinuation, NativeCallSuspension},
     object::{FunctionObjectBuilder, ObjectInitializer},
     property::{Attribute, PropertyDescriptor},
@@ -22,7 +22,7 @@ use boa_macros::js_str;
 use boa_parser::Source;
 use futures_lite::future;
 use indoc::indoc;
-use std::{cell::Cell, path::Path, rc::Rc};
+use std::{cell::Cell, future::Future, path::Path, rc::Rc};
 
 fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> NativeFunction {
     NativeFunction::from_copy_closure_with_captures(
@@ -33,6 +33,42 @@ fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> Nat
         },
         slot,
     )
+}
+
+#[derive(Debug, Default)]
+struct InMemoryModuleLoader {
+    modules: GcRefCell<Vec<(JsString, Module)>>,
+}
+
+impl InMemoryModuleLoader {
+    fn insert(&self, specifier: JsString, module: Module) {
+        self.modules.borrow_mut().push((specifier, module));
+    }
+}
+
+impl ModuleLoader for InMemoryModuleLoader {
+    fn load_imported_module(
+        self: Rc<Self>,
+        _referrer: Referrer,
+        specifier: JsString,
+        _context: &AsyncContext<'_>,
+    ) -> impl Future<Output = JsResult<Module>> {
+        let result = self
+            .modules
+            .borrow()
+            .iter()
+            .find(|(key, _)| key == &specifier)
+            .map(|(_, module)| module.clone())
+            .ok_or_else(|| {
+                JsNativeError::typ()
+                    .with_message(format!(
+                        "missing in-memory module: {}",
+                        specifier.to_std_string_escaped()
+                    ))
+                    .into()
+            });
+        async { result }
+    }
 }
 
 #[test]
@@ -901,8 +937,7 @@ fn async_module_entry_propagates_suspension_without_top_level_await() {
 
 #[test]
 fn async_module_entry_preserves_non_tla_dependency_order() {
-    let root = std::env::current_dir().unwrap();
-    let loader = Rc::new(SimpleModuleLoader::new(&root).unwrap());
+    let loader = Rc::new(InMemoryModuleLoader::default());
     let mut context = Context::builder()
         .module_loader(loader.clone())
         .build()
@@ -914,17 +949,17 @@ fn async_module_entry_preserves_non_tla_dependency_order() {
     let dependency = Module::parse(
         Source::from_reader(
             &b"globalThis.order = ['dependency-before']; export const value = suspend() + 1; order.push('dependency-after')"[..],
-            Some(Path::new("dependency.js")),
+            None,
         ),
         None,
         &mut context,
     )
     .unwrap();
-    loader.insert(root.join("dependency.js"), dependency);
+    loader.insert(js_string!("./dependency.js"), dependency);
     let module = Module::parse(
         Source::from_reader(
             &b"import { value } from './dependency.js'; order.push('root-before'); export const result = value + suspend(); order.push('root-after')"[..],
-            Some(Path::new("main.js")),
+            None,
         ),
         None,
         &mut context,
@@ -1032,8 +1067,7 @@ fn async_module_entry_reports_evaluation_and_load_errors() {
 
 #[test]
 fn async_module_entry_preserves_mixed_tla_dependency_order() {
-    let root = std::env::current_dir().unwrap();
-    let loader = Rc::new(SimpleModuleLoader::new(&root).unwrap());
+    let loader = Rc::new(InMemoryModuleLoader::default());
     let mut context = Context::builder()
         .module_loader(loader.clone())
         .build()
@@ -1041,17 +1075,17 @@ fn async_module_entry_preserves_mixed_tla_dependency_order() {
     let dependency = Module::parse(
         Source::from_reader(
             &b"globalThis.mixedOrder = ['dependency-before']; await Promise.resolve(); mixedOrder.push('dependency-after'); export const value = 20"[..],
-            Some(Path::new("mixed-dependency.js")),
+            None,
         ),
         None,
         &mut context,
     )
     .unwrap();
-    loader.insert(root.join("mixed-dependency.js"), dependency);
+    loader.insert(js_string!("./mixed-dependency.js"), dependency);
     let module = Module::parse(
         Source::from_reader(
             &b"import { value } from './mixed-dependency.js'; mixedOrder.push('root'); export const result = value + 22"[..],
-            Some(Path::new("mixed-main.js")),
+            None,
         ),
         None,
         &mut context,
