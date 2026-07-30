@@ -786,26 +786,33 @@ impl Context {
                 }
             }
             Err(error) => {
-                self.vm
-                    .stack
-                    .replace_object(placeholder, JsValue::undefined());
-                if let Some(boundary) = continuation {
-                    drop(self.vm.stack.pop());
-                    let continuation_depth = self.vm.native_call_continuations.len();
-                    self.vm.native_call_continuation_active = true;
-                    let result = boundary.continuation.call(Err(error), self);
-                    self.vm.native_call_continuation_active = false;
-                    match result {
-                        Ok(value) => {
-                            if self.vm.native_call_continuations.len() == continuation_depth {
-                                self.vm.stack.push(value);
+                if self.vm.stack.replace_object(placeholder, JsValue::undefined()) {
+                    if let Some(boundary) = continuation {
+                        drop(self.vm.stack.pop());
+                        let continuation_depth = self.vm.native_call_continuations.len();
+                        self.vm.native_call_continuation_active = true;
+                        let result = boundary.continuation.call(Err(error), self);
+                        self.vm.native_call_continuation_active = false;
+                        match result {
+                            Ok(value) => {
+                                if self.vm.native_call_continuations.len() == continuation_depth {
+                                    self.vm.stack.push(value);
+                                }
+                                ControlFlow::Continue(())
                             }
-                            ControlFlow::Continue(())
+                            Err(error) => self.handle_error(error),
                         }
-                        Err(error) => self.handle_error(error),
+                    } else {
+                        self.handle_error(error)
                     }
                 } else {
-                    self.handle_error(error)
+                    self.handle_error(
+                        JsNativeError::error()
+                            .with_message(
+                                "suspended native call result was consumed before VM suspension",
+                            )
+                            .into(),
+                    )
                 }
             }
         }
