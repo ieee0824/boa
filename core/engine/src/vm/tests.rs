@@ -1,6 +1,6 @@
-use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
+use crate::vm::{CallFrame, CompletionRecord, NativeCallBoundary, NativeCallBoundaryTarget};
 use crate::{
     Context, JsNativeError, JsNativeErrorKind, JsResult, JsString, JsValue, Module, NativeFunction,
     Script, TestAction,
@@ -1412,6 +1412,46 @@ fn suspension_is_rejected_if_the_opcode_consumes_the_native_result() {
             .resume(Ok(JsValue::undefined())),
         Err(NativeCallAlreadyResumed)
     );
+}
+
+#[test]
+fn rejected_native_completion_does_not_pop_after_its_placeholder_was_consumed() {
+    let mut context = Context::default();
+    let placeholder = ObjectInitializer::new(&mut context).build();
+    let frame = context.vm.frame().clone();
+    context
+        .vm
+        .push_frame_with_stack(frame, JsValue::undefined(), JsValue::null());
+    context.vm.stack.push(JsValue::from(42));
+    context.vm.frame.set_exit_early(true);
+    context
+        .vm
+        .native_call_continuations
+        .push(NativeCallBoundary {
+            target: NativeCallBoundaryTarget::NativePlaceholder(placeholder.clone()),
+            continuation: NativeCallContinuation::from_copy_closure_with_captures(
+                |result, (), _| result,
+                (),
+            ),
+        });
+
+    let completion = context.apply_native_call_completion(
+        &placeholder,
+        Err(JsNativeError::error()
+            .with_message("callback failure")
+            .into()),
+    );
+
+    let std::ops::ControlFlow::Break(CompletionRecord::Throw(error)) = completion else {
+        panic!("missing internal error after the placeholder was consumed");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("suspended native call result was consumed before VM suspension")
+    );
+    assert!(context.vm.native_call_continuations.is_empty());
+    context.vm.pop_frame();
 }
 
 #[test]
