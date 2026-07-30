@@ -1217,9 +1217,10 @@ impl JsNativeError {
     /// )
     /// ```
     ///
-    /// # Panics
-    ///
-    /// If converting a [`JsNativeErrorKind::RuntimeLimit`] to an opaque object.
+    /// Internal runtime-limit errors use the generic `Error` prototype when an
+    /// ECMAScript operation requires an opaque thrown value. This preserves a
+    /// safe embedding boundary even when an async or Promise path attempts to
+    /// materialize the otherwise non-catchable engine error.
     #[inline]
     pub fn to_opaque(&self, context: &mut Context) -> JsObject {
         let Self {
@@ -1256,9 +1257,7 @@ impl JsNativeError {
                     "The NoInstructionsRemain native error cannot be converted to an opaque type."
                 )
             }
-            JsNativeErrorKind::RuntimeLimit => {
-                panic!("The RuntimeLimit native error cannot be converted to an opaque type.")
-            }
+            JsNativeErrorKind::RuntimeLimit => (constructors.error().prototype(), ErrorKind::Error),
         };
 
         let o = JsObject::from_proto_and_data_with_shared_shape(

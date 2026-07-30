@@ -442,6 +442,14 @@ impl BuiltInConstructor for Promise {
 
         // 10. If completion is an abrupt completion, then
         if let Err(e) = completion {
+            // Engine runtime-limit errors are deliberately not observable by
+            // JavaScript. In particular, converting one into the rejection
+            // reason would call `JsError::to_opaque`, which cannot represent
+            // this internal error and panics. Propagate it to the embedder
+            // instead of turning it into a rejected promise.
+            if !e.is_catchable() {
+                return Err(e);
+            }
             let e = e.to_opaque(context);
             // a. Perform ? Call(resolvingFunctions.[[Reject]], undefined, « completion.[[Value]] »).
             resolving_functions

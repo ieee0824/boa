@@ -2,7 +2,7 @@ use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
-    Context, JsNativeErrorKind, JsValue, NativeFunction, TestAction, js_string,
+    Context, JsNativeError, JsNativeErrorKind, JsValue, NativeFunction, TestAction, js_string,
     property::Attribute, run_test_actions, run_test_actions_with,
 };
 use boa_ast::Position;
@@ -342,6 +342,39 @@ fn loop_runtime_limit() {
             "Maximum loop iteration limit 10 exceeded",
         ),
     ]);
+}
+
+#[test]
+fn loop_runtime_limit_escapes_promise_constructor() {
+    let mut context = Context::default();
+    context.runtime_limits_mut().set_loop_iteration_limit(10);
+
+    let error = context
+        .eval(Source::from_bytes(
+            "new Promise(() => { for (let i = 0; i < 1_000; ++i) {} })",
+        ))
+        .expect_err("the runtime limit must escape the Promise constructor");
+
+    assert!(
+        error
+            .as_native()
+            .is_some_and(JsNativeError::is_runtime_limit)
+    );
+}
+
+#[test]
+fn runtime_limit_can_be_materialized_without_panicking() {
+    let mut context = Context::default();
+    let error = JsNativeError::runtime_limit().with_message("loop limit exceeded");
+
+    let opaque = error.to_opaque(&mut context);
+
+    assert_eq!(
+        opaque
+            .get(js_string!("message"), &mut context)
+            .expect("the error message must be readable"),
+        js_string!("loop limit exceeded").into()
+    );
 }
 
 #[test]
