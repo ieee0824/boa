@@ -786,7 +786,11 @@ impl Context {
                 }
             }
             Err(error) => {
-                if self.vm.stack.replace_object(placeholder, JsValue::undefined()) {
+                if self
+                    .vm
+                    .stack
+                    .replace_object(placeholder, JsValue::undefined())
+                {
                     if let Some(boundary) = continuation {
                         drop(self.vm.stack.pop());
                         let continuation_depth = self.vm.native_call_continuations.len();
