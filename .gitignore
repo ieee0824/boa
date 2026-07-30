@@ -46,3 +46,7 @@ test-results
 # dhat
 dhat-*.json
 perf.data*
+
+# Core dumps, e.g. from an aborted test process
+core
+core.*

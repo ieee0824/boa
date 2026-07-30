@@ -108,55 +108,60 @@ impl SetIterator {
             .and_then(JsObject::downcast_mut::<Self>)
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an SetIterator"))?;
 
-        // The borrow checker cannot see that we're splitting the `GcRefMut` in two
-        // disjointed parts. However, if we manipulate a `&mut` instead, it can
-        // deduce that invariant.
-        let set_iterator = &mut *set_iterator;
-        {
-            let m = &set_iterator.iterated_set;
-            let mut index = set_iterator.next_index;
-            let item_kind = &set_iterator.iteration_kind;
+        if set_iterator.iterated_set.is_undefined() {
+            // Released before building the result. Allocating can collect, and the
+            // collector cannot trace through a cell that is being written to, so this
+            // iterator's own fields would be invisible to it.
+            drop(set_iterator);
+            return Ok(create_iter_result_object(
+                JsValue::undefined(),
+                true,
+                context,
+            ));
+        }
 
-            if set_iterator.iterated_set.is_undefined() {
-                return Ok(create_iter_result_object(
-                    JsValue::undefined(),
-                    true,
-                    context,
-                ));
-            }
+        let item_kind = set_iterator.iteration_kind;
 
-            let object = m.as_object();
+        // Find the next entry first, so the borrow is released before anything allocates.
+        let found = {
+            let set = set_iterator.iterated_set.clone();
+            let object = set.as_object();
             let entries = object
                 .as_ref()
                 .and_then(|o| o.downcast_ref::<OrderedSet>())
                 .ok_or_else(|| JsNativeError::typ().with_message("'this' is not a Set"))?;
 
             let num_entries = entries.full_len();
+            let mut index = set_iterator.next_index;
+            let mut found = None;
             while index < num_entries {
-                let e = entries.get_index(index);
+                let e = entries.get_index(index).cloned();
                 index += 1;
                 set_iterator.next_index = index;
                 if let Some(value) = e {
-                    match item_kind {
-                        PropertyNameKind::Value => {
-                            return Ok(create_iter_result_object(value.clone(), false, context));
-                        }
-                        PropertyNameKind::KeyAndValue => {
-                            let result = Array::create_array_from_list(
-                                [value.clone(), value.clone()],
-                                context,
-                            );
-                            return Ok(create_iter_result_object(result.into(), false, context));
-                        }
-                        PropertyNameKind::Key => {
-                            panic!("tried to collect only keys of Set")
-                        }
-                    }
+                    found = Some(value);
+                    break;
                 }
             }
+            found
+        };
+
+        if let Some(value) = found {
+            drop(set_iterator);
+            return match item_kind {
+                PropertyNameKind::Value => Ok(create_iter_result_object(value, false, context)),
+                PropertyNameKind::KeyAndValue => {
+                    let result = Array::create_array_from_list([value.clone(), value], context);
+                    Ok(create_iter_result_object(result.into(), false, context))
+                }
+                PropertyNameKind::Key => {
+                    panic!("tried to collect only keys of Set")
+                }
+            };
         }
 
         set_iterator.iterated_set = JsValue::undefined();
+        drop(set_iterator);
         Ok(create_iter_result_object(
             JsValue::undefined(),
             true,

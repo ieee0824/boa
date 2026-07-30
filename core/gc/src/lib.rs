@@ -27,6 +27,8 @@ use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
+    hash::{DefaultHasher, Hash, Hasher},
     mem,
     ptr::NonNull,
 };
@@ -201,21 +203,45 @@ pub(crate) fn end_writing_borrow() {
 }
 
 /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+///
+/// `BOA_GC_DIAGNOSE_WRITING_ALLOC=warn` reports each distinct site once and keeps going,
+/// so a single run enumerates every site instead of stopping at the first. Any other
+/// value stops at the first, which is what you want once you are down to fixing them.
 fn diagnose_allocation_during_writing_borrow<T>() {
     if collection_suspended() || ACTIVE_WRITING_BORROWS.with(Cell::get) == 0 {
         return;
     }
 
-    thread_local!(static ENABLED: bool = std::env::var_os("BOA_GC_DIAGNOSE_WRITING_ALLOC").is_some());
-    if !ENABLED.with(|enabled| *enabled) {
+    thread_local!(static MODE: Option<bool> = std::env::var("BOA_GC_DIAGNOSE_WRITING_ALLOC")
+        .ok()
+        .map(|value| value == "warn"));
+    let Some(warn_only) = MODE.with(|mode| *mode) else {
+        return;
+    };
+
+    let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+
+    assert!(
+        warn_only,
+        "#330: allocated `{}` while a `GcRefCell` writing borrow was active\n{backtrace}",
+        std::any::type_name::<T>(),
+    );
+
+    // Deduplicate on the backtrace so a site inside a loop is reported once.
+    thread_local!(static REPORTED: RefCell<HashSet<u64>> = RefCell::new(HashSet::new()));
+    let mut hasher = DefaultHasher::new();
+    backtrace.hash(&mut hasher);
+    if !REPORTED.with(|reported| reported.borrow_mut().insert(hasher.finish())) {
         return;
     }
 
-    panic!(
-        "#330: allocated `{}` while a `GcRefCell` writing borrow was active\n{}",
-        std::any::type_name::<T>(),
-        std::backtrace::Backtrace::force_capture(),
-    );
+    #[allow(clippy::print_stderr, reason = "temporary #330 diagnostic")]
+    {
+        eprintln!(
+            "[#330] writing-borrow allocation of `{}`\n{backtrace}",
+            std::any::type_name::<T>(),
+        );
+    }
 }
 
 #[cfg(test)]
