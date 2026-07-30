@@ -9,8 +9,8 @@ use crate::{
     builtins::promise::{PromiseCapability, ResolvingFunctions},
     environments::EnvironmentStack,
     module::ModuleEdge,
-    object::{JsFunction, JsFunctionEdge},
     native_function::NativeCallSuspension,
+    object::{JsFunction, JsFunctionEdge},
     realm::Realm,
     script::{Script, ScriptEdge},
 };
