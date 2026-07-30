@@ -907,14 +907,14 @@ impl Context {
             return match continuation_result {
                 Ok(value) => {
                     if self.vm.native_call_continuations.len() == continuation_depth {
-                        if self.vm.frames.is_empty() {
+                        if self.vm.frames.is_empty() || exit_early {
                             return ControlFlow::Break(CompletionRecord::Normal(value));
                         }
                         self.vm.stack.push(value);
                     }
                     ControlFlow::Continue(())
                 }
-                Err(error) if self.vm.frames.is_empty() => {
+                Err(error) if self.vm.frames.is_empty() || exit_early => {
                     ControlFlow::Break(CompletionRecord::Throw(error))
                 }
                 Err(error) => self.handle_error(error),
@@ -1008,6 +1008,7 @@ impl Context {
         )?;
         self.vm.environments.truncate(self.vm.frame.env_fp as usize);
         self.vm.stack.truncate_to_frame(&self.vm.frame);
+        let exit_early = self.vm.frame().exit_early();
         self.vm.pop_frame().expect("callback frame must exist");
         let error = self
             .vm
@@ -1021,14 +1022,14 @@ impl Context {
         Some(match continuation_result {
             Ok(value) => {
                 if self.vm.native_call_continuations.len() == continuation_depth {
-                    if self.vm.frames.is_empty() {
+                    if self.vm.frames.is_empty() || exit_early {
                         return Some(ControlFlow::Break(CompletionRecord::Normal(value)));
                     }
                     self.vm.stack.push(value);
                 }
                 ControlFlow::Continue(())
             }
-            Err(error) if self.vm.frames.is_empty() => {
+            Err(error) if self.vm.frames.is_empty() || exit_early => {
                 ControlFlow::Break(CompletionRecord::Throw(error))
             }
             Err(error) => self.handle_error(error),

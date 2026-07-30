@@ -320,6 +320,98 @@ fn direct_object_calls_complete_native_javascript_continuations() {
 }
 
 #[test]
+fn nested_direct_calls_do_not_resume_the_paused_javascript_caller() {
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("listener"), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), _| result,
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("bridge"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let dispatch = context
+                    .global_object()
+                    .get(js_string!("dispatch"), context)?
+                    .as_object()
+                    .expect("dispatch must be callable")
+                    .clone();
+                let result = dispatch.call(&JsValue::undefined(), &[], context);
+                if context
+                    .global_object()
+                    .get(js_string!("outerAdvanced"), context)?
+                    .as_boolean()
+                    == Some(true)
+                {
+                    return Err(JsNativeError::error()
+                        .with_message("paused caller resumed inside bridge")
+                        .into());
+                }
+                result
+            }),
+        )
+        .unwrap();
+
+    context
+        .eval(Source::from_bytes(
+            "globalThis.outerAdvanced = false; globalThis.listener = () => 41; globalThis.outer = () => { const value = bridge(); outerAdvanced = true; return value + 1; }",
+        ))
+        .unwrap();
+    let outer = context
+        .global_object()
+        .get(js_string!("outer"), &mut context)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        outer
+            .call(&JsValue::undefined(), &[], &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+
+    context
+        .eval(Source::from_bytes(
+            "outerAdvanced = false; listener = () => { throw new Error('nested failure') }; outer = () => { try { bridge() } catch (error) { outerAdvanced = true; return error.message; } }",
+        ))
+        .unwrap();
+    let outer = context
+        .global_object()
+        .get(js_string!("outer"), &mut context)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    assert_eq!(
+        outer
+            .call(&JsValue::undefined(), &[], &mut context)
+            .unwrap(),
+        js_string!("nested failure").into()
+    );
+}
+
+#[test]
 fn native_continuation_resumes_a_suspending_native_callback() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
