@@ -435,7 +435,20 @@ pub(crate) fn native_function_call(
 
     let result = result?;
     if context.vm.native_call_continuations.len() > continuation_depth {
-        return Ok(CallValue::Complete);
+        return Ok(
+            if matches!(
+                context
+                    .vm
+                    .native_call_continuations
+                    .last()
+                    .map(|boundary| &boundary.target),
+                Some(crate::vm::NativeCallBoundaryTarget::FrameDepth(_))
+            ) {
+                CallValue::Ready
+            } else {
+                CallValue::Complete
+            },
+        );
     }
     if let Some(suspension) = context.vm.pending_native_call.as_ref() {
         let placeholder = suspension.placeholder();

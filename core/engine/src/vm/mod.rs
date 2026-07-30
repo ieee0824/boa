@@ -907,9 +907,15 @@ impl Context {
             return match continuation_result {
                 Ok(value) => {
                     if self.vm.native_call_continuations.len() == continuation_depth {
+                        if self.vm.frames.is_empty() {
+                            return ControlFlow::Break(CompletionRecord::Normal(value));
+                        }
                         self.vm.stack.push(value);
                     }
                     ControlFlow::Continue(())
+                }
+                Err(error) if self.vm.frames.is_empty() => {
+                    ControlFlow::Break(CompletionRecord::Throw(error))
                 }
                 Err(error) => self.handle_error(error),
             };
@@ -1015,9 +1021,15 @@ impl Context {
         Some(match continuation_result {
             Ok(value) => {
                 if self.vm.native_call_continuations.len() == continuation_depth {
+                    if self.vm.frames.is_empty() {
+                        return Some(ControlFlow::Break(CompletionRecord::Normal(value)));
+                    }
                     self.vm.stack.push(value);
                 }
                 ControlFlow::Continue(())
+            }
+            Err(error) if self.vm.frames.is_empty() => {
+                ControlFlow::Break(CompletionRecord::Throw(error))
             }
             Err(error) => self.handle_error(error),
         })

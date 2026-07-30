@@ -197,6 +197,89 @@ fn native_continuation_keeps_synchronous_native_api_compatible() {
 }
 
 #[test]
+fn direct_object_calls_complete_native_javascript_continuations() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("listener"), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), context| Ok(JsValue::from(result?.to_i32(context)? + 1)),
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+    let dispatch = context
+        .global_object()
+        .get(js_string!("dispatch"), &mut context)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    let initial_frames = context.vm.frames.len();
+    let initial_stack = context.vm.stack.stack.len();
+
+    context
+        .eval(Source::from_bytes("globalThis.listener = () => 40"))
+        .unwrap();
+    assert_eq!(
+        dispatch
+            .call(&JsValue::undefined(), &[], &mut context)
+            .unwrap(),
+        JsValue::from(41)
+    );
+    assert_eq!(context.vm.frames.len(), initial_frames);
+    assert_eq!(context.vm.stack.stack.len(), initial_stack);
+    assert!(context.vm.native_call_continuations.is_empty());
+
+    context
+        .eval(Source::from_bytes(
+            "globalThis.listener = () => { throw new Error('direct failure') }",
+        ))
+        .unwrap();
+    let error = dispatch
+        .call(&JsValue::undefined(), &[], &mut context)
+        .unwrap_err();
+    assert!(error.to_string().contains("direct failure"));
+    assert_eq!(context.vm.frames.len(), initial_frames);
+    assert_eq!(context.vm.stack.stack.len(), initial_stack);
+    assert!(context.vm.native_call_continuations.is_empty());
+
+    context
+        .eval(Source::from_bytes("globalThis.listener = () => suspend()"))
+        .unwrap();
+    let this = JsValue::undefined();
+    let mut call = Box::pin(dispatch.call_async(&this, &[], &mut context));
+    assert!(future::block_on(future::poll_once(call.as_mut())).is_none());
+    slot.borrow_mut()
+        .take()
+        .unwrap()
+        .resume(Ok(JsValue::from(40)))
+        .unwrap();
+    assert_eq!(future::block_on(call).unwrap(), JsValue::from(41));
+    assert_eq!(context.vm.frames.len(), initial_frames);
+    assert_eq!(context.vm.stack.stack.len(), initial_stack);
+    assert!(context.vm.native_call_continuations.is_empty());
+}
+
+#[test]
 fn native_continuation_resumes_a_suspending_native_callback() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
