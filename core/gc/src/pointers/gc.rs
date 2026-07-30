@@ -435,7 +435,17 @@ impl<T: Trace + ?Sized> Deref for Gc<T> {
     type Target = T;
 
     fn deref(&self) -> &T {
-        self.inner().value()
+        let inner = self.inner();
+        // TEMPORARY #330 DIAGNOSTIC — remove before merging.
+        if crate::diagnose_roots() {
+            assert!(
+                !inner.header.is_poisoned(),
+                "#330: dereferenced a `{}` the collector already reclaimed — its holder is \
+                 not registered as a GC root",
+                inner.type_name()
+            );
+        }
+        inner.value()
     }
 }
 

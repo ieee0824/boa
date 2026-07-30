@@ -49,4 +49,9 @@ impl<T: Trace + ?Sized> GcBox<T> {
     pub(crate) fn size(&self) -> usize {
         self.vtable.size()
     }
+
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    pub(crate) fn type_name(&self) -> &'static str {
+        self.vtable.type_name()
+    }
 }

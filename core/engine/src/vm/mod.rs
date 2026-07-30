@@ -13,9 +13,9 @@ use crate::{
     realm::Realm,
     script::{Script, ScriptEdge},
 };
-use boa_gc::{Finalize, Rooted, Trace, custom_trace};
+use boa_gc::{Finalize, RootProvider, Rooted, Trace, custom_trace};
 use shadow_stack::ShadowStack;
-use std::{future::Future, ops::ControlFlow, pin::Pin, task};
+use std::{future::Future, ops::ControlFlow, pin::Pin, ptr::NonNull, task};
 
 #[cfg(feature = "trace")]
 use crate::sys::time::Instant;
@@ -73,7 +73,17 @@ pub struct Vm {
     /// The stack for call frames.
     pub(crate) frames: Vec<CallFrame>,
 
-    pub(crate) stack: Stack,
+    /// Keeps [`Self::stack`] registered with the collector as a root provider.
+    ///
+    /// Declared before the stack so the registration is removed before the stack it
+    /// points at is freed.
+    _stack_root: RootProvider,
+
+    /// The VM's value stack.
+    ///
+    /// Boxed so that its address is stable: the collector holds a pointer to it for as
+    /// long as this VM lives, and a [`Vm`] itself gets moved when a [`Context`] is built.
+    pub(crate) stack: Box<Stack>,
     pub(crate) return_value: JsValue,
 
     /// When an error is thrown, the pending exception is set.
@@ -446,7 +456,13 @@ impl ActiveRunnableEdge {
 impl Vm {
     /// Creates a new virtual machine.
     pub(crate) fn new(realm: Realm) -> Self {
+        let stack = Box::new(Stack::new(1024));
+        // SAFETY: the stack is boxed, so it stays at this address until the `Vm` (and with
+        // it `_stack_root`) is dropped, and the collector only reads through the pointer.
+        let stack_root = unsafe { RootProvider::register(NonNull::from(&*stack)) };
+
         Self {
+            _stack_root: stack_root,
             frames: Vec::with_capacity(16),
             frame: CallFrame::new_rooted(
                 Rooted::new(CodeBlock::new(JsString::default(), 0, true)),
@@ -454,7 +470,7 @@ impl Vm {
                 EnvironmentStack::new(realm.environment()),
                 realm.clone(),
             ),
-            stack: Stack::new(1024),
+            stack,
             return_value: JsValue::undefined(),
             environments: EnvironmentStack::new(realm.environment()),
             pending_exception: None,

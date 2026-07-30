@@ -33,6 +33,11 @@ pub(crate) const fn vtable_of<T: Trace + 'static>() -> &'static VTable {
             let _value = unsafe { Box::from_raw(this.as_ptr()) };
         }
 
+        /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+        fn type_name_fn() -> &'static str {
+            std::any::type_name::<Self>()
+        }
+
         fn type_id_fn() -> TypeId {
             // NOTE: Currently `TypeId::of::<T>()` is not const, so we have to wrap it in function call.
             //       See issue: <https://github.com/rust-lang/rust/issues/77125>
@@ -46,6 +51,7 @@ pub(crate) const fn vtable_of<T: Trace + 'static>() -> &'static VTable {
             run_finalizer_fn: T::run_finalizer_fn,
             drop_fn: T::drop_fn,
             type_id_fn: T::type_id_fn,
+            type_name_fn: T::type_name_fn,
             size: size_of::<GcBox<T>>(),
         };
     }
@@ -57,6 +63,8 @@ pub(crate) type TraceFn = unsafe fn(this: GcErasedPointer, tracer: &mut Tracer);
 pub(crate) type RunFinalizerFn = unsafe fn(this: GcErasedPointer);
 pub(crate) type DropFn = unsafe fn(this: GcErasedPointer);
 pub(crate) type TypeIdFn = fn() -> TypeId;
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+pub(crate) type TypeNameFn = fn() -> &'static str;
 
 #[derive(Debug)]
 pub(crate) struct VTable {
@@ -64,6 +72,8 @@ pub(crate) struct VTable {
     run_finalizer_fn: RunFinalizerFn,
     drop_fn: DropFn,
     type_id_fn: TypeIdFn,
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    type_name_fn: TypeNameFn,
     size: usize,
 }
 
@@ -82,6 +92,11 @@ impl VTable {
 
     pub(crate) fn type_id(&self) -> TypeId {
         (self.type_id_fn)()
+    }
+
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    pub(crate) fn type_name(&self) -> &'static str {
+        (self.type_name_fn)()
     }
 
     pub(crate) fn size(&self) -> usize {

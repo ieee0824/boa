@@ -122,29 +122,37 @@ impl Realm {
     /// Create a new [`Realm`].
     #[inline]
     pub fn create(hooks: &dyn HostHooks, root_shape: &RootShape) -> JsResult<Self> {
-        let intrinsics = Intrinsics::uninit(root_shape).ok_or_else(|| {
-            JsNativeError::typ().with_message("failed to create the realm intrinsics")
-        })?;
+        // The intrinsics, the global object and the global `this` are held only in these
+        // locals until `RealmInner` is allocated as a root below, so a collection in that
+        // window would see no root for any of them. Bootstrap allocates a bounded amount,
+        // so suspending collection across it is the cheapest correct answer.
+        let realm = {
+            let _no_gc = boa_gc::NoGcScope::new();
 
-        let global_object = hooks.create_global_object(&intrinsics);
-        let global_this = hooks
-            .create_global_this(&intrinsics)
-            .unwrap_or_else(|| global_object.clone());
-        let environment = GcEdge::new(DeclarativeEnvironment::global());
-        let scope = Scope::new_global();
+            let intrinsics = Intrinsics::uninit(root_shape).ok_or_else(|| {
+                JsNativeError::typ().with_message("failed to create the realm intrinsics")
+            })?;
 
-        let realm = Self {
-            inner: Rooted::new(RealmInner {
-                intrinsics,
-                environment,
-                scope,
-                global_object,
-                global_this,
-                template_map: GcRefCell::default(),
-                loaded_modules: GcRefCell::default(),
-                host_classes: GcRefCell::default(),
-                host_defined: GcRefCell::default(),
-            }),
+            let global_object = hooks.create_global_object(&intrinsics);
+            let global_this = hooks
+                .create_global_this(&intrinsics)
+                .unwrap_or_else(|| global_object.clone());
+            let environment = GcEdge::new(DeclarativeEnvironment::global());
+            let scope = Scope::new_global();
+
+            Self {
+                inner: Rooted::new(RealmInner {
+                    intrinsics,
+                    environment,
+                    scope,
+                    global_object,
+                    global_this,
+                    template_map: GcRefCell::default(),
+                    loaded_modules: GcRefCell::default(),
+                    host_classes: GcRefCell::default(),
+                    host_defined: GcRefCell::default(),
+                }),
+            }
         };
 
         realm.initialize();

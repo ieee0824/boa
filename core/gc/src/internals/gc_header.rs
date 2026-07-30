@@ -7,6 +7,12 @@ use std::{cell::Cell, fmt};
 /// `Collector` during the sweep phase.
 pub(crate) struct GcHeader {
     marked: Cell<bool>,
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    ///
+    /// Set instead of freeing when the root diagnostic is enabled, so that a handle
+    /// which outlived its allocation reports itself on the next dereference rather
+    /// than reading freed memory.
+    poisoned: Cell<bool>,
 }
 
 impl GcHeader {
@@ -14,7 +20,18 @@ impl GcHeader {
     pub(crate) fn new() -> Self {
         Self {
             marked: Cell::new(false),
+            poisoned: Cell::new(false),
         }
+    }
+
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    pub(crate) fn is_poisoned(&self) -> bool {
+        self.poisoned.get()
+    }
+
+    /// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+    pub(crate) fn poison(&self) {
+        self.poisoned.set(true);
     }
 
     /// Returns a bool for whether [`GcHeader`]'s mark bit is 1.

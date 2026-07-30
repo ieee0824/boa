@@ -1221,7 +1221,7 @@ impl JsPromise {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     let frame = r#gen
                         .call_frame
                         .take()
@@ -1238,7 +1238,7 @@ impl JsPromise {
                             .await_native(&continuation.to_rooted(), context);
                     }
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     r#gen.call_frame = context.vm.pop_frame().map(crate::vm::CallFrame::into_edge);
                     assert!(r#gen.call_frame.is_some());
 
@@ -1282,7 +1282,7 @@ impl JsPromise {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     let frame = r#gen
                         .call_frame
                         .take()
@@ -1302,7 +1302,7 @@ impl JsPromise {
                             .await_native(&continuation.to_rooted(), context);
                     }
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     r#gen.call_frame = context.vm.pop_frame().map(crate::vm::CallFrame::into_edge);
                     assert!(r#gen.call_frame.is_some());
 

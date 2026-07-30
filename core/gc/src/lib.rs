@@ -44,6 +44,7 @@ pub use pointers::{
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
 type ErasedWeakMapBoxPointer = NonNull<dyn ErasedWeakMapBox>;
+type RootProviderPointer = NonNull<dyn Trace>;
 
 #[derive(Debug, Clone, Copy)]
 struct RootEntry {
@@ -64,7 +65,9 @@ struct EphemeronRootEntry {
 }
 
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
+thread_local!(static GC_SUSPENDED: Cell<usize> = const { Cell::new(0) });
 thread_local!(static GC_ROOTS: RefCell<HashMap<usize, RootEntry>> = RefCell::new(HashMap::new()));
+thread_local!(static ROOT_PROVIDERS: RefCell<Vec<(usize, RootProviderPointer)>> = RefCell::new(Vec::new()));
 thread_local!(static EPHEMERON_ROOTS: RefCell<HashMap<usize, EphemeronRootEntry>> = RefCell::new(HashMap::new()));
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // The collector can own traced values containing `Rooted` handles. Initialize
@@ -72,6 +75,7 @@ thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // during thread teardown.
     GC_ROOTS.with(|_| {});
     EPHEMERON_ROOTS.with(|_| {});
+    ROOT_PROVIDERS.with(|_| {});
     RefCell::new(BoaGc {
         config: GcConfig::default(),
         runtime: GcRuntimeData::default(),
@@ -139,6 +143,96 @@ fn unregister_ephemeron_root(pointer: EphemeronPointer) {
             roots.remove(&key);
         }
     });
+}
+
+/// Suspends collection for as long as the guard is alive.
+///
+/// Bootstrap code builds a graph of objects in native locals and only links it into the
+/// heap at the end, so there is no root to register while it runs. Suspending collection
+/// over such a window is only sound when the window allocates a bounded amount — it
+/// defers reclamation rather than preventing it.
+#[derive(Debug)]
+pub struct NoGcScope;
+
+impl NoGcScope {
+    /// Suspends collection until the returned guard is dropped.
+    #[must_use]
+    pub fn new() -> Self {
+        GC_SUSPENDED.with(|suspended| suspended.set(suspended.get() + 1));
+        Self
+    }
+}
+
+impl Default for NoGcScope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for NoGcScope {
+    fn drop(&mut self) {
+        GC_SUSPENDED.with(|suspended| {
+            suspended.set(
+                suspended
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced `NoGcScope` drop"),
+            );
+        });
+    }
+}
+
+fn collection_suspended() -> bool {
+    GC_SUSPENDED.with(Cell::get) > 0
+}
+
+/// A registration of a heap-external structure that owns garbage collected roots.
+///
+/// Individual [`Rooted`] handles register themselves one at a time, which is the right
+/// trade for handles a native caller holds for a while. It is the wrong trade for the
+/// VM's value stack: registering there would put a hash map operation on every push and
+/// pop. Instead the stack registers *itself* once, and the collector traces it as a root
+/// during the mark phase — no per-value bookkeeping, and a mark cost proportional to the
+/// live stack depth rather than to the heap.
+///
+/// The registration lasts until the guard is dropped.
+#[derive(Debug)]
+pub struct RootProvider {
+    key: usize,
+}
+
+impl RootProvider {
+    /// Registers `provider` as a source of garbage collected roots.
+    ///
+    /// # Safety
+    ///
+    /// - `provider` must point to a live value that stays at this address until the
+    ///   returned guard is dropped. Registering a value that can move (because it is
+    ///   held by value in a structure the caller may move) is Undefined Behaviour.
+    /// - `provider` must not be mutably aliased at any point where an allocation, and so
+    ///   a collection, can run. Tracing reads the value, so an outstanding `&mut` to it
+    ///   while the collector runs is Undefined Behaviour.
+    #[must_use]
+    pub unsafe fn register(provider: RootProviderPointer) -> Self {
+        let key = provider.as_ptr().cast::<()>().addr();
+        ROOT_PROVIDERS.with(|providers| {
+            providers.borrow_mut().push((key, provider));
+        });
+        Self { key }
+    }
+}
+
+impl Drop for RootProvider {
+    fn drop(&mut self) {
+        ROOT_PROVIDERS.with(|providers| {
+            let mut providers = providers.borrow_mut();
+            let index = providers
+                .iter()
+                .rposition(|(key, _)| *key == self.key)
+                .expect("attempted to unregister an unknown GC root provider");
+            providers.remove(index);
+        });
+    }
 }
 
 struct TemporaryStrongRoot(GcErasedPointer);
@@ -211,10 +305,27 @@ impl Default for GcConfig {
             // The nursery is ~1-8MB in V8 and up to 16MB in SpiderMonkey, but both are
             // generational and so never walk the accumulated garbage at all, which is
             // why they can hold more of it without paying for it.
-            threshold: 4 * 1_048_576,
+            threshold: diagnostic_threshold().unwrap_or(4 * 1_048_576),
             used_space_percentage: 70,
         }
     }
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+///
+/// Lets a run force a tiny collection threshold so that missing root
+/// registrations surface immediately instead of depending on allocation timing.
+fn diagnostic_threshold() -> Option<usize> {
+    std::env::var("BOA_GC_THRESHOLD").ok()?.parse().ok()
+}
+
+/// TEMPORARY #330 DIAGNOSTIC — remove before merging.
+///
+/// When set, the collector leaks and poisons what it would have freed, so a missing
+/// root registration surfaces as a panic at the offending dereference.
+pub(crate) fn diagnose_roots() -> bool {
+    thread_local!(static ENABLED: bool = std::env::var_os("BOA_GC_DIAGNOSE_ROOTS").is_some());
+    ENABLED.with(|enabled| *enabled)
 }
 
 #[derive(Default, Debug, Clone, Copy)]
@@ -344,6 +455,10 @@ impl Allocator {
     }
 
     fn manage_state(gc: &mut BoaGc) {
+        if collection_suspended() {
+            return;
+        }
+
         if gc.runtime.bytes_allocated > gc.config.threshold {
             Collector::collect(gc);
 
@@ -450,6 +565,15 @@ impl Collector {
         GC_ROOTS.with(|roots| {
             for root in roots.borrow().values() {
                 tracer.enqueue(root.pointer);
+            }
+        });
+        // 0.0. Trace every registered heap-external root provider, such as the VM's
+        // value stack, which holds roots without registering them one by one.
+        ROOT_PROVIDERS.with(|providers| {
+            for (_, provider) in providers.borrow().iter() {
+                // SAFETY: `RootProvider::register` requires the provider to stay valid and
+                // free of mutable aliases for as long as it is registered.
+                unsafe { provider.as_ref().trace(tracer) };
             }
         });
         // SAFETY: registered roots point to live collector allocations.
@@ -596,6 +720,17 @@ impl Collector {
                 node_ref.header.unmark();
 
                 true
+            } else if diagnose_roots() {
+                // TEMPORARY #330 DIAGNOSTIC — remove before merging.
+                //
+                // Leak the allocation and poison it instead of freeing, so that a handle
+                // the collector failed to see reports itself at its next dereference
+                // with a usable backtrace, rather than reading freed memory.
+                *total_allocated -= node_ref.size();
+                node_ref.header.poison();
+                eprintln!("[#330] collected {}", node_ref.type_name());
+
+                false
             } else {
                 // SAFETY: The algorithm ensures only unmarked/unreachable pointers are dropped.
                 // The caller must ensure all pointers were allocated by `Box::into_raw(Box::new(..))`.
