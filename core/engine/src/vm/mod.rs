@@ -18,6 +18,9 @@ use boa_gc::{Finalize, Rooted, Trace, custom_trace};
 use shadow_stack::ShadowStack;
 use std::{future::Future, ops::ControlFlow, pin::Pin, task};
 
+#[cfg(test)]
+use std::{cell::Cell, rc::Rc};
+
 #[cfg(feature = "trace")]
 use crate::sys::time::Instant;
 
@@ -102,6 +105,9 @@ pub struct Vm {
     pub(crate) native_call_continuations: Vec<NativeCallBoundary>,
 
     pub(crate) native_call_continuation_active: bool,
+
+    #[cfg(test)]
+    pub(crate) instruction_count: Rc<Cell<u64>>,
 
     /// realm holds both the global object and the environment
     pub(crate) realm: Realm,
@@ -495,6 +501,8 @@ impl Vm {
             pending_native_call: None,
             native_call_continuations: Vec::new(),
             native_call_continuation_active: false,
+            #[cfg(test)]
+            instruction_count: Rc::new(Cell::new(0)),
             realm,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
@@ -835,6 +843,11 @@ impl Context {
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
     {
+        #[cfg(test)]
+        self.vm
+            .instruction_count
+            .set(self.vm.instruction_count.get() + 1);
+
         #[cfg(feature = "fuzz")]
         {
             if self.instructions_remaining == 0 {
@@ -1082,7 +1095,7 @@ impl Context {
                 ControlFlow::Break(value) => return value,
             }
 
-            if let Some(suspension) = self.vm.pending_native_call.take() {
+            while let Some(suspension) = self.vm.pending_native_call.take() {
                 let placeholder = suspension.placeholder();
                 let placeholder_was_consumed = !self.vm.stack.contains_object(&placeholder);
                 if placeholder_was_consumed {
