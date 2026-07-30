@@ -23,7 +23,7 @@ use crate::{
     job::{JobExecutor, SimpleJobExecutor},
     js_string,
     module::{IdleModuleLoader, ModuleLoader, SimpleModuleLoader},
-    native_function::NativeFunction,
+    native_function::{NativeCallSuspension, NativeFunction},
     object::{FunctionObjectBuilder, JsObject, shape::RootShape},
     optimizer::{Optimizer, OptimizerOptions, OptimizerStatistics},
     property::{Attribute, PropertyDescriptor, PropertyKey},
@@ -198,6 +198,40 @@ impl Context {
     #[allow(clippy::unit_arg, dropping_copy_types)]
     pub fn eval<R: ReadChar>(&mut self, src: Source<'_, R>) -> JsResult<JsValue> {
         Script::parse(src, None, self)?.evaluate(self)
+    }
+
+    /// Suspends the currently executing synchronous native call.
+    ///
+    /// After calling this method, the native function must not re-enter the VM or call JavaScript;
+    /// it must return normally and immediately so that the suspension can propagate. During
+    /// [`Script::evaluate_async`](crate::Script::evaluate_async), execution then waits for the
+    /// returned handle to be completed and uses that completion as the native call's result.
+    pub fn suspend_native_call(&mut self) -> JsResult<NativeCallSuspension> {
+        if self.vm.native_active_function.is_none() {
+            return Err(JsNativeError::error()
+                .with_message("native call suspension requires an active native function")
+                .into());
+        }
+        if self.vm.native_active_function_is_constructor_call {
+            return Err(JsNativeError::error()
+                .with_message("native constructors cannot suspend")
+                .into());
+        }
+        if self.vm.pending_native_call.is_some() {
+            return Err(JsNativeError::error()
+                .with_message("another native call is already suspended")
+                .into());
+        }
+
+        let origin = self
+            .vm
+            .native_active_function
+            .clone()
+            .expect("an active native function was checked above");
+        let suspension =
+            NativeCallSuspension::new(origin, JsObject::with_object_proto(self.intrinsics()));
+        self.vm.pending_native_call = Some(suspension.clone());
+        Ok(suspension)
     }
 
     /// Applies optimizations to the [`StatementList`] inplace.

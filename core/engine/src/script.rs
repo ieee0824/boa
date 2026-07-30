@@ -41,6 +41,29 @@ pub struct ScriptEdge {
     inner: GcEdge<Inner>,
 }
 
+struct AsyncScriptFrameGuard<'a> {
+    context: &'a mut Context,
+    completed: bool,
+}
+
+impl AsyncScriptFrameGuard<'_> {
+    fn complete(mut self) {
+        self.context.vm.pop_frame();
+        self.completed = true;
+    }
+}
+
+impl Drop for AsyncScriptFrameGuard<'_> {
+    fn drop(&mut self) {
+        if self.completed {
+            return;
+        }
+        if let Some(frame) = self.context.vm.pop_frame() {
+            self.context.vm.stack.truncate_to_frame(&frame);
+        }
+    }
+}
+
 impl std::fmt::Debug for Script {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Script")
@@ -231,9 +254,13 @@ impl Script {
     ) -> JsResult<JsValue> {
         self.prepare_run(context)?;
 
-        let record = context.run_async_with_budget(budget).await;
+        let frame = AsyncScriptFrameGuard {
+            context,
+            completed: false,
+        };
+        let record = frame.context.run_async_with_budget(budget).await;
 
-        context.vm.pop_frame();
+        frame.complete();
         record.consume()
     }
 

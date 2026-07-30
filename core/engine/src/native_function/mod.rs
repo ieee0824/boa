@@ -25,6 +25,9 @@ use crate::{
     realm::{Realm, RealmEdge},
 };
 
+mod suspension;
+pub use suspension::{NativeCallAlreadyResumed, NativeCallSuspension};
+
 #[cfg(feature = "experimental")]
 mod continuation;
 
@@ -398,7 +401,14 @@ pub(crate) fn native_function_call(
     let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
-    context.vm.native_active_function = Some(this_function_object);
+    let previous_active_function = context
+        .vm
+        .native_active_function
+        .replace(this_function_object);
+    let previous_is_constructor_call = std::mem::replace(
+        &mut context.vm.native_active_function_is_constructor_call,
+        false,
+    );
 
     let result = if constructor.is_some() {
         function.call(&JsValue::undefined(), &args, context)
@@ -407,12 +417,36 @@ pub(crate) fn native_function_call(
     }
     .map_err(|err| err.inject_realm(context.realm()));
 
-    context.vm.native_active_function = None;
+    context.vm.native_active_function = previous_active_function;
+    context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
     context.swap_realm(&mut realm);
 
     context.vm.shadow_stack.pop();
 
-    context.vm.stack.push(result?);
+    if result.is_err()
+        && let Some(suspension) = context.vm.pending_native_call.take()
+    {
+        // A suspending native call must return normally. If it throws instead, reject the
+        // suspension as well so a host-held handle cannot later resume unrelated execution.
+        suspension.cancel();
+    }
+
+    let result = result?;
+    if let Some(suspension) = context.vm.pending_native_call.as_ref() {
+        let placeholder = suspension.placeholder();
+        let result_propagates_placeholder = result
+            .as_object()
+            .is_some_and(|result| JsObject::equals(&result, &placeholder));
+        if !suspension.originated_from(obj) && !result_propagates_placeholder {
+            let error = JsNativeError::error()
+                .with_message("native call suspension was consumed by an enclosing native call")
+                .into();
+            let _ = suspension.resume(Err(error));
+        }
+        context.vm.stack.push(placeholder);
+    } else {
+        context.vm.stack.push(result);
+    }
 
     Ok(CallValue::Complete)
 }
@@ -453,7 +487,14 @@ fn native_function_construct(
     let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
-    context.vm.native_active_function = Some(this_function_object);
+    let previous_active_function = context
+        .vm
+        .native_active_function
+        .replace(this_function_object);
+    let previous_is_constructor_call = std::mem::replace(
+        &mut context.vm.native_active_function_is_constructor_call,
+        true,
+    );
 
     let new_target = context.vm.stack.pop();
     let args = context
@@ -488,7 +529,8 @@ fn native_function_construct(
             }
         });
 
-    context.vm.native_active_function = None;
+    context.vm.native_active_function = previous_active_function;
+    context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
     context.swap_realm(&mut realm);
 
     context.vm.shadow_stack.pop();

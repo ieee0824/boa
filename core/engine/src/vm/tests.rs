@@ -2,13 +2,405 @@ use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
-    Context, JsNativeError, JsNativeErrorKind, JsValue, NativeFunction, TestAction, js_string,
-    property::Attribute, run_test_actions, run_test_actions_with,
+    Context, JsNativeError, JsNativeErrorKind, JsValue, NativeFunction, Script, TestAction,
+    js_string,
+    native_function::{NativeCallAlreadyResumed, NativeCallSuspension},
+    object::{FunctionObjectBuilder, ObjectInitializer},
+    property::{Attribute, PropertyDescriptor},
+    run_test_actions, run_test_actions_with,
 };
 use boa_ast::Position;
+use boa_gc::{Gc, GcRefCell};
 use boa_macros::js_str;
 use boa_parser::Source;
+use futures_lite::future;
 use indoc::indoc;
+
+fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> NativeFunction {
+    NativeFunction::from_copy_closure_with_captures(
+        |_, _, slot, context| {
+            let suspension = context.suspend_native_call()?;
+            *slot.borrow_mut() = Some(suspension);
+            Ok(JsValue::undefined())
+        },
+        slot,
+    )
+}
+
+#[test]
+fn async_evaluation_resumes_a_native_call_exactly_once() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    let after = Gc::new(GcRefCell::new(false));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("after"),
+            0,
+            NativeFunction::from_copy_closure_with_captures(
+                |_, _, after, _| {
+                    *after.borrow_mut() = true;
+                    Ok(JsValue::undefined())
+                },
+                after.clone(),
+            ),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("const value = suspend(); after(); value + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    assert!(!*after.borrow());
+    let suspension = slot.borrow().clone().unwrap();
+    assert_eq!(suspension.resume(Ok(JsValue::from(41))), Ok(()));
+    assert_eq!(
+        suspension.resume(Ok(JsValue::from(99))),
+        Err(NativeCallAlreadyResumed)
+    );
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+    assert!(*after.borrow());
+}
+
+#[test]
+fn native_call_resume_error_is_thrown_at_the_original_call_site() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("try { suspend(); 'not reached' } catch (error) { error.message }"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Err(JsNativeError::error().with_message("dismissed").into()))
+        .unwrap();
+
+    assert_eq!(
+        future::block_on(evaluation).unwrap(),
+        JsValue::from(js_string!("dismissed"))
+    );
+}
+
+#[test]
+fn native_accessor_suspension_replaces_its_result_register() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    let getter =
+        FunctionObjectBuilder::new(context.realm(), suspending_function(slot.clone())).build();
+    let target = ObjectInitializer::new(&mut context).build();
+    target
+        .define_property_or_throw(
+            js_string!("value"),
+            PropertyDescriptor::builder()
+                .get(getter)
+                .enumerable(true)
+                .configurable(true),
+            &mut context,
+        )
+        .unwrap();
+    context
+        .register_global_property(js_string!("target"), target, Attribute::all())
+        .unwrap();
+    let script = Script::parse(Source::from_bytes("target.value + 1"), None, &mut context).unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn function_prototype_call_preserves_native_call_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("suspend.call(null) + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn reentrant_native_call_restores_the_outer_suspension_origin() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_builtin_callable(
+            js_string!("innerNative"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined())),
+        )
+        .unwrap();
+    context
+        .register_global_builtin_callable(
+            js_string!("outerNative"),
+            1,
+            NativeFunction::from_copy_closure_with_captures(
+                |_, args, slot, context| {
+                    args[0]
+                        .as_callable()
+                        .expect("the test passes a callback")
+                        .call(&JsValue::undefined(), &[], context)?;
+                    let suspension = context.suspend_native_call()?;
+                    *slot.borrow_mut() = Some(suspension);
+                    Ok(JsValue::undefined())
+                },
+                slot.clone(),
+            ),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("outerNative(() => innerNative()) + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn suspension_is_rejected_if_the_opcode_consumes_the_native_result() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("const proxy = new Proxy({}, { has: suspend }); 'key' in proxy"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+
+    let error = future::block_on(script.evaluate_async(&mut context)).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native call cannot suspend from this execution path")
+    );
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::undefined())),
+        Err(NativeCallAlreadyResumed)
+    );
+}
+
+#[test]
+fn suspended_native_call_roots_its_resumed_object_until_evaluation_continues() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let resumed_object = ObjectInitializer::new(&mut context)
+        .property(js_string!("answer"), 42, Attribute::all())
+        .build();
+    let script = Script::parse(Source::from_bytes("suspend().answer"), None, &mut context).unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(resumed_object.into()))
+        .unwrap();
+    boa_gc::force_collect();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn synchronous_evaluation_rejects_an_unresolved_native_call_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+
+    let error = context.eval(Source::from_bytes("suspend()")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native call suspension requires asynchronous script evaluation")
+    );
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::undefined())),
+        Err(NativeCallAlreadyResumed)
+    );
+}
+
+#[test]
+fn synchronous_evaluation_accepts_an_immediately_resumed_native_call() {
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("resume_immediately"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, context| {
+                context
+                    .suspend_native_call()?
+                    .resume(Ok(JsValue::from(41)))
+                    .expect("new suspension must accept its first result");
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("resume_immediately() + 1"))
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn dropping_suspended_evaluation_cancels_the_handle_and_restores_the_context() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let script = Script::parse(Source::from_bytes("suspend() + 1"), None, &mut context).unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    drop(evaluation);
+
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::from(41))),
+        Err(NativeCallAlreadyResumed)
+    );
+    assert_eq!(
+        context.eval(Source::from_bytes("1 + 1")).unwrap(),
+        JsValue::from(2)
+    );
+}
+
+#[test]
+fn throwing_native_function_cancels_its_requested_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(
+            js_string!("invalid_suspend"),
+            0,
+            NativeFunction::from_copy_closure_with_captures(
+                |_, _, slot, context| {
+                    let suspension = context.suspend_native_call()?;
+                    *slot.borrow_mut() = Some(suspension);
+                    Err(JsNativeError::error().with_message("native failed").into())
+                },
+                slot.clone(),
+            ),
+        )
+        .unwrap();
+    let script =
+        Script::parse(Source::from_bytes("invalid_suspend()"), None, &mut context).unwrap();
+
+    let error = future::block_on(script.evaluate_async(&mut context)).unwrap_err();
+
+    assert!(error.to_string().contains("native failed"));
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::undefined())),
+        Err(NativeCallAlreadyResumed)
+    );
+}
+
+#[test]
+fn native_constructor_cannot_suspend() {
+    let mut context = Context::default();
+    context
+        .register_global_builtin_callable(
+            js_string!("innerNative"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined())),
+        )
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("SuspendingConstructor"),
+            1,
+            NativeFunction::from_copy_closure(|_, args, context| {
+                args[0]
+                    .as_callable()
+                    .expect("the test passes a callback")
+                    .call(&JsValue::undefined(), &[], context)?;
+                context.suspend_native_call()?;
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+
+    let error = context
+        .eval(Source::from_bytes(
+            "new SuspendingConstructor(() => innerNative())",
+        ))
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native constructors cannot suspend")
+    );
+}
 
 #[test]
 fn typeof_string() {
