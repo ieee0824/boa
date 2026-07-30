@@ -41,6 +41,7 @@ pub use namespace::ModuleNamespace;
 use source::SourceTextModule;
 pub use synthetic::{SyntheticModule, SyntheticModuleInitializer};
 
+use crate::job::AsyncContext;
 use crate::object::TypedJsFunction;
 use crate::spanned_source_text::SourceText;
 use crate::{
@@ -598,9 +599,11 @@ impl Module {
     /// promise settles and converts a rejected promise into a [`JsError`].
     #[allow(clippy::future_not_send)]
     pub async fn load_link_evaluate_async(&self, context: &mut Context) -> JsResult<JsValue> {
-        let promise = self.load_link_evaluate(context);
+        let context = AsyncContext::new(context);
+        let promise = self.load_link_evaluate(&mut context.borrow_mut());
         loop {
-            context.run_jobs_async().await?;
+            let executor = context.borrow().job_executor();
+            executor.run_jobs_async(&context).await?;
             match promise.state() {
                 PromiseState::Pending => futures_lite::future::yield_now().await,
                 PromiseState::Fulfilled(value) => return Ok(value),

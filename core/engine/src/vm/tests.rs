@@ -5,8 +5,12 @@ use crate::{
     Context, JsNativeError, JsNativeErrorKind, JsResult, JsValue, Module, NativeFunction, Script,
     TestAction,
     context::HostHooks,
-    job::{AsyncContext, BoxedFuture, JobCallback, JobExecutor, SimpleJobExecutor},
+    job::{
+        AsyncContext, BoxedFuture, Job, JobCallback, JobExecutor, JobExecutorFuture,
+        SimpleJobExecutor,
+    },
     js_string,
+    module::SimpleModuleLoader,
     native_function::{NativeCallAlreadyResumed, NativeCallContinuation, NativeCallSuspension},
     object::{FunctionObjectBuilder, ObjectInitializer},
     property::{Attribute, PropertyDescriptor},
@@ -18,7 +22,7 @@ use boa_macros::js_str;
 use boa_parser::Source;
 use futures_lite::future;
 use indoc::indoc;
-use std::{cell::Cell, rc::Rc};
+use std::{cell::Cell, path::Path, rc::Rc};
 
 fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> NativeFunction {
     NativeFunction::from_copy_closure_with_captures(
@@ -852,6 +856,266 @@ fn async_module_propagates_suspension_before_top_level_await() {
         .unwrap();
     future::block_on(evaluation).unwrap();
 
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("value"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn async_module_entry_propagates_suspension_without_top_level_await() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let module = Module::parse(
+        Source::from_bytes("export const value = suspend() + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(module.load_link_evaluate_async(&mut context));
+
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+    future::block_on(evaluation).unwrap();
+
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("value"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn async_module_entry_preserves_non_tla_dependency_order() {
+    let loader = Rc::new(SimpleModuleLoader::new(Path::new(".")).unwrap());
+    let mut context = Context::builder()
+        .module_loader(loader.clone())
+        .build()
+        .unwrap();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let root = std::env::current_dir().unwrap();
+    let dependency = Module::parse(
+        Source::from_reader(
+            &b"globalThis.order = ['dependency-before']; export const value = suspend() + 1; order.push('dependency-after')"[..],
+            Some(&root.join("dependency.js")),
+        ),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    loader.insert(root.join("dependency.js"), dependency);
+    let module = Module::parse(
+        Source::from_reader(
+            &b"import { value } from './dependency.js'; order.push('root-before'); export const result = value + suspend(); order.push('root-after')"[..],
+            Some(&root.join("main.js")),
+        ),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(module.load_link_evaluate_async(&mut context));
+
+    for resumed in [20, 20] {
+        while slot.borrow().is_none() {
+            assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+        }
+        slot.borrow_mut()
+            .take()
+            .unwrap()
+            .resume(Ok(JsValue::from(resumed)))
+            .unwrap();
+    }
+    future::block_on(evaluation).unwrap();
+
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("result"), &mut context)
+            .unwrap(),
+        JsValue::from(41)
+    );
+    assert_eq!(
+        context.eval(Source::from_bytes("order.join(',')")).unwrap(),
+        js_string!("dependency-before,dependency-after,root-before,root-after").into()
+    );
+}
+
+#[test]
+fn dropping_async_module_entry_cancels_suspension_and_restores_sync_mode() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let module = Module::parse(
+        Source::from_bytes("export const value = suspend()"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(module.load_link_evaluate_async(&mut context));
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    drop(evaluation);
+
+    assert!(!context.async_jobs_enabled);
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::undefined())),
+        Err(NativeCallAlreadyResumed)
+    );
+    let synchronous = Module::parse(
+        Source::from_bytes("export const value = 42"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let promise = synchronous.load_link_evaluate(&mut context);
+    context.run_jobs().unwrap();
+    assert_eq!(
+        promise.state(),
+        crate::builtins::promise::PromiseState::Fulfilled(JsValue::undefined())
+    );
+    assert_eq!(
+        synchronous
+            .namespace(&mut context)
+            .get(js_string!("value"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn async_module_entry_reports_evaluation_and_load_errors() {
+    let loader = Rc::new(SimpleModuleLoader::new(Path::new(".")).unwrap());
+    let mut context = Context::builder().module_loader(loader).build().unwrap();
+    let rejected = Module::parse(
+        Source::from_bytes("throw new Error('module failure')"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let error = future::block_on(rejected.load_link_evaluate_async(&mut context)).unwrap_err();
+    assert!(error.to_string().contains("module failure"));
+    assert!(!context.async_jobs_enabled);
+
+    let root = std::env::current_dir().unwrap().join("missing-main.js");
+    let missing = Module::parse(
+        Source::from_reader(&b"import './missing-dependency.js'"[..], Some(&root)),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    assert!(future::block_on(missing.load_link_evaluate_async(&mut context)).is_err());
+    assert!(!context.async_jobs_enabled);
+}
+
+#[test]
+fn async_module_entry_preserves_mixed_tla_dependency_order() {
+    let loader = Rc::new(SimpleModuleLoader::new(Path::new(".")).unwrap());
+    let mut context = Context::builder()
+        .module_loader(loader.clone())
+        .build()
+        .unwrap();
+    let root = std::env::current_dir().unwrap();
+    let dependency = Module::parse(
+        Source::from_reader(
+            &b"globalThis.mixedOrder = ['dependency-before']; await Promise.resolve(); mixedOrder.push('dependency-after'); export const value = 20"[..],
+            Some(&root.join("mixed-dependency.js")),
+        ),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    loader.insert(root.join("mixed-dependency.js"), dependency);
+    let module = Module::parse(
+        Source::from_reader(
+            &b"import { value } from './mixed-dependency.js'; mixedOrder.push('root'); export const result = value + 22"[..],
+            Some(&root.join("mixed-main.js")),
+        ),
+        None,
+        &mut context,
+    )
+    .unwrap();
+
+    future::block_on(module.load_link_evaluate_async(&mut context)).unwrap();
+
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("result"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+    assert_eq!(
+        context
+            .eval(Source::from_bytes("mixedOrder.join(',')"))
+            .unwrap(),
+        js_string!("dependency-before,dependency-after,root").into()
+    );
+}
+
+#[test]
+fn async_module_entry_uses_custom_job_executor() {
+    #[derive(Debug, Default)]
+    struct DelegatingExecutor {
+        inner: Rc<SimpleJobExecutor>,
+        async_runs: Cell<usize>,
+    }
+
+    impl JobExecutor for DelegatingExecutor {
+        fn enqueue_job(self: Rc<Self>, job: Job, context: &mut Context) {
+            self.inner.clone().enqueue_job(job, context);
+        }
+
+        fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
+            self.inner.clone().run_jobs(context)
+        }
+
+        fn run_jobs_async<'a>(
+            self: Rc<Self>,
+            context: &'a AsyncContext<'_>,
+        ) -> JobExecutorFuture<'a> {
+            self.async_runs.set(self.async_runs.get() + 1);
+            self.inner.clone().run_jobs_async(context)
+        }
+    }
+
+    let executor = Rc::new(DelegatingExecutor::default());
+    let mut context = Context::builder()
+        .job_executor(executor.clone())
+        .build()
+        .unwrap();
+    let module = Module::parse(
+        Source::from_bytes("export const value = 42"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+
+    future::block_on(module.load_link_evaluate_async(&mut context)).unwrap();
+
+    assert!(executor.async_runs.get() > 0);
     assert_eq!(
         module
             .namespace(&mut context)
