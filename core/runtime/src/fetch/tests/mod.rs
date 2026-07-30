@@ -2,7 +2,7 @@
 
 use crate::fetch::request::JsRequest;
 use crate::fetch::response::JsResponse;
-use boa_engine::{Context, Finalize, JsData, JsResult, JsString, Trace, js_error};
+use boa_engine::{Finalize, JsData, JsResult, JsString, Trace, job::AsyncContext, js_error};
 use http::{Request, Response, Uri};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -39,7 +39,7 @@ impl crate::fetch::Fetcher for TestFetcher {
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
-        _context: &RefCell<&mut Context>,
+        _context: &AsyncContext<'_>,
     ) -> JsResult<JsResponse> {
         let request = request.into_inner();
         self.requests_received.borrow_mut().push(request.clone());

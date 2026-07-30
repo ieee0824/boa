@@ -2,7 +2,7 @@ use crate::{
     Context, JsResult, JsString, JsValue,
     builtins::promise::OperationType,
     context::intrinsics::Intrinsics,
-    job::JobCallback,
+    job::{BoxedFuture, JobCallback},
     object::{JsFunction, JsObject},
     realm::Realm,
 };
@@ -93,6 +93,20 @@ pub trait HostHooks {
         // already asserted by `Call`.
         // 2. Return ? Call(jobCallback.[[Callback]], V, argumentsList).
         job.callback().call(this, args, context)
+    }
+
+    /// Asynchronous variant of [`HostHooks::call_job_callback`].
+    ///
+    /// Hosts that attach behavior to job callbacks can override this alongside the synchronous
+    /// hook. The default implementation preserves native-call suspension by awaiting the callback.
+    fn call_job_callback_async<'a>(
+        &'a self,
+        job: JobCallback,
+        this: &'a JsValue,
+        args: &'a [JsValue],
+        context: &'a mut Context,
+    ) -> BoxedFuture<'a> {
+        Box::pin(async move { job.callback().call_async(this, args, context).await })
     }
 
     /// [`HostPromiseRejectionTracker ( promise, operation )`][spec]

@@ -3,10 +3,9 @@
 use crate::message;
 use crate::message::senders::OnMessageQueueSender;
 use crate::test::{TestAction, run_test_actions_with};
-use boa_engine::job::{JobExecutor, SimpleJobExecutor};
+use boa_engine::job::{AsyncContext, JobExecutor, SimpleJobExecutor};
 use boa_engine::{Context, js_string};
 use futures_lite::future;
-use std::cell::RefCell;
 use std::thread;
 use std::time::Duration;
 
@@ -38,7 +37,7 @@ fn basic() {
                     context
                         .downcast_job_executor::<SimpleJobExecutor>()
                         .expect("")
-                        .run_jobs_async(&RefCell::new(context)),
+                        .run_jobs_async(&AsyncContext::new(context)),
                 )));
             }),
             TestAction::run(

@@ -2,7 +2,10 @@ use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
-    Context, JsNativeError, JsNativeErrorKind, JsValue, NativeFunction, Script, TestAction,
+    Context, JsNativeError, JsNativeErrorKind, JsResult, JsValue, Module, NativeFunction, Script,
+    TestAction,
+    context::HostHooks,
+    job::{AsyncContext, BoxedFuture, JobCallback, JobExecutor, SimpleJobExecutor},
     js_string,
     native_function::{NativeCallAlreadyResumed, NativeCallSuspension},
     object::{FunctionObjectBuilder, ObjectInitializer},
@@ -15,6 +18,7 @@ use boa_macros::js_str;
 use boa_parser::Source;
 use futures_lite::future;
 use indoc::indoc;
+use std::{cell::Cell, rc::Rc};
 
 fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> NativeFunction {
     NativeFunction::from_copy_closure_with_captures(
@@ -67,6 +71,291 @@ fn async_evaluation_resumes_a_native_call_exactly_once() {
 
     assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
     assert!(*after.borrow());
+}
+
+#[test]
+fn async_object_call_propagates_native_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.listener = value => suspend() + value",
+        ))
+        .unwrap();
+    let listener = context
+        .global_object()
+        .get(js_string!("listener"), &mut context)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    let this = JsValue::undefined();
+    let args = [JsValue::from(1)];
+    let mut call = Box::pin(listener.call_async(&this, &args, &mut context));
+
+    assert!(future::block_on(future::poll_once(call.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+
+    assert_eq!(future::block_on(call).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn async_jobs_propagate_suspension_from_nested_promise_reaction() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.result = 0; Promise.resolve().then(() => suspend() + 1).then(value => result = value)",
+        ))
+        .unwrap();
+    let mut jobs = Box::pin(context.run_jobs_async());
+
+    assert!(future::block_on(future::poll_once(jobs.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+    future::block_on(jobs).unwrap();
+
+    assert_eq!(
+        context
+            .global_object()
+            .get(js_string!("result"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn direct_job_executor_run_jobs_async_enables_async_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.result = 0; Promise.resolve().then(() => suspend() + 1).then(value => result = value)",
+        ))
+        .unwrap();
+
+    let executor = context
+        .downcast_job_executor::<SimpleJobExecutor>()
+        .unwrap();
+    {
+        let async_context = AsyncContext::new(&mut context);
+        let mut jobs = Box::pin(executor.run_jobs_async(&async_context));
+
+        assert!(future::block_on(future::poll_once(jobs.as_mut())).is_none());
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::from(41)))
+            .unwrap();
+        future::block_on(jobs).unwrap();
+    }
+
+    assert!(!context.async_jobs_enabled);
+
+    assert_eq!(
+        context
+            .global_object()
+            .get(js_string!("result"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn async_jobs_keep_promise_reactions_fifo() {
+    let mut context = Context::default();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.order = []; Promise.resolve().then(() => order.push(1)); Promise.resolve().then(() => order.push(2));",
+        ))
+        .unwrap();
+
+    future::block_on(context.run_jobs_async()).unwrap();
+    assert_eq!(
+        context.eval(Source::from_bytes("order.join(',')")).unwrap(),
+        js_string!("1,2").into()
+    );
+}
+
+#[test]
+fn promise_jobs_preserve_host_call_job_callback_hooks() {
+    struct CountingHooks(Cell<usize>);
+
+    impl HostHooks for CountingHooks {
+        fn call_job_callback(
+            &self,
+            job: JobCallback,
+            this: &JsValue,
+            args: &[JsValue],
+            context: &mut Context,
+        ) -> JsResult<JsValue> {
+            self.0.set(self.0.get() + 1);
+            job.callback().call(this, args, context)
+        }
+
+        fn call_job_callback_async<'a>(
+            &'a self,
+            job: JobCallback,
+            this: &'a JsValue,
+            args: &'a [JsValue],
+            context: &'a mut Context,
+        ) -> BoxedFuture<'a> {
+            self.0.set(self.0.get() + 1);
+            Box::pin(async move { job.callback().call_async(this, args, context).await })
+        }
+    }
+
+    let hooks = Rc::new(CountingHooks(Cell::new(0)));
+    let mut context = Context::builder()
+        .host_hooks(hooks.clone())
+        .build()
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "Promise.resolve(1).then(value => value + 1); Promise.resolve({ then(resolve) { resolve(2); } });",
+        ))
+        .unwrap();
+
+    context.run_jobs().unwrap();
+
+    assert_eq!(hooks.0.get(), 2);
+
+    let mut context = Context::builder()
+        .host_hooks(hooks.clone())
+        .build()
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "Promise.resolve(1).then(value => value + 1); Promise.resolve({ then(resolve) { resolve(2); } });",
+        ))
+        .unwrap();
+    future::block_on(context.run_jobs_async()).unwrap();
+
+    assert_eq!(hooks.0.get(), 4);
+}
+
+#[test]
+fn synchronous_jobs_reject_native_suspension_in_promise_callbacks() {
+    for script in [
+        "const p = Promise.resolve(); p.constructor = { [Symbol.species]: class { constructor(executor) { executor(value => suspend(value), () => {}); } } }; p.then(() => 1);",
+        "const p = Promise.resolve(); p.constructor = { [Symbol.species]: class { constructor(executor) { executor(() => {}, error => suspend(error)); } } }; p.then(() => { throw new Error('reject'); });",
+    ] {
+        let mut context = Context::default();
+        let slot = Gc::new(GcRefCell::new(None));
+        context
+            .register_global_callable(js_string!("suspend"), 0, suspending_function(slot))
+            .unwrap();
+        context.eval(Source::from_bytes(script)).unwrap();
+
+        let Err(error) = context.run_jobs() else {
+            panic!("suspension did not produce an error for {script}");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("native call suspension requires asynchronous"),
+            "unexpected error for {script}: {error}"
+        );
+    }
+
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "Promise.resolve({ then: () => suspend() });",
+        ))
+        .unwrap();
+
+    context.run_jobs().unwrap();
+    assert!(slot.borrow().is_some());
+}
+
+#[test]
+fn async_module_propagates_suspension_after_top_level_await() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let module = Module::parse(
+        Source::from_bytes("await Promise.resolve(); export const value = suspend() + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(module.load_link_evaluate_async(&mut context));
+
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+    future::block_on(evaluation).unwrap();
+
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("value"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn async_module_propagates_suspension_before_top_level_await() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let module = Module::parse(
+        Source::from_bytes("export const value = suspend() + 1; await Promise.resolve()"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(module.load_link_evaluate_async(&mut context));
+
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+    future::block_on(evaluation).unwrap();
+
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("value"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
 }
 
 #[test]

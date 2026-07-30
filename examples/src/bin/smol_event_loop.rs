@@ -3,7 +3,7 @@ use boa_engine::job::{GenericJob, TimeoutJob};
 use boa_engine::{
     Context, JsArgs, JsNativeError, JsResult, JsValue, Script, Source,
     context::ContextBuilder,
-    job::{Job, JobExecutor, NativeAsyncJob, PromiseJob},
+    job::{AsyncContext, Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
     js_string,
     native_function::NativeFunction,
     property::Attribute,
@@ -72,12 +72,6 @@ impl Queue {
         // Run the timeout jobs first.
         self.drain_timeout_jobs(context);
 
-        let jobs = std::mem::take(&mut *self.promise_jobs.borrow_mut());
-        for job in jobs {
-            if let Err(e) = job.call(context) {
-                eprintln!("Uncaught {e}");
-            }
-        }
         let job = self.generic_jobs.borrow_mut().pop_front();
         if let Some(generic) = job
             && let Err(err) = generic.call(context)
@@ -104,36 +98,58 @@ impl JobExecutor for Queue {
 
     // While the sync flavor of `run_jobs` will block the current thread until all the jobs have finished...
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        smol::block_on(smol::LocalExecutor::new().run(self.run_jobs_async(&RefCell::new(context))))
+        smol::block_on(
+            smol::LocalExecutor::new().run(self.run_jobs_async(&AsyncContext::new_sync(context))),
+        )
     }
 
     // ...the async flavor won't, which allows concurrent execution with external async tasks.
-    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()> {
-        let mut group = FutureGroup::new();
-        loop {
-            for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
-                group.insert(job.call(context));
-            }
+    fn run_jobs_async<'a>(self: Rc<Self>, context: &'a AsyncContext<'_>) -> JobExecutorFuture<'a> {
+        Box::pin(async move {
+            let mut group = FutureGroup::new();
+            loop {
+                let jobs = std::mem::take(&mut *self.async_jobs.borrow_mut());
+                for job in jobs {
+                    if job.is_exclusive() {
+                        while let Some(result) = group.next().await {
+                            if let Err(error) = result {
+                                eprintln!("Uncaught {error}");
+                            }
+                        }
+                        if let Err(error) = job.call(context).await {
+                            eprintln!("Uncaught {error}");
+                        }
+                    } else {
+                        group.insert(job.call(context));
+                    }
+                }
 
-            if group.is_empty()
-                && self.async_jobs.borrow().is_empty()
-                && self.timeout_jobs.borrow().is_empty()
-                && self.generic_jobs.borrow().is_empty()
-            {
-                // All queues are empty. We can exit.
-                return Ok(());
-            }
+                if group.is_empty()
+                    && self.async_jobs.borrow().is_empty()
+                    && self.timeout_jobs.borrow().is_empty()
+                    && self.generic_jobs.borrow().is_empty()
+                {
+                    // All queues are empty. We can exit.
+                    return Ok(());
+                }
 
-            // We could have some jobs pending on the microtask queue. Try to poll the pending
-            // tasks once to see if any of them finished.
-            if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
-                eprintln!("Uncaught {err}");
-            }
+                // We could have some jobs pending on the microtask queue. Try to poll the pending
+                // tasks once to see if any of them finished.
+                if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
+                    eprintln!("Uncaught {err}");
+                }
 
-            // Only one macrotask can be executed before the next drain of the microtask queue.
-            self.drain_jobs(&mut context.borrow_mut());
-            future::yield_now().await;
-        }
+                // Only one macrotask can be executed before the next drain of the microtask queue.
+                self.drain_jobs(&mut context.borrow_mut());
+                let jobs = std::mem::take(&mut *self.promise_jobs.borrow_mut());
+                for job in jobs {
+                    if let Err(error) = job.call_async(context).await {
+                        eprintln!("Uncaught {error}");
+                    }
+                }
+                future::yield_now().await;
+            }
+        })
     }
 }
 
@@ -141,7 +157,7 @@ impl JobExecutor for Queue {
 fn delay(
     _this: &JsValue,
     args: &[JsValue],
-    context: &RefCell<&mut Context>,
+    context: &AsyncContext<'_>,
 ) -> impl Future<Output = JsResult<JsValue>> {
     let millis = args.get_or_undefined(0).to_u32(&mut context.borrow_mut());
 
@@ -170,7 +186,7 @@ fn interval(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
 
     context.enqueue_job(
         NativeAsyncJob::with_realm(
-            async move |context: &RefCell<&mut Context>| {
+            async move |context: &AsyncContext<'_>| {
                 let mut timer = smol::Timer::interval(Duration::from_millis(u64::from(delay)));
                 for _ in 0..10 {
                     timer.next().await;
@@ -309,7 +325,7 @@ fn externally_async_event_loop() -> JsResult<()> {
 
             // Run the jobs asynchronously, which avoids blocking the main thread.
             println!("Running jobs...");
-            queue.run_jobs_async(&RefCell::new(context)).await
+            queue.run_jobs_async(&AsyncContext::new(context)).await
         };
 
         future::zip(counter, engine).await.1?;

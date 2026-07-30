@@ -3,12 +3,10 @@
 //! [`NativeFunction`] is the main type of this module, providing APIs to create native callables
 //! from native Rust functions and closures.
 
-use std::cell::RefCell;
-
 use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
 use boa_string::JsString;
 
-use crate::job::NativeAsyncJob;
+use crate::job::{AsyncContext, NativeAsyncJob};
 use crate::object::internal_methods::InternalMethodCallContext;
 use crate::value::JsVariant;
 use crate::{
@@ -194,8 +192,8 @@ impl NativeFunction {
     /// # Examples
     ///
     /// ```
-    /// # use std::cell::RefCell;
     /// # use boa_engine::{
+    /// #   job::AsyncContext,
     /// #   JsValue,
     /// #   Context,
     /// #   JsResult,
@@ -205,7 +203,7 @@ impl NativeFunction {
     /// async fn test(
     ///     _this: &JsValue,
     ///     args: &[JsValue],
-    ///     context: &RefCell<&mut Context>,
+    ///     context: &AsyncContext<'_>,
     /// ) -> JsResult<JsValue> {
     ///     let arg = args.get_or_undefined(0).clone();
     ///     std::future::ready(()).await;
@@ -216,7 +214,7 @@ impl NativeFunction {
     /// ```
     pub fn from_async_fn<F>(f: F) -> Self
     where
-        F: AsyncFn(&JsValue, &[JsValue], &RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+        F: AsyncFn(&JsValue, &[JsValue], &AsyncContext<'_>) -> JsResult<JsValue> + 'static,
         F: Copy,
     {
         Self::from_copy_closure(move |this, args, context| {

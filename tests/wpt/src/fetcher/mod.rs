@@ -1,4 +1,4 @@
-use boa_engine::{js_error, Context, Finalize, JsData, JsError, JsResult, Trace};
+use boa_engine::{job::AsyncContext, js_error, Context, Finalize, JsData, JsError, JsResult, Trace};
 use boa_runtime::fetch::request::JsRequest;
 use boa_runtime::fetch::response::JsResponse;
 use boa_runtime::fetch::BlockingReqwestFetcher;
@@ -75,7 +75,7 @@ impl Fetcher for WptFetcher {
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> JsResult<JsResponse> {
         eprintln!("request: {request:?}");
         let response = self.inner.clone().fetch(request, context).await;

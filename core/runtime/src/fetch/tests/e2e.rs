@@ -1,9 +1,11 @@
 use crate::fetch::request::JsRequest;
 use crate::fetch::response::JsResponse;
 use crate::test::{TestAction, run_test_actions};
-use boa_engine::{Context, Finalize, JsData, JsError, JsResult, JsString, Trace, js_error, js_str};
+use boa_engine::{
+    Context, Finalize, JsData, JsError, JsResult, JsString, Trace, job::AsyncContext, js_error,
+    js_str,
+};
 use http::Response;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 use url::Url;
@@ -46,7 +48,7 @@ impl crate::fetch::Fetcher for E2eFetcher {
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> JsResult<JsResponse> {
         match request.uri().path() {
             "/headers" => Self::headers(&request, &mut context.borrow_mut()),

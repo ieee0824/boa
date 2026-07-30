@@ -11,8 +11,8 @@ use boa_parser::Source;
 
 use crate::script::Script;
 use crate::{
-    Context, JsError, JsNativeError, JsResult, JsString, js_error, js_string, object::JsObject,
-    realm::Realm, vm::ActiveRunnable,
+    Context, JsError, JsNativeError, JsResult, JsString, job::AsyncContext, js_error, js_string,
+    object::JsObject, realm::Realm, vm::ActiveRunnable,
 };
 
 use super::Module;
@@ -179,7 +179,7 @@ pub trait ModuleLoader: Any {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> JsResult<Module>;
 
     /// Host hooks [`HostGetImportMetaProperties ( moduleRecord )`][meta] and
@@ -210,8 +210,8 @@ pub(crate) trait DynModuleLoader: Any {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &'a RefCell<&'b mut Context>,
-    ) -> Fn!(Rc<Self>, Referrer, JsString, &'a RefCell<&'b mut Context> => dyn 'fut + Future<Output = JsResult<Module>>)
+        context: &'a AsyncContext<'b>,
+    ) -> Fn!(Rc<Self>, Referrer, JsString, &'a AsyncContext<'b> => dyn 'fut + Future<Output = JsResult<Module>>)
     where
         'a: 'fut,
         'b: 'fut;
@@ -230,8 +230,8 @@ impl<T: ModuleLoader> DynModuleLoader for T {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &'a RefCell<&'b mut Context>,
-    ) -> Fn!(Rc<Self>, Referrer, JsString, &'a RefCell<&'b mut Context> => dyn 'fut + Future<Output = JsResult<Module>>)
+        context: &'a AsyncContext<'b>,
+    ) -> Fn!(Rc<Self>, Referrer, JsString, &'a AsyncContext<'b> => dyn 'fut + Future<Output = JsResult<Module>>)
     where
         'a: 'fut,
         'b: 'fut,
@@ -260,7 +260,7 @@ impl ModuleLoader for IdleModuleLoader {
         self: Rc<Self>,
         _referrer: Referrer,
         _specifier: JsString,
-        _context: &RefCell<&mut Context>,
+        _context: &AsyncContext<'_>,
     ) -> JsResult<Module> {
         Err(JsNativeError::typ()
             .with_message("module resolution is disabled for this context")
@@ -318,7 +318,7 @@ impl ModuleLoader for MapModuleLoader {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> impl Future<Output = JsResult<Module>> {
         let result = (|| {
             let path = resolve_module_specifier(
@@ -389,7 +389,7 @@ impl ModuleLoader for SimpleModuleLoader {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> impl Future<Output = JsResult<Module>> {
         let result = (|| {
             let short_path = specifier.to_std_string_escaped();

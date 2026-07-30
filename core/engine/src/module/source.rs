@@ -1,9 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    hash::BuildHasherDefault,
-    mem::MaybeUninit,
-    path::PathBuf,
+    cell::Cell, collections::HashSet, hash::BuildHasherDefault, mem::MaybeUninit, path::PathBuf,
     rc::Rc,
 };
 
@@ -31,7 +27,7 @@ use crate::{
     builtins::{Promise, promise::PromiseCapability},
     bytecompiler::{BindingAccessOpcode, ByteCompiler, FunctionSpec, ToJsString},
     environments::{DeclarativeEnvironment, EnvironmentStack, EnvironmentStackEdges},
-    job::NativeAsyncJob,
+    job::{AsyncContext, NativeAsyncJob},
     js_string,
     module::ModuleKind,
     object::{FunctionObjectBuilder, JsPromise},
@@ -388,7 +384,7 @@ impl SourceTextModule {
             specifier: JsString,
             src: Module,
             state: Rc<GraphLoadingState>,
-            context: &RefCell<&mut Context>,
+            context: &AsyncContext<'_>,
         ) {
             let loader = context.borrow().module_loader();
             let fut = loader.load_imported_module(
@@ -1372,10 +1368,32 @@ impl SourceTextModule {
             context,
         );
 
-        // 9. Perform ! module.ExecuteModule(capability).
+        // 9. Perform ! module.ExecuteModule(capability). The execution is an
+        // async host job so native calls in the module body can suspend.
+        let module = module_self.to_edge();
+        let realm = context.realm().clone();
+        context.enqueue_job(
+            NativeAsyncJob::new_exclusive(async move |context| {
+                let mut context = context.take();
+                let old_realm = context.enter_realm(realm);
+                let module = module.to_rooted();
+                let ModuleKind::SourceText(source) = module.kind() else {
+                    unreachable!("async module must be source text")
+                };
+                let result = {
+                    source
+                        .execute_async_with_capability(&module, &capability, &mut context)
+                        .await
+                };
+                if let Err(error) = result {
+                    async_module_execution_rejected(&module, &error, &mut context);
+                }
+                context.enter_realm(old_realm);
+                Ok(JsValue::undefined())
+            })
+            .into(),
+        );
         // 10. Return unused.
-        self.execute(module_self, Some(&capability), context)
-            .expect("async modules cannot directly throw");
     }
 
     /// Abstract operation [`GatherAvailableAncestors ( module, execList )`][spec].
@@ -1848,6 +1866,50 @@ impl SourceTextModule {
         } else {
             // 11. Return unused.
             Ok(())
+        }
+    }
+
+    /// Async counterpart of `ExecuteModule`, used by top-level-await jobs so
+    /// host native calls can suspend without falling back to `Context::run`.
+    async fn execute_async_with_capability(
+        &self,
+        module_self: &Module,
+        capability: &PromiseCapability,
+        context: &mut Context,
+    ) -> JsResult<()> {
+        let SourceTextContext {
+            codeblock,
+            environments,
+            realm,
+        } = match &*self.status.borrow() {
+            ModuleStatus::Evaluating { context, .. }
+            | ModuleStatus::EvaluatingAsync { context, .. } => context.clone(),
+            _ => unreachable!("`execute` should only be called for evaluating modules."),
+        };
+
+        let environments = environments.to_rooted();
+        let env_fp = environments.len() as u32;
+        let callframe = CallFrame::new_rooted(
+            codeblock.root(),
+            Some(ActiveRunnable::Module(module_self.clone())),
+            environments,
+            realm.to_rooted(),
+        )
+        .with_env_fp(env_fp)
+        .with_flags(CallFrameFlags::EXIT_EARLY);
+        context
+            .vm
+            .push_frame_with_stack(callframe, JsValue::undefined(), JsValue::null());
+        context
+            .vm
+            .stack
+            .set_promise_capability(&context.vm.frame, Some(capability));
+
+        let result = context.run_async_with_budget(256).await;
+        context.vm.pop_frame();
+        match result {
+            CompletionRecord::Throw(err) => Err(err),
+            _ => Ok(()),
         }
     }
 

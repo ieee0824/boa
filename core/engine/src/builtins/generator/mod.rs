@@ -64,6 +64,13 @@ pub(crate) struct GeneratorContext {
     pub(crate) call_frame: Option<SuspendedCallFrame>,
 }
 
+pub(crate) struct PendingAsyncResume {
+    pub(crate) context: GeneratorContext,
+    pub(crate) value: Option<JsValue>,
+    pub(crate) kind: GeneratorResumeKind,
+    pub(crate) async_generator: Option<JsObject>,
+}
+
 impl GeneratorContext {
     /// Creates a new `GeneratorContext` from the current `Context` state.
     pub(crate) fn from_current(context: &mut Context, async_generator: Option<JsObject>) -> Self {
@@ -115,6 +122,35 @@ impl GeneratorContext {
 
         let result = context.run();
 
+        std::mem::swap(&mut context.vm.stack, &mut self.stack);
+        self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
+        assert!(self.call_frame.is_some());
+        result
+    }
+
+    pub(crate) async fn resume_async(
+        &mut self,
+        value: Option<JsValue>,
+        resume_kind: GeneratorResumeKind,
+        context: &mut Context,
+    ) -> CompletionRecord {
+        std::mem::swap(&mut context.vm.stack, &mut self.stack);
+        let frame = self
+            .call_frame
+            .take()
+            .expect("should have a call frame")
+            .into_rooted();
+        let rp = frame.rp;
+        context.vm.push_frame(frame);
+        let frame = context.vm.frame_mut();
+        frame.rp = rp;
+        frame.set_exit_early(true);
+        if let Some(value) = value {
+            context.vm.stack.push(value);
+        }
+        context.vm.stack.push(resume_kind);
+
+        let result = context.run_async_with_budget(256).await;
         std::mem::swap(&mut context.vm.stack, &mut self.stack);
         self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
         assert!(self.call_frame.is_some());

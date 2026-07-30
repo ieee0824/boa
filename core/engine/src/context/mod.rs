@@ -107,6 +107,10 @@ pub struct Context {
 
     can_block: bool,
 
+    pub(crate) async_jobs_enabled: bool,
+
+    pub(crate) pending_async_resume: Option<builtins::generator::PendingAsyncResume>,
+
     #[cfg(feature = "temporal")]
     tz_provider: CompiledTzdbProvider,
 
@@ -518,6 +522,15 @@ impl Context {
     #[inline]
     pub fn run_jobs(&mut self) -> JsResult<()> {
         self.job_executor().run_jobs(self)
+    }
+
+    /// Asynchronously runs all jobs with the provided job executor.
+    #[allow(clippy::future_not_send)]
+    pub async fn run_jobs_async(&mut self) -> JsResult<()> {
+        let executor = self.job_executor();
+        executor
+            .run_jobs_async(&crate::job::AsyncContext::new(&mut *self))
+            .await
     }
 
     /// Abstract operation [`ClearKeptObjects`][clear].
@@ -1162,6 +1175,8 @@ impl ContextBuilder {
             root_shape,
             parser_identifier: 0,
             can_block: self.can_block,
+            async_jobs_enabled: false,
+            pending_async_resume: None,
             data: HostDefined::default(),
         };
 
