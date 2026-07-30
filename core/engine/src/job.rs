@@ -296,6 +296,7 @@ pub type JobExecutorFuture<'a> = Pin<Box<dyn Future<Output = JsResult<()>> + 'a>
 pub struct NativeAsyncJob {
     f: Box<dyn for<'a> FnOnce(&'a RefCell<&mut Context>) -> BoxedFuture<'a>>,
     realm: Option<Realm>,
+    exclusive: bool,
 }
 
 impl Debug for NativeAsyncJob {
@@ -315,6 +316,7 @@ impl NativeAsyncJob {
         Self {
             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
             realm: None,
+            exclusive: false,
         }
     }
 
@@ -326,7 +328,24 @@ impl NativeAsyncJob {
         Self {
             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
             realm: Some(realm),
+            exclusive: false,
         }
+    }
+
+    /// Creates an async job which exclusively owns the context while pending.
+    pub(crate) fn new_exclusive<F>(f: F) -> Self
+    where
+        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+    {
+        Self {
+            f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
+            realm: None,
+            exclusive: true,
+        }
+    }
+
+    const fn is_exclusive(&self) -> bool {
+        self.exclusive
     }
 
     /// Gets a reference to the execution realm of the job.
@@ -405,7 +424,13 @@ impl NativeAsyncJob {
 /// [Job Abstract Closure]: https://tc39.es/ecma262/#sec-jobs
 /// [Requirements]: https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html#sec-hostenqueuepromisejob
 /// [`GetActiveScriptOrModule()`]: https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html#sec-getactivescriptormodule
-pub struct PromiseJob(NativeJob);
+enum PromiseJobInner {
+    Sync(NativeJob),
+    Async { job: NativeAsyncJob, realm: Realm },
+}
+
+/// An ECMAScript [Job Abstract Closure] executing code related to [`Promise`] objects.
+pub struct PromiseJob(PromiseJobInner);
 
 impl Debug for PromiseJob {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -419,7 +444,7 @@ impl PromiseJob {
     where
         F: FnOnce(&mut Context) -> JsResult<JsValue> + 'static,
     {
-        Self(NativeJob::new(f))
+        Self(PromiseJobInner::Sync(NativeJob::new(f)))
     }
 
     /// Creates a new `PromiseJob` from a closure and an execution realm.
@@ -427,13 +452,31 @@ impl PromiseJob {
     where
         F: FnOnce(&mut Context) -> JsResult<JsValue> + 'static,
     {
-        Self(NativeJob::with_realm(f, realm))
+        Self(PromiseJobInner::Sync(NativeJob::with_realm(f, realm)))
+    }
+
+    /// Creates an asynchronous `PromiseJob` from a closure and an execution realm.
+    pub fn with_realm_async<F>(f: F, realm: Realm) -> Self
+    where
+        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+    {
+        let job_realm = realm.clone();
+        let job = NativeAsyncJob::new(async move |context| {
+            let old_realm = context.borrow_mut().enter_realm(job_realm);
+            let result = f(context).await;
+            context.borrow_mut().enter_realm(old_realm);
+            result
+        });
+        Self(PromiseJobInner::Async { job, realm })
     }
 
     /// Gets a reference to the execution realm of the `PromiseJob`.
     #[must_use]
     pub const fn realm(&self) -> Option<&Realm> {
-        self.0.realm()
+        match &self.0 {
+            PromiseJobInner::Sync(job) => job.realm(),
+            PromiseJobInner::Async { realm, .. } => Some(realm),
+        }
     }
 
     /// Calls the `PromiseJob` with the specified [`Context`].
@@ -443,7 +486,21 @@ impl PromiseJob {
     /// If the job has an execution realm defined, this sets the running execution
     /// context to the realm's before calling the inner closure, and resets it after execution.
     pub fn call(self, context: &mut Context) -> JsResult<JsValue> {
-        self.0.call(context)
+        match self.0 {
+            PromiseJobInner::Sync(job) => job.call(context),
+            PromiseJobInner::Async { job, .. } => {
+                future::block_on(job.call(&RefCell::new(context)))
+            }
+        }
+    }
+
+    fn call_async<'a>(self, context: &'a RefCell<&mut Context>) -> BoxedFuture<'a> {
+        match self.0 {
+            PromiseJobInner::Sync(job) => {
+                Box::pin(async move { job.call(&mut context.borrow_mut()) })
+            }
+            PromiseJobInner::Async { job, .. } => Box::pin(job.call(context)),
+        }
     }
 }
 
@@ -681,7 +738,14 @@ impl JobExecutor for SimpleJobExecutor {
             let mut group = FutureGroup::new();
             loop {
                 for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
-                    group.insert(job.call(context));
+                    if job.is_exclusive() {
+                        if let Err(err) = job.call(context).await {
+                            self.clear();
+                            return Err(err);
+                        }
+                    } else {
+                        group.insert(job.call(context));
+                    }
                 }
 
                 // There are no timeout jobs to run IIF there are no jobs to execute right now.
@@ -722,7 +786,7 @@ impl JobExecutor for SimpleJobExecutor {
 
                 let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
                 for job in jobs {
-                    if let Err(err) = job.call(&mut context.borrow_mut()) {
+                    if let Err(err) = job.call_async(context).await {
                         self.clear();
                         return Err(err);
                     }

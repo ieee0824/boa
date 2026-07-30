@@ -2264,7 +2264,7 @@ fn new_promise_reaction_job(
         .unwrap_or_else(|| context.realm().clone());
 
     // 1. Let job be a new Job Abstract Closure with no parameters that captures reaction and argument and performs the following steps when called:
-    let job = move |context: &mut Context| {
+    let job = async move |context: &std::cell::RefCell<&mut Context>| {
         //   a. Let promiseCapability be reaction.[[Capability]].
         let promise_capability = reaction.promise_capability.take();
         //   b. Let type be reaction.[[Type]].
@@ -2285,15 +2285,18 @@ fn new_promise_reaction_job(
                 }
             },
             //   e. Else, let handlerResult be Completion(HostCallJobCallback(handler, undefined, « argument »)).
-            Some(handler) => context
-                .host_hooks()
-                .call_job_callback(
-                    handler,
-                    &JsValue::undefined(),
-                    std::slice::from_ref(&argument),
-                    context,
-                )
-                .map_err(|e| e.to_opaque(context)),
+            Some(handler) => {
+                let callback = handler.callback();
+                let this = JsValue::undefined();
+                let args = [argument.clone()];
+                let mut context = context.borrow_mut();
+                let result = if context.async_jobs_enabled {
+                    callback.call_async(&this, &args, &mut context).await
+                } else {
+                    callback.call(&this, &args, &mut context)
+                };
+                result.map_err(|e| e.to_opaque(&mut context))
+            }
         };
 
         match promise_capability {
@@ -2319,13 +2322,21 @@ fn new_promise_reaction_job(
                     // h. If handlerResult is an abrupt completion, then
                     Err(value) => {
                         // i. Return ? Call(promiseCapability.[[Reject]], undefined, « handlerResult.[[Value]] »).
-                        reject.call(&JsValue::undefined(), &[value], context)
+                        let this = JsValue::undefined();
+                        let args = [value];
+                        reject
+                            .call_async(&this, &args, &mut context.borrow_mut())
+                            .await
                     }
 
                     // i. Else,
                     Ok(value) => {
                         // i. Return ? Call(promiseCapability.[[Resolve]], undefined, « handlerResult.[[Value]] »).
-                        resolve.call(&JsValue::undefined(), &[value], context)
+                        let this = JsValue::undefined();
+                        let args = [value];
+                        resolve
+                            .call_async(&this, &args, &mut context.borrow_mut())
+                            .await
                     }
                 }
             }
@@ -2333,7 +2344,7 @@ fn new_promise_reaction_job(
     };
 
     // 4. Return the Record { [[Job]]: job, [[Realm]]: handlerRealm }.
-    PromiseJob::with_realm(job, realm)
+    PromiseJob::with_realm_async(job, realm)
 }
 
 /// More information:
@@ -2358,28 +2369,34 @@ fn new_promise_resolve_thenable_job(
         .unwrap_or_else(|_| context.realm().clone());
 
     // 1. Let job be a new Job Abstract Closure with no parameters that captures promiseToResolve, thenable, and then and performs the following steps when called:
-    let job = move |context: &mut Context| {
+    let job = async move |context: &std::cell::RefCell<&mut Context>| {
         //    a. Let resolvingFunctions be CreateResolvingFunctions(promiseToResolve).
-        let resolving_functions = Promise::create_resolving_functions(&promise_to_resolve, context);
+        let resolving_functions =
+            Promise::create_resolving_functions(&promise_to_resolve, &mut context.borrow_mut());
 
         //    b. Let thenCallResult be Completion(HostCallJobCallback(then, thenable, « resolvingFunctions.[[Resolve]], resolvingFunctions.[[Reject]] »)).
-        let then_call_result = context.host_hooks().call_job_callback(
-            then,
-            &thenable,
-            &[
-                resolving_functions.resolve.clone().into(),
-                resolving_functions.reject.clone().into(),
-            ],
-            context,
-        );
+        let callback = then.callback();
+        let args = [
+            resolving_functions.resolve.clone().into(),
+            resolving_functions.reject.clone().into(),
+        ];
+        let then_call_result = {
+            let mut context = context.borrow_mut();
+            if context.async_jobs_enabled {
+                callback.call_async(&thenable, &args, &mut context).await
+            } else {
+                callback.call(&thenable, &args, &mut context)
+            }
+        };
 
         //    c. If thenCallResult is an abrupt completion, then
         if let Err(value) = then_call_result {
-            let value = value.to_opaque(context);
+            let value = value.to_opaque(&mut context.borrow_mut());
             //    i. Return ? Call(resolvingFunctions.[[Reject]], undefined, « thenCallResult.[[Value]] »).
             return resolving_functions
                 .reject
-                .call(&JsValue::undefined(), &[value], context);
+                .call_async(&JsValue::undefined(), &[value], &mut context.borrow_mut())
+                .await;
         }
 
         //    d. Return ? thenCallResult.
@@ -2387,5 +2404,5 @@ fn new_promise_resolve_thenable_job(
     };
 
     // 6. Return the Record { [[Job]]: job, [[Realm]]: thenRealm }.
-    PromiseJob::with_realm(job, realm)
+    PromiseJob::with_realm_async(job, realm)
 }
