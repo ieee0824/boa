@@ -292,6 +292,31 @@ fn throwing_native_function_cancels_its_requested_suspension() {
 }
 
 #[test]
+fn native_constructor_cannot_suspend() {
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("SuspendingConstructor"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, context| {
+                context.suspend_native_call()?;
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+
+    let error = context
+        .eval(Source::from_bytes("new SuspendingConstructor()"))
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native constructors cannot suspend")
+    );
+}
+
+#[test]
 fn typeof_string() {
     run_test_actions([TestAction::assert_eq(
         indoc! {r#"

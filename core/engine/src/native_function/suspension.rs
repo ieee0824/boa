@@ -15,6 +15,10 @@ pub struct NativeCallSuspension {
     inner: Gc<GcRefCell<Inner>>,
 }
 
+struct NativeCallWait {
+    inner: Gc<GcRefCell<Inner>>,
+}
+
 impl fmt::Debug for NativeCallSuspension {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("NativeCallSuspension")
@@ -79,6 +83,13 @@ impl NativeCallSuspension {
         self.inner.borrow_mut().result.take()
     }
 
+    pub(crate) async fn wait(&self) -> JsResult<JsValue> {
+        NativeCallWait {
+            inner: self.inner.clone(),
+        }
+        .await
+    }
+
     pub(crate) fn placeholder(&self) -> JsObject {
         self.inner.borrow().placeholder.clone()
     }
@@ -88,7 +99,7 @@ impl NativeCallSuspension {
     }
 }
 
-impl Future for NativeCallSuspension {
+impl Future for NativeCallWait {
     type Output = JsResult<JsValue>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut task::Context<'_>) -> task::Poll<Self::Output> {

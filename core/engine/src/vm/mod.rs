@@ -93,6 +93,9 @@ pub struct Vm {
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
 
+    /// Whether the active native function was entered through `[[Construct]]`.
+    pub(crate) native_active_function_is_constructor_call: bool,
+
     /// A synchronous native call waiting for an out-of-band host result.
     pub(crate) pending_native_call: Option<NativeCallSuspension>,
 
@@ -484,6 +487,7 @@ impl Vm {
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
             native_active_function: None,
+            native_active_function_is_constructor_call: false,
             pending_native_call: None,
             realm,
             shadow_stack: ShadowStack::default(),
@@ -937,7 +941,7 @@ impl Context {
                         .into();
                     let _ = suspension.resume(Err(error));
                 }
-                let result = suspension.await;
+                let result = suspension.wait().await;
                 if let ControlFlow::Break(value) =
                     self.apply_native_call_completion(&placeholder, result)
                 {

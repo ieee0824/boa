@@ -211,6 +211,11 @@ impl Context {
                 .with_message("native call suspension requires an active native function")
                 .into());
         }
+        if self.vm.native_active_function_is_constructor_call {
+            return Err(JsNativeError::error()
+                .with_message("native constructors cannot suspend")
+                .into());
+        }
         if self.vm.pending_native_call.is_some() {
             return Err(JsNativeError::error()
                 .with_message("another native call is already suspended")
