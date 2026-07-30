@@ -44,11 +44,16 @@ pub struct ScriptEdge {
 struct AsyncScriptFrameGuard<'a> {
     context: &'a mut Context,
     completed: bool,
+    native_continuation_depth: usize,
 }
 
 impl AsyncScriptFrameGuard<'_> {
     fn complete(mut self) {
         self.context.vm.pop_frame();
+        self.context
+            .vm
+            .native_call_continuations
+            .truncate(self.native_continuation_depth);
         self.completed = true;
     }
 }
@@ -61,6 +66,10 @@ impl Drop for AsyncScriptFrameGuard<'_> {
         if let Some(frame) = self.context.vm.pop_frame() {
             self.context.vm.stack.truncate_to_frame(&frame);
         }
+        self.context
+            .vm
+            .native_call_continuations
+            .truncate(self.native_continuation_depth);
     }
 }
 
@@ -255,6 +264,7 @@ impl Script {
         self.prepare_run(context)?;
 
         let frame = AsyncScriptFrameGuard {
+            native_continuation_depth: context.vm.native_call_continuations.len(),
             context,
             completed: false,
         };

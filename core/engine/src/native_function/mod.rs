@@ -26,6 +26,9 @@ use crate::{
 mod suspension;
 pub use suspension::{NativeCallAlreadyResumed, NativeCallSuspension};
 
+mod call_continuation;
+pub use call_continuation::NativeCallContinuation;
+
 #[cfg(feature = "experimental")]
 mod continuation;
 
@@ -408,6 +411,7 @@ pub(crate) fn native_function_call(
         false,
     );
 
+    let continuation_depth = context.vm.native_call_continuations.len();
     let result = if constructor.is_some() {
         function.call(&JsValue::undefined(), &args, context)
     } else {
@@ -430,6 +434,9 @@ pub(crate) fn native_function_call(
     }
 
     let result = result?;
+    if context.vm.native_call_continuations.len() > continuation_depth {
+        return Ok(CallValue::Complete);
+    }
     if let Some(suspension) = context.vm.pending_native_call.as_ref() {
         let placeholder = suspension.placeholder();
         let result_propagates_placeholder = result

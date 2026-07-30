@@ -9,7 +9,7 @@ use crate::{
     builtins::promise::{PromiseCapability, ResolvingFunctions},
     environments::EnvironmentStack,
     module::ModuleEdge,
-    native_function::NativeCallSuspension,
+    native_function::{NativeCallContinuation, NativeCallSuspension},
     object::{JsFunction, JsFunctionEdge},
     realm::Realm,
     script::{Script, ScriptEdge},
@@ -98,6 +98,10 @@ pub struct Vm {
 
     /// A synchronous native call waiting for an out-of-band host result.
     pub(crate) pending_native_call: Option<NativeCallSuspension>,
+
+    pub(crate) native_call_continuations: Vec<NativeCallBoundary>,
+
+    pub(crate) native_call_continuation_active: bool,
 
     /// realm holds both the global object and the environment
     pub(crate) realm: Realm,
@@ -489,6 +493,8 @@ impl Vm {
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
+            native_call_continuations: Vec::new(),
+            native_call_continuation_active: false,
             realm,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
@@ -621,6 +627,12 @@ impl Vm {
     pub(crate) fn take_return_value(&mut self) -> JsValue {
         std::mem::take(&mut self.return_value)
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct NativeCallBoundary {
+    pub(crate) frame_depth: usize,
+    pub(crate) continuation: NativeCallContinuation,
 }
 
 #[allow(clippy::print_stdout)]
@@ -829,6 +841,32 @@ impl Context {
         self.vm.stack.truncate_to_frame(&self.vm.frame);
 
         let result = self.vm.take_return_value();
+        if self
+            .vm
+            .native_call_continuations
+            .last()
+            .is_some_and(|boundary| boundary.frame_depth == self.vm.frames.len())
+        {
+            let boundary = self
+                .vm
+                .native_call_continuations
+                .pop()
+                .expect("a native continuation boundary was checked above");
+            self.vm.pop_frame().expect("callback frame must exist");
+            let continuation_depth = self.vm.native_call_continuations.len();
+            self.vm.native_call_continuation_active = true;
+            let continuation_result = boundary.continuation.call(Ok(result), self);
+            self.vm.native_call_continuation_active = false;
+            return match continuation_result {
+                Ok(value) => {
+                    if self.vm.native_call_continuations.len() == continuation_depth {
+                        self.vm.stack.push(value);
+                    }
+                    ControlFlow::Continue(())
+                }
+                Err(error) => self.handle_error(error),
+            };
+        }
         if exit_early {
             return ControlFlow::Break(CompletionRecord::Normal(result));
         }
@@ -860,6 +898,10 @@ impl Context {
             );
         }
 
+        if let Some(result) = self.handle_native_continuation_throw() {
+            return result;
+        }
+
         let mut env_fp = self.vm.frame().env_fp;
         if self.vm.frame().exit_early() {
             self.vm.environments.truncate(env_fp as usize);
@@ -883,6 +925,10 @@ impl Context {
                 return ControlFlow::Continue(());
             }
 
+            if let Some(result) = self.handle_native_continuation_throw() {
+                return result;
+            }
+
             if exit_early {
                 return ControlFlow::Break(CompletionRecord::Throw(
                     self.vm
@@ -900,6 +946,44 @@ impl Context {
         self.vm.environments.truncate(env_fp as usize);
         self.vm.stack.truncate_to_frame(&frame);
         ControlFlow::Continue(())
+    }
+
+    fn handle_native_continuation_throw(&mut self) -> Option<ControlFlow<CompletionRecord>> {
+        if !self
+            .vm
+            .native_call_continuations
+            .last()
+            .is_some_and(|boundary| boundary.frame_depth == self.vm.frames.len())
+        {
+            return None;
+        }
+
+        let boundary = self
+            .vm
+            .native_call_continuations
+            .pop()
+            .expect("a native continuation boundary was checked above");
+        self.vm.environments.truncate(self.vm.frame.env_fp as usize);
+        self.vm.stack.truncate_to_frame(&self.vm.frame);
+        self.vm.pop_frame().expect("callback frame must exist");
+        let error = self
+            .vm
+            .pending_exception
+            .take()
+            .expect("a thrown completion must have an exception");
+        let continuation_depth = self.vm.native_call_continuations.len();
+        self.vm.native_call_continuation_active = true;
+        let continuation_result = boundary.continuation.call(Err(error), self);
+        self.vm.native_call_continuation_active = false;
+        Some(match continuation_result {
+            Ok(value) => {
+                if self.vm.native_call_continuations.len() == continuation_depth {
+                    self.vm.stack.push(value);
+                }
+                ControlFlow::Continue(())
+            }
+            Err(error) => self.handle_error(error),
+        })
     }
 
     /// Runs the current frame to completion, yielding to the caller each time `budget`

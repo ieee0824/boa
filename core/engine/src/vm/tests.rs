@@ -7,7 +7,7 @@ use crate::{
     context::HostHooks,
     job::{AsyncContext, BoxedFuture, JobCallback, JobExecutor, SimpleJobExecutor},
     js_string,
-    native_function::{NativeCallAlreadyResumed, NativeCallSuspension},
+    native_function::{NativeCallAlreadyResumed, NativeCallContinuation, NativeCallSuspension},
     object::{FunctionObjectBuilder, ObjectInitializer},
     property::{Attribute, PropertyDescriptor},
     run_test_actions, run_test_actions_with,
@@ -104,6 +104,329 @@ fn async_object_call_propagates_native_suspension() {
         .unwrap();
 
     assert_eq!(future::block_on(call).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn native_continuation_resumes_synchronous_javascript_callback() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("listener"), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), context| {
+                            let value = result?.to_i32(context)?;
+                            Ok(JsValue::from(value + 1))
+                        },
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("globalThis.listener = () => suspend() + 1; dispatch() + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async_with_budget(&mut context, 1));
+
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(40)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(43));
+}
+
+#[test]
+fn native_continuation_keeps_synchronous_native_api_compatible() {
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("listener"), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), context| Ok(JsValue::from(result?.to_i32(context)? + 1)),
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        context
+            .eval(Source::from_bytes(
+                "globalThis.listener = () => 40; dispatch() + 1",
+            ))
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn native_continuation_captures_remain_rooted_while_suspended() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    let resumed = Gc::new(GcRefCell::new(false));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_copy_closure_with_captures(
+                |_, _, resumed, context| {
+                    let callback = context
+                        .global_object()
+                        .get(js_string!("listener"), context)?
+                        .as_object()
+                        .expect("listener must be callable")
+                        .clone();
+                    context.call_with_native_continuation(
+                        &callback,
+                        &JsValue::undefined(),
+                        &[],
+                        NativeCallContinuation::from_copy_closure_with_captures(
+                            |result, resumed, _| {
+                                *resumed.borrow_mut() = true;
+                                result
+                            },
+                            resumed.clone(),
+                        ),
+                    )
+                },
+                resumed.clone(),
+            ),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("globalThis.listener = () => suspend(); dispatch()"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    boa_gc::force_collect();
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(42)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+    assert!(*resumed.borrow());
+}
+
+#[test]
+fn native_continuation_boundaries_are_lifo_for_reentrant_callbacks() {
+    fn dispatch_named(name: &'static str) -> NativeFunction {
+        NativeFunction::from_copy_closure_with_captures(
+            |_, _, name, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!(*name), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), context| Ok(JsValue::from(result?.to_i32(context)? + 1)),
+                        (),
+                    ),
+                )
+            },
+            name,
+        )
+    }
+
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("outerDispatch"),
+            0,
+            dispatch_named("outerListener"),
+        )
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("innerDispatch"),
+            0,
+            dispatch_named("innerListener"),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes(
+            "globalThis.innerListener = () => suspend(); globalThis.outerListener = () => innerDispatch() + 1; outerDispatch()",
+        ),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(39)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+}
+
+#[test]
+fn native_continuation_receives_throw_after_finally() {
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("listener"), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), _| match result {
+                            Ok(value) => Ok(value),
+                            Err(_) => Ok(js_string!("handled").into()),
+                        },
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        future::block_on(
+            Script::parse(
+                Source::from_bytes(
+                    "globalThis.finalized = false; globalThis.listener = () => { try { throw 'failure' } finally { finalized = true } }; dispatch()",
+                ),
+                None,
+                &mut context,
+            )
+            .unwrap()
+            .evaluate_async(&mut context),
+        )
+        .unwrap(),
+        js_string!("handled").into()
+    );
+    assert_eq!(
+        context
+            .global_object()
+            .get(js_string!("finalized"), &mut context)
+            .unwrap(),
+        JsValue::from(true)
+    );
+}
+
+#[test]
+fn dropping_native_continuation_cancels_suspension_and_boundary() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("dispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("listener"), context)?
+                    .as_object()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), _| result,
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("globalThis.listener = () => suspend(); dispatch()"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    drop(evaluation);
+
+    assert!(context.vm.native_call_continuations.is_empty());
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::undefined())),
+        Err(NativeCallAlreadyResumed)
+    );
+    assert_eq!(
+        context.eval(Source::from_bytes("1 + 1")).unwrap(),
+        JsValue::from(2)
+    );
 }
 
 #[test]

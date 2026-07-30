@@ -23,7 +23,7 @@ use crate::{
     job::{JobExecutor, SimpleJobExecutor},
     js_string,
     module::{IdleModuleLoader, ModuleLoader, SimpleModuleLoader},
-    native_function::{NativeCallSuspension, NativeFunction},
+    native_function::{NativeCallContinuation, NativeCallSuspension, NativeFunction},
     object::{FunctionObjectBuilder, JsObject, shape::RootShape},
     optimizer::{Optimizer, OptimizerOptions, OptimizerStatistics},
     property::{Attribute, PropertyDescriptor, PropertyKey},
@@ -211,7 +211,7 @@ impl Context {
     /// [`Script::evaluate_async`](crate::Script::evaluate_async), execution then waits for the
     /// returned handle to be completed and uses that completion as the native call's result.
     pub fn suspend_native_call(&mut self) -> JsResult<NativeCallSuspension> {
-        if self.vm.native_active_function.is_none() {
+        if self.vm.native_active_function.is_none() && !self.vm.native_call_continuation_active {
             return Err(JsNativeError::error()
                 .with_message("native call suspension requires an active native function")
                 .into());
@@ -236,6 +236,41 @@ impl Context {
             NativeCallSuspension::new(origin, JsObject::with_object_proto(self.intrinsics()));
         self.vm.pending_native_call = Some(suspension.clone());
         Ok(suspension)
+    }
+
+    /// Calls JavaScript from a native function and resumes `continuation` when that call completes.
+    ///
+    /// This keeps the JavaScript call synchronous from ECMAScript's perspective while allowing an
+    /// asynchronous VM runner to suspend inside the callback. Native code must return normally and
+    /// immediately after calling this method.
+    pub fn call_with_native_continuation(
+        &mut self,
+        callback: &JsObject,
+        this: &JsValue,
+        args: &[JsValue],
+        continuation: NativeCallContinuation,
+    ) -> JsResult<JsValue> {
+        if self.vm.native_active_function.is_none() {
+            return Err(JsNativeError::error()
+                .with_message("native call continuation requires an active native function")
+                .into());
+        }
+
+        self.vm.stack.push(this.clone());
+        self.vm.stack.push(callback.clone());
+        self.vm.stack.calling_convention_push_arguments(args);
+        if callback.__call__(args.len()).resolve(self)? {
+            let result = self.vm.stack.pop();
+            return continuation.call(Ok(result), self);
+        }
+
+        self.vm
+            .native_call_continuations
+            .push(crate::vm::NativeCallBoundary {
+                frame_depth: self.vm.frames.len(),
+                continuation,
+            });
+        Ok(JsValue::undefined())
     }
 
     /// Applies optimizations to the [`StatementList`] inplace.
