@@ -156,6 +156,53 @@ fn function_prototype_call_preserves_native_call_suspension() {
 }
 
 #[test]
+fn reentrant_native_call_restores_the_outer_suspension_origin() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_builtin_callable(
+            js_string!("innerNative"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined())),
+        )
+        .unwrap();
+    context
+        .register_global_builtin_callable(
+            js_string!("outerNative"),
+            1,
+            NativeFunction::from_copy_closure_with_captures(
+                |_, args, slot, context| {
+                    args[0]
+                        .as_callable()
+                        .expect("the test passes a callback")
+                        .call(&JsValue::undefined(), &[], context)?;
+                    let suspension = context.suspend_native_call()?;
+                    *slot.borrow_mut() = Some(suspension);
+                    Ok(JsValue::undefined())
+                },
+                slot.clone(),
+            ),
+        )
+        .unwrap();
+    let script = Script::parse(
+        Source::from_bytes("outerNative(() => innerNative()) + 1"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+
+    assert_eq!(future::block_on(evaluation).unwrap(), JsValue::from(42));
+}
+
+#[test]
 fn suspension_is_rejected_if_the_opcode_consumes_the_native_result() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
@@ -295,10 +342,21 @@ fn throwing_native_function_cancels_its_requested_suspension() {
 fn native_constructor_cannot_suspend() {
     let mut context = Context::default();
     context
+        .register_global_builtin_callable(
+            js_string!("innerNative"),
+            0,
+            NativeFunction::from_copy_closure(|_, _, _| Ok(JsValue::undefined())),
+        )
+        .unwrap();
+    context
         .register_global_callable(
             js_string!("SuspendingConstructor"),
-            0,
-            NativeFunction::from_copy_closure(|_, _, context| {
+            1,
+            NativeFunction::from_copy_closure(|_, args, context| {
+                args[0]
+                    .as_callable()
+                    .expect("the test passes a callback")
+                    .call(&JsValue::undefined(), &[], context)?;
                 context.suspend_native_call()?;
                 Ok(JsValue::undefined())
             }),
@@ -306,7 +364,9 @@ fn native_constructor_cannot_suspend() {
         .unwrap();
 
     let error = context
-        .eval(Source::from_bytes("new SuspendingConstructor()"))
+        .eval(Source::from_bytes(
+            "new SuspendingConstructor(() => innerNative())",
+        ))
         .unwrap_err();
 
     assert!(

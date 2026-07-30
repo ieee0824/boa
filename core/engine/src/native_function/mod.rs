@@ -401,8 +401,14 @@ pub(crate) fn native_function_call(
     let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
-    context.vm.native_active_function = Some(this_function_object);
-    context.vm.native_active_function_is_constructor_call = false;
+    let previous_active_function = context
+        .vm
+        .native_active_function
+        .replace(this_function_object);
+    let previous_is_constructor_call = std::mem::replace(
+        &mut context.vm.native_active_function_is_constructor_call,
+        false,
+    );
 
     let result = if constructor.is_some() {
         function.call(&JsValue::undefined(), &args, context)
@@ -411,8 +417,8 @@ pub(crate) fn native_function_call(
     }
     .map_err(|err| err.inject_realm(context.realm()));
 
-    context.vm.native_active_function = None;
-    context.vm.native_active_function_is_constructor_call = false;
+    context.vm.native_active_function = previous_active_function;
+    context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
     context.swap_realm(&mut realm);
 
     context.vm.shadow_stack.pop();
@@ -481,8 +487,14 @@ fn native_function_construct(
     let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
-    context.vm.native_active_function = Some(this_function_object);
-    context.vm.native_active_function_is_constructor_call = true;
+    let previous_active_function = context
+        .vm
+        .native_active_function
+        .replace(this_function_object);
+    let previous_is_constructor_call = std::mem::replace(
+        &mut context.vm.native_active_function_is_constructor_call,
+        true,
+    );
 
     let new_target = context.vm.stack.pop();
     let args = context
@@ -517,8 +529,8 @@ fn native_function_construct(
             }
         });
 
-    context.vm.native_active_function = None;
-    context.vm.native_active_function_is_constructor_call = false;
+    context.vm.native_active_function = previous_active_function;
+    context.vm.native_active_function_is_constructor_call = previous_is_constructor_call;
     context.swap_realm(&mut realm);
 
     context.vm.shadow_stack.pop();
