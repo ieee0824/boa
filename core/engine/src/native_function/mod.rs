@@ -192,8 +192,8 @@ impl NativeFunction {
     /// # Examples
     ///
     /// ```
-    /// # use std::cell::RefCell;
     /// # use boa_engine::{
+    /// #   job::AsyncContext,
     /// #   JsValue,
     /// #   Context,
     /// #   JsResult,

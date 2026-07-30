@@ -279,8 +279,8 @@ impl JsPromise {
     ///
     /// ```
     /// use std::error::Error;
-    /// # use std::cell::RefCell;
     /// # use boa_engine::{
+    /// #    job::AsyncContext,
     /// #    object::builtins::JsPromise,
     /// #    builtins::promise::PromiseState,
     /// #    Context, JsResult, JsValue
