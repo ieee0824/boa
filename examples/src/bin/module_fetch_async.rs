@@ -148,15 +148,6 @@ impl Queue {
             promise_jobs: RefCell::default(),
         }
     }
-
-    fn drain_jobs(&self, context: &mut Context) {
-        let jobs = std::mem::take(&mut *self.promise_jobs.borrow_mut());
-        for job in jobs {
-            if let Err(e) = job.call(context) {
-                eprintln!("Uncaught {e}");
-            }
-        }
-    }
 }
 
 impl JobExecutor for Queue {
@@ -182,8 +173,13 @@ impl JobExecutor for Queue {
             loop {
                 for job in std::mem::take(&mut *self.async_jobs.borrow_mut()) {
                     if job.is_exclusive() {
-                        if let Err(err) = job.call(context).await {
-                            eprintln!("Uncaught {err}");
+                        while let Some(result) = group.next().await {
+                            if let Err(error) = result {
+                                eprintln!("Uncaught {error}");
+                            }
+                        }
+                        if let Err(error) = job.call(context).await {
+                            eprintln!("Uncaught {error}");
                         }
                     } else {
                         group.insert(job.call(context));
@@ -202,8 +198,12 @@ impl JobExecutor for Queue {
                     eprintln!("Uncaught {err}");
                 };
 
-                // Only one macrotask can be executed before the next drain of the microtask queue.
-                self.drain_jobs(&mut context.borrow_mut());
+                let jobs = std::mem::take(&mut *self.promise_jobs.borrow_mut());
+                for job in jobs {
+                    if let Err(error) = job.call_async(context).await {
+                        eprintln!("Uncaught {error}");
+                    }
+                }
                 future::yield_now().await
             }
         })

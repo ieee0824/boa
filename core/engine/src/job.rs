@@ -304,12 +304,17 @@ impl Debug for AsyncContext<'_> {
 }
 
 impl<'a> AsyncContext<'a> {
-    /// Creates async job context storage from an execution context.
+    /// Creates async job context storage and enables asynchronous suspension until it is dropped.
+    ///
+    /// Dropping the storage restores the execution context's previous suspension mode.
     pub fn new(context: &'a mut Context) -> Self {
         Self::with_async_jobs_enabled(context, true)
     }
 
-    /// Creates async job context storage without enabling asynchronous suspension.
+    /// Creates async job context storage with asynchronous suspension disabled until it is dropped.
+    ///
+    /// This is intended for synchronous executor entry points. Dropping the storage restores the
+    /// execution context's previous suspension mode.
     pub fn new_sync(context: &'a mut Context) -> Self {
         Self::with_async_jobs_enabled(context, false)
     }
@@ -596,7 +601,8 @@ impl PromiseJob {
         }
     }
 
-    fn call_async<'a>(self, context: &'a AsyncContext<'_>) -> BoxedFuture<'a> {
+    /// Calls the promise job asynchronously without blocking the host executor.
+    pub fn call_async<'a>(self, context: &'a AsyncContext<'_>) -> BoxedFuture<'a> {
         match self.0 {
             PromiseJobInner::Sync(job) => {
                 Box::pin(async move { job.call(&mut context.borrow_mut()) })
@@ -836,6 +842,12 @@ impl JobExecutor for SimpleJobExecutor {
                 let async_jobs = mem::take(&mut *self.async_jobs.borrow_mut());
                 for job in async_jobs {
                     if job.is_exclusive() {
+                        while let Some(result) = group.next().await {
+                            if let Err(error) = result {
+                                self.clear();
+                                return Err(error);
+                            }
+                        }
                         if let Err(err) = job.call(context).await {
                             self.clear();
                             return Err(err);
@@ -902,5 +914,51 @@ impl JobExecutor for SimpleJobExecutor {
 
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exclusive_async_jobs_wait_for_earlier_jobs_and_block_later_jobs() {
+        let executor = Rc::new(SimpleJobExecutor::new());
+        let order = Rc::new(RefCell::new(Vec::new()));
+        let mut context = Context::default();
+
+        let earlier_order = order.clone();
+        executor.clone().enqueue_job(
+            NativeAsyncJob::new(async move |_| {
+                future::yield_now().await;
+                earlier_order.borrow_mut().push(1);
+                Ok(JsValue::undefined())
+            })
+            .into(),
+            &mut context,
+        );
+        let exclusive_order = order.clone();
+        executor.clone().enqueue_job(
+            NativeAsyncJob::new_exclusive(async move |context| {
+                let _context = context.take();
+                exclusive_order.borrow_mut().push(2);
+                Ok(JsValue::undefined())
+            })
+            .into(),
+            &mut context,
+        );
+        let later_order = order.clone();
+        executor.clone().enqueue_job(
+            NativeAsyncJob::new(async move |_| {
+                later_order.borrow_mut().push(3);
+                Ok(JsValue::undefined())
+            })
+            .into(),
+            &mut context,
+        );
+
+        future::block_on(executor.run_jobs_async(&AsyncContext::new(&mut context))).unwrap();
+
+        assert_eq!(*order.borrow(), [1, 2, 3]);
     }
 }

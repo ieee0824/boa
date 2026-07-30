@@ -657,8 +657,13 @@ impl JobExecutor for Executor {
             loop {
                 for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
                     if job.is_exclusive() {
-                        if let Err(e) = job.call(context).await {
-                            self.printer.print(uncaught_job_error(&e));
+                        while let Some(result) = group.next().await {
+                            if let Err(error) = result {
+                                self.printer.print(uncaught_job_error(&error));
+                            }
+                        }
+                        if let Err(error) = job.call(context).await {
+                            self.printer.print(uncaught_job_error(&error));
                         }
                     } else {
                         group.insert(job.call(context));
@@ -677,12 +682,12 @@ impl JobExecutor for Executor {
                     let context = &mut context.borrow_mut();
                     self.drain_timeout_jobs(context);
                     self.drain_generic_jobs(context);
+                }
 
-                    let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
-                    for job in jobs {
-                        if let Err(e) = job.call(context) {
-                            self.printer.print(uncaught_job_error(&e));
-                        }
+                let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
+                for job in jobs {
+                    if let Err(error) = job.call_async(context).await {
+                        self.printer.print(uncaught_job_error(&error));
                     }
                 }
             }

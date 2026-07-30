@@ -2,8 +2,10 @@ use crate::vm::CallFrame;
 use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::{
-    Context, JsNativeError, JsNativeErrorKind, JsValue, Module, NativeFunction, Script, TestAction,
-    job::{AsyncContext, JobExecutor, SimpleJobExecutor},
+    Context, JsNativeError, JsNativeErrorKind, JsResult, JsValue, Module, NativeFunction, Script,
+    TestAction,
+    context::HostHooks,
+    job::{AsyncContext, BoxedFuture, JobCallback, JobExecutor, SimpleJobExecutor},
     js_string,
     native_function::{NativeCallAlreadyResumed, NativeCallSuspension},
     object::{FunctionObjectBuilder, ObjectInitializer},
@@ -16,6 +18,7 @@ use boa_macros::js_str;
 use boa_parser::Source;
 use futures_lite::future;
 use indoc::indoc;
+use std::{cell::Cell, rc::Rc};
 
 fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> NativeFunction {
     NativeFunction::from_copy_closure_with_captures(
@@ -163,6 +166,8 @@ fn direct_job_executor_run_jobs_async_enables_async_suspension() {
         future::block_on(jobs).unwrap();
     }
 
+    assert!(!context.async_jobs_enabled);
+
     assert_eq!(
         context
             .global_object()
@@ -186,6 +191,63 @@ fn async_jobs_keep_promise_reactions_fifo() {
         context.eval(Source::from_bytes("order.join(',')")).unwrap(),
         js_string!("1,2").into()
     );
+}
+
+#[test]
+fn promise_jobs_preserve_host_call_job_callback_hooks() {
+    struct CountingHooks(Cell<usize>);
+
+    impl HostHooks for CountingHooks {
+        fn call_job_callback(
+            &self,
+            job: JobCallback,
+            this: &JsValue,
+            args: &[JsValue],
+            context: &mut Context,
+        ) -> JsResult<JsValue> {
+            self.0.set(self.0.get() + 1);
+            job.callback().call(this, args, context)
+        }
+
+        fn call_job_callback_async<'a>(
+            &'a self,
+            job: JobCallback,
+            this: &'a JsValue,
+            args: &'a [JsValue],
+            context: &'a mut Context,
+        ) -> BoxedFuture<'a> {
+            self.0.set(self.0.get() + 1);
+            Box::pin(async move { job.callback().call_async(this, args, context).await })
+        }
+    }
+
+    let hooks = Rc::new(CountingHooks(Cell::new(0)));
+    let mut context = Context::builder()
+        .host_hooks(hooks.clone())
+        .build()
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "Promise.resolve(1).then(value => value + 1); Promise.resolve({ then(resolve) { resolve(2); } });",
+        ))
+        .unwrap();
+
+    context.run_jobs().unwrap();
+
+    assert_eq!(hooks.0.get(), 2);
+
+    let mut context = Context::builder()
+        .host_hooks(hooks.clone())
+        .build()
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "Promise.resolve(1).then(value => value + 1); Promise.resolve({ then(resolve) { resolve(2); } });",
+        ))
+        .unwrap();
+    future::block_on(context.run_jobs_async()).unwrap();
+
+    assert_eq!(hooks.0.get(), 4);
 }
 
 #[test]

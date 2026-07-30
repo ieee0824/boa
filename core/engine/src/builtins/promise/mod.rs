@@ -2287,13 +2287,15 @@ fn new_promise_reaction_job(
             },
             //   e. Else, let handlerResult be Completion(HostCallJobCallback(handler, undefined, « argument »)).
             Some(handler) => {
-                let callback = handler.callback();
                 let this = JsValue::undefined();
                 let args = [argument.clone()];
+                let hooks = context.host_hooks().clone();
                 let result = if context.async_jobs_enabled {
-                    callback.call_async(&this, &args, &mut context).await
+                    hooks
+                        .call_job_callback_async(handler, &this, &args, &mut context)
+                        .await
                 } else {
-                    callback.call(&this, &args, &mut context)
+                    hooks.call_job_callback(handler, &this, &args, &mut context)
                 };
                 result.map_err(|e| e.to_opaque(&mut context))
             }
@@ -2380,16 +2382,18 @@ fn new_promise_resolve_thenable_job(
             Promise::create_resolving_functions(&promise_to_resolve, &mut context);
 
         //    b. Let thenCallResult be Completion(HostCallJobCallback(then, thenable, « resolvingFunctions.[[Resolve]], resolvingFunctions.[[Reject]] »)).
-        let callback = then.callback();
         let args = [
             resolving_functions.resolve.clone().into(),
             resolving_functions.reject.clone().into(),
         ];
         let then_call_result = {
+            let hooks = context.host_hooks().clone();
             if context.async_jobs_enabled {
-                callback.call_async(&thenable, &args, &mut context).await
+                hooks
+                    .call_job_callback_async(then, &thenable, &args, &mut context)
+                    .await
             } else {
-                callback.call(&thenable, &args, &mut context)
+                hooks.call_job_callback(then, &thenable, &args, &mut context)
             }
         };
 
