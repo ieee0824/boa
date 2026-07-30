@@ -2,7 +2,9 @@ use super::VaryingOperand;
 use crate::{
     Context, JsArgs, JsValue,
     builtins::{
-        Promise, async_generator::AsyncGenerator, generator::GeneratorContext,
+        Promise,
+        async_generator::AsyncGenerator,
+        generator::{GeneratorContext, PendingAsyncResume},
         promise::PromiseCapability,
     },
     js_string,
@@ -67,11 +69,17 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
 
-                    r#gen.resume(
-                        Some(args.get_or_undefined(0).clone()),
-                        GeneratorResumeKind::Normal,
-                        context,
-                    );
+                    let value = Some(args.get_or_undefined(0).clone());
+                    if context.async_jobs_enabled {
+                        context.pending_async_resume = Some(PendingAsyncResume {
+                            context: r#gen,
+                            value,
+                            kind: GeneratorResumeKind::Normal,
+                            async_generator,
+                        });
+                        return Ok(JsValue::undefined());
+                    }
+                    r#gen.resume(value, GeneratorResumeKind::Normal, context);
 
                     if let Some(async_generator) = async_generator {
                         async_generator
@@ -108,11 +116,17 @@ impl Await {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
 
-                    r#gen.resume(
-                        Some(args.get_or_undefined(0).clone()),
-                        GeneratorResumeKind::Throw,
-                        context,
-                    );
+                    let value = Some(args.get_or_undefined(0).clone());
+                    if context.async_jobs_enabled {
+                        context.pending_async_resume = Some(PendingAsyncResume {
+                            context: r#gen,
+                            value,
+                            kind: GeneratorResumeKind::Throw,
+                            async_generator,
+                        });
+                        return Ok(JsValue::undefined());
+                    }
+                    r#gen.resume(value, GeneratorResumeKind::Throw, context);
 
                     if let Some(async_generator) = async_generator {
                         async_generator

@@ -157,7 +157,7 @@ fn async_module_propagates_suspension_after_top_level_await() {
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
     let module = Module::parse(
-        Source::from_bytes("export const value = suspend() + 1; await 0"),
+        Source::from_bytes("await Promise.resolve(); export const value = suspend() + 1"),
         None,
         &mut context,
     )

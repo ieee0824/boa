@@ -454,6 +454,18 @@ impl JsObject {
 
         let frame_index = context.vm.frames.len();
         if self.__call__(argument_count).resolve(context)? {
+            if let Some(mut pending) = context.pending_async_resume.take() {
+                pending
+                    .context
+                    .resume_async(pending.value, pending.kind, context)
+                    .await;
+                if let Some(async_generator) = pending.async_generator {
+                    async_generator
+                        .downcast_mut::<crate::builtins::async_generator::AsyncGenerator>()
+                        .expect("must be async generator")
+                        .context = Some(pending.context);
+                }
+            }
             return Ok(context.vm.stack.pop());
         }
 

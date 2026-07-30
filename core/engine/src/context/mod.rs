@@ -113,6 +113,8 @@ pub struct Context {
 
     pub(crate) async_jobs_enabled: bool,
 
+    pub(crate) pending_async_resume: Option<builtins::generator::PendingAsyncResume>,
+
     #[cfg(feature = "temporal")]
     tz_provider: CompiledTzdbProvider,
 
@@ -1179,6 +1181,7 @@ impl ContextBuilder {
             parser_identifier: 0,
             can_block: self.can_block,
             async_jobs_enabled: false,
+            pending_async_resume: None,
             data: HostDefined::default(),
         };
 
