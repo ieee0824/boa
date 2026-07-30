@@ -914,7 +914,7 @@ fn async_module_entry_preserves_non_tla_dependency_order() {
     let dependency = Module::parse(
         Source::from_reader(
             &b"globalThis.order = ['dependency-before']; export const value = suspend() + 1; order.push('dependency-after')"[..],
-            Some(&root.join("dependency.js")),
+            Some(Path::new("dependency.js")),
         ),
         None,
         &mut context,
@@ -924,7 +924,7 @@ fn async_module_entry_preserves_non_tla_dependency_order() {
     let module = Module::parse(
         Source::from_reader(
             &b"import { value } from './dependency.js'; order.push('root-before'); export const result = value + suspend(); order.push('root-after')"[..],
-            Some(&root.join("main.js")),
+            Some(Path::new("main.js")),
         ),
         None,
         &mut context,
@@ -1041,7 +1041,7 @@ fn async_module_entry_preserves_mixed_tla_dependency_order() {
     let dependency = Module::parse(
         Source::from_reader(
             &b"globalThis.mixedOrder = ['dependency-before']; await Promise.resolve(); mixedOrder.push('dependency-after'); export const value = 20"[..],
-            Some(&root.join("mixed-dependency.js")),
+            Some(Path::new("mixed-dependency.js")),
         ),
         None,
         &mut context,
@@ -1051,7 +1051,7 @@ fn async_module_entry_preserves_mixed_tla_dependency_order() {
     let module = Module::parse(
         Source::from_reader(
             &b"import { value } from './mixed-dependency.js'; mixedOrder.push('root'); export const result = value + 22"[..],
-            Some(&root.join("mixed-main.js")),
+            Some(Path::new("mixed-main.js")),
         ),
         None,
         &mut context,
