@@ -30,28 +30,54 @@ All of `pass-*.js` run clean under `BOA_GC_THRESHOLD=0`, which covers rather mor
 looks like: realm bootstrap, every builtin, host class registration, the console, object
 and array literals, property assignment, function calls, and the VM value stack.
 
-## What fails
+## The systemic cause: a `GcRefCell` being written to is not traced
 
-`fail-01-loop-nested-literal.js` — two lines. A loop building a nested object literal.
+`GcRefCell::trace` skips the cell's contents entirely while the cell is mutably borrowed
+(`core/gc/src/cell.rs:233`). So an allocation that happens while a `borrow_mut()` is held
+runs a collection that cannot see anything below that cell.
+
+Under the old scheme this failed safe. Root discovery worked by tracing the heap to count
+how many of an allocation's handles were internal to it, so a skipped subtree merely
+*undercounted* those handles, which made the allocation look more rooted and kept it
+alive. Under explicit roots the same skip means the subtree has no root at all, and it is
+reclaimed.
+
+`Object`'s data lives in a `GcRefCell`, so this applies to any `object.borrow_mut()` held
+across an allocation — the object survives (its box is marked from the register), but
+every object reachable only through its properties does not.
+
+`fail-01` was one instance of this, in the shape transition table, and is fixed: the weak
+reference is now allocated before the borrow rather than inside it.
+
+## What still fails
+
+Scripts that build several properties on one object still fail, on the same path and for
+the same reason as `fail-01` did, one level up:
 
 ```
-#330: accessed an ephemeron the collector already reclaimed — its holder is not
-registered as a GC root
-  ephemeron_box.rs:109
-  SharedShape::insert_property_transition   shape/shared_shape/mod.rs:249
-  Shape::insert_property_transition         shape/mod.rs:178
-  PropertyMap::insert_with_slot             property_map.rs:543
-  validate_and_apply_property_descriptor    internal_methods/mod.rs:1023
-  DefineOwnPropertyByName::operation        vm/opcode/define/own_property.rs:29
+#330: dereferenced a `VTableObject<OrdinaryObject>` the collector already reclaimed
+  reclaimed while collecting here:
+    SharedShape::new                          shape/shared_shape/mod.rs:138
+    SharedShape::insert_property_transition   shape/shared_shape/mod.rs:272
+    PropertyMap::insert_with_slot             property_map.rs:543
+    validate_and_apply_property_descriptor    internal_methods/mod.rs:1023
+    DefineOwnPropertyByName::operation        vm/opcode/define/own_property.rs:29
 ```
 
-Note what the shape of this failure rules out. The object being defined on, and the value
-being defined, are both read from VM registers, and registers are inside the traced value
-stack — `push_frame` grows it with `resize_with`, so the register range is within the
-`Vec`'s length, and the stack provider was measured enqueueing from it. So this is not the
-value stack. It is a shape or a transition-table ephemeron that is reachable only from a
-native local at the moment `SharedShape::new` allocates.
+Defining a property needs `&mut Object`, so `validate_and_apply_property_descriptor` holds
+the object's `borrow_mut()` while `SharedShape::new` allocates. The reclaimed object is a
+value already stored in one of that object's properties: for
+`{ a: i, b: { c: i } }`, defining a later property drops `b`'s object from the trace.
 
-`pass-03` builds the same nested literal once and passes; only the loop fails. The loop is
-what exercises the *second* transition through an existing `ForwardTransition`, so the
-suspect is the transition cache's weak entries rather than the freshly built shape.
+Note what this rules out. The object being defined on and the value being defined are both
+read from VM registers, and registers are inside the traced value stack — `push_frame`
+grows it with `resize_with`, so the register range is within the `Vec`'s length, and the
+stack provider was measured enqueueing from it. The value stack is not the problem.
+
+### Finding the rest
+
+Worth building next: count active `Writing` borrows in a thread local, and have the
+allocator report a backtrace when it allocates while that count is non-zero. That turns
+this class from a silent reclamation into an enumerable list of sites, which is what
+sizing the remaining work needs. Each site is then fixed locally by hoisting the
+allocation out of the borrow, as `ForwardTransition::insert_property` now does.
