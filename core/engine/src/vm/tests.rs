@@ -184,6 +184,40 @@ fn async_module_propagates_suspension_after_top_level_await() {
 }
 
 #[test]
+fn async_module_propagates_suspension_before_top_level_await() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let module = Module::parse(
+        Source::from_bytes("export const value = suspend() + 1; await Promise.resolve()"),
+        None,
+        &mut context,
+    )
+    .unwrap();
+    let mut evaluation = Box::pin(module.load_link_evaluate_async(&mut context));
+
+    while slot.borrow().is_none() {
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    }
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+    future::block_on(evaluation).unwrap();
+
+    assert_eq!(
+        module
+            .namespace(&mut context)
+            .get(js_string!("value"), &mut context)
+            .unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
 fn native_call_resume_error_is_thrown_at_the_original_call_site() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
