@@ -255,6 +255,11 @@ impl Context {
                 .with_message("native call continuation requires an active native function")
                 .into());
         }
+        if self.vm.native_active_function_is_constructor_call {
+            return Err(JsNativeError::error()
+                .with_message("native constructors cannot start call continuations")
+                .into());
+        }
 
         self.vm.stack.push(this.clone());
         self.vm.stack.push(callback.clone());

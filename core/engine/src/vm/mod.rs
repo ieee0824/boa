@@ -760,9 +760,10 @@ impl Context {
                     if let Some(boundary) = continuation {
                         let value = self.vm.stack.pop();
                         let continuation_depth = self.vm.native_call_continuations.len();
+                        let continuation_was_active = self.vm.native_call_continuation_active;
                         self.vm.native_call_continuation_active = true;
                         let result = boundary.continuation.call(Ok(value), self);
-                        self.vm.native_call_continuation_active = false;
+                        self.vm.native_call_continuation_active = continuation_was_active;
                         match result {
                             Ok(value) => {
                                 if self.vm.native_call_continuations.len() == continuation_depth {
@@ -794,9 +795,10 @@ impl Context {
                     if let Some(boundary) = continuation {
                         drop(self.vm.stack.pop());
                         let continuation_depth = self.vm.native_call_continuations.len();
+                        let continuation_was_active = self.vm.native_call_continuation_active;
                         self.vm.native_call_continuation_active = true;
                         let result = boundary.continuation.call(Err(error), self);
-                        self.vm.native_call_continuation_active = false;
+                        self.vm.native_call_continuation_active = continuation_was_active;
                         match result {
                             Ok(value) => {
                                 if self.vm.native_call_continuations.len() == continuation_depth {
@@ -912,9 +914,10 @@ impl Context {
         ) {
             self.vm.pop_frame().expect("callback frame must exist");
             let continuation_depth = self.vm.native_call_continuations.len();
+            let continuation_was_active = self.vm.native_call_continuation_active;
             self.vm.native_call_continuation_active = true;
             let continuation_result = boundary.continuation.call(Ok(result), self);
-            self.vm.native_call_continuation_active = false;
+            self.vm.native_call_continuation_active = continuation_was_active;
             return match continuation_result {
                 Ok(value) => {
                     if self.vm.native_call_continuations.len() == continuation_depth {
@@ -1027,9 +1030,10 @@ impl Context {
             .take()
             .expect("a thrown completion must have an exception");
         let continuation_depth = self.vm.native_call_continuations.len();
+        let continuation_was_active = self.vm.native_call_continuation_active;
         self.vm.native_call_continuation_active = true;
         let continuation_result = boundary.continuation.call(Err(error), self);
-        self.vm.native_call_continuation_active = false;
+        self.vm.native_call_continuation_active = continuation_was_active;
         Some(match continuation_result {
             Ok(value) => {
                 if self.vm.native_call_continuations.len() == continuation_depth {

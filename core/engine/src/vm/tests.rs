@@ -583,6 +583,103 @@ fn native_continuation_boundaries_are_lifo_for_reentrant_callbacks() {
 }
 
 #[test]
+fn nested_continuation_completion_restores_the_outer_active_guard() {
+    fn dispatch_named(name: &'static str) -> NativeFunction {
+        NativeFunction::from_copy_closure_with_captures(
+            |_, _, name, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!(*name), context)?
+                    .as_callable()
+                    .expect("listener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), context| Ok(JsValue::from(result?.to_i32(context)? + 1)),
+                        (),
+                    ),
+                )
+            },
+            name,
+        )
+    }
+
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("innerDispatch"),
+            0,
+            dispatch_named("innerListener"),
+        )
+        .unwrap();
+    context
+        .register_global_callable(
+            js_string!("outerDispatch"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, context| {
+                let callback = context
+                    .global_object()
+                    .get(js_string!("outerListener"), context)?
+                    .as_callable()
+                    .expect("outerListener must be callable")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), context| {
+                            result?;
+                            let nested = context
+                                .global_object()
+                                .get(js_string!("nested"), context)?
+                                .as_callable()
+                                .expect("nested must be callable")
+                                .clone();
+                            assert_eq!(
+                                nested.call(&JsValue::undefined(), &[], context)?,
+                                JsValue::from(2)
+                            );
+                            let final_listener = context
+                                .global_object()
+                                .get(js_string!("finalListener"), context)?
+                                .as_callable()
+                                .expect("finalListener must be callable")
+                                .clone();
+                            context.call_with_native_continuation(
+                                &final_listener,
+                                &JsValue::undefined(),
+                                &[],
+                                NativeCallContinuation::from_copy_closure_with_captures(
+                                    |result, (), context| {
+                                        Ok(JsValue::from(result?.to_i32(context)? + 1))
+                                    },
+                                    (),
+                                ),
+                            )
+                        },
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        context
+            .eval(Source::from_bytes(
+                "globalThis.innerListener = () => 1; globalThis.nested = () => innerDispatch(); globalThis.outerListener = () => 0; globalThis.finalListener = () => 3; outerDispatch()",
+            ))
+            .unwrap(),
+        JsValue::from(4)
+    );
+    assert!(context.vm.native_call_continuations.is_empty());
+}
+
+#[test]
 fn native_continuation_receives_throw_after_finally() {
     let mut context = Context::default();
     context
@@ -1622,6 +1719,43 @@ fn native_constructor_cannot_suspend() {
             .to_string()
             .contains("native constructors cannot suspend")
     );
+}
+
+#[test]
+fn native_constructor_cannot_start_a_call_continuation() {
+    let mut context = Context::default();
+    context
+        .register_global_callable(
+            js_string!("ContinuationConstructor"),
+            1,
+            NativeFunction::from_copy_closure(|_, args, context| {
+                let callback = args[0]
+                    .as_callable()
+                    .expect("the test passes a callback")
+                    .clone();
+                context.call_with_native_continuation(
+                    &callback,
+                    &JsValue::undefined(),
+                    &[],
+                    NativeCallContinuation::from_copy_closure_with_captures(
+                        |result, (), _| result,
+                        (),
+                    ),
+                )
+            }),
+        )
+        .unwrap();
+
+    let error = context
+        .eval(Source::from_bytes("new ContinuationConstructor(() => 1)"))
+        .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("native constructors cannot start call continuations")
+    );
+    assert!(context.vm.native_call_continuations.is_empty());
 }
 
 #[test]
