@@ -426,6 +426,48 @@ impl JsObject {
         result
     }
 
+    /// Asynchronously calls this object, allowing native calls made by JavaScript
+    /// frames to suspend while their owner completes them.
+    #[allow(clippy::future_not_send)]
+    pub async fn call_async(
+        &self,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        self.call_async_with_budget(this, args, context, 256).await
+    }
+
+    /// Asynchronously calls this object, yielding after `budget` VM clock cycles.
+    #[allow(clippy::future_not_send)]
+    pub async fn call_async_with_budget(
+        &self,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
+        budget: u32,
+    ) -> JsResult<JsValue> {
+        context.vm.stack.push(this.clone());
+        context.vm.stack.push(self.clone());
+        let argument_count = args.len();
+        context.vm.stack.calling_convention_push_arguments(args);
+
+        let frame_index = context.vm.frames.len();
+        if self.__call__(argument_count).resolve(context)? {
+            return Ok(context.vm.stack.pop());
+        }
+
+        if frame_index + 1 == context.vm.frames.len() {
+            context.vm.frame.set_exit_early(true);
+        } else {
+            context.vm.frames[frame_index + 1].set_exit_early(true);
+        }
+
+        let result = context.run_async_with_budget(budget).await.consume();
+        context.vm.pop_frame().expect("frame must exist");
+        result
+    }
+
     /// `Construct ( F [ , argumentsList [ , newTarget ] ] )`
     ///
     /// Construct an instance of this object with the specified arguments.

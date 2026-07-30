@@ -1,6 +1,10 @@
 //! The ECMAScript context.
 
-use std::{cell::Cell, path::Path, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    path::Path,
+    rc::Rc,
+};
 
 use boa_ast::StatementList;
 use boa_interner::Interner;
@@ -518,6 +522,13 @@ impl Context {
     #[inline]
     pub fn run_jobs(&mut self) -> JsResult<()> {
         self.job_executor().run_jobs(self)
+    }
+
+    /// Asynchronously runs all jobs with the provided job executor.
+    #[allow(clippy::future_not_send)]
+    pub async fn run_jobs_async(&mut self) -> JsResult<()> {
+        let executor = self.job_executor();
+        executor.run_jobs_async(&RefCell::new(self)).await
     }
 
     /// Abstract operation [`ClearKeptObjects`][clear].

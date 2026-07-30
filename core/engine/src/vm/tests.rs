@@ -70,6 +70,39 @@ fn async_evaluation_resumes_a_native_call_exactly_once() {
 }
 
 #[test]
+fn async_object_call_propagates_native_suspension() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "globalThis.listener = value => suspend() + value",
+        ))
+        .unwrap();
+    let listener = context
+        .global_object()
+        .get(js_string!("listener"), &mut context)
+        .unwrap()
+        .as_object()
+        .unwrap()
+        .clone();
+    let this = JsValue::undefined();
+    let args = [JsValue::from(1)];
+    let mut call = Box::pin(listener.call_async(&this, &args, &mut context));
+
+    assert!(future::block_on(future::poll_once(call.as_mut())).is_none());
+    slot.borrow()
+        .as_ref()
+        .unwrap()
+        .resume(Ok(JsValue::from(41)))
+        .unwrap();
+
+    assert_eq!(future::block_on(call).unwrap(), JsValue::from(42));
+}
+
+#[test]
 fn native_call_resume_error_is_thrown_at_the_original_call_site() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));

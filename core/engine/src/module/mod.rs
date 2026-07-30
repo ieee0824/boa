@@ -592,6 +592,23 @@ impl Module {
             )
     }
 
+    /// Loads, links and evaluates this module asynchronously.
+    ///
+    /// This drives the context's asynchronous job executor until the lifecycle
+    /// promise settles and converts a rejected promise into a [`JsError`].
+    #[allow(clippy::future_not_send)]
+    pub async fn load_link_evaluate_async(&self, context: &mut Context) -> JsResult<JsValue> {
+        let promise = self.load_link_evaluate(context);
+        loop {
+            context.run_jobs_async().await?;
+            match promise.state() {
+                PromiseState::Pending => futures_lite::future::yield_now().await,
+                PromiseState::Fulfilled(value) => return Ok(value),
+                PromiseState::Rejected(error) => return Err(JsError::from_opaque(error)),
+            }
+        }
+    }
+
     /// Abstract operation [`GetModuleNamespace ( module )`][spec].
     ///
     /// Gets the [**Module Namespace Object**][ns] that represents this module's exports.

@@ -285,6 +285,9 @@ impl GenericJob {
 /// The [`Future`] job returned by a [`NativeAsyncJob`] operation.
 pub type BoxedFuture<'a> = Pin<Box<dyn Future<Output = JsResult<JsValue>> + 'a>>;
 
+/// The boxed future returned by [`JobExecutor::run_jobs_async`].
+pub type JobExecutorFuture<'a> = Pin<Box<dyn Future<Output = JsResult<()>> + 'a>>;
+
 /// An ECMAScript [Job] that can be run asynchronously.
 ///
 /// This is an additional type of job that is not defined by the specification, enabling running `Future` tasks
@@ -579,16 +582,11 @@ pub trait JobExecutor: Any {
     ///
     /// By default forwards to [`JobExecutor::run_jobs`]. Implementors using async should override this
     /// with a proper algorithm to run jobs asynchronously.
-    #[expect(async_fn_in_trait, reason = "all our APIs are single-threaded")]
-    #[allow(
-        clippy::unused_async,
-        reason = "this must be overridden by proper async runtimes"
-    )]
-    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()>
-    where
-        Self: Sized,
-    {
-        self.run_jobs(&mut context.borrow_mut())
+    fn run_jobs_async<'a>(
+        self: Rc<Self>,
+        context: &'a RefCell<&mut Context>,
+    ) -> JobExecutorFuture<'a> {
+        Box::pin(async move { self.run_jobs(&mut context.borrow_mut()) })
     }
 }
 
@@ -675,71 +673,73 @@ impl JobExecutor for SimpleJobExecutor {
         future::block_on(self.run_jobs_async(&RefCell::new(context)))
     }
 
-    async fn run_jobs_async(self: Rc<Self>, context: &RefCell<&mut Context>) -> JsResult<()>
-    where
-        Self: Sized,
-    {
-        let mut group = FutureGroup::new();
-        loop {
-            for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
-                group.insert(job.call(context));
-            }
+    fn run_jobs_async<'a>(
+        self: Rc<Self>,
+        context: &'a RefCell<&mut Context>,
+    ) -> JobExecutorFuture<'a> {
+        Box::pin(async move {
+            let mut group = FutureGroup::new();
+            loop {
+                for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
+                    group.insert(job.call(context));
+                }
 
-            // There are no timeout jobs to run IIF there are no jobs to execute right now.
-            let no_timeout_jobs_to_run = {
-                let now = context.borrow().clock().now();
-                !self.timeout_jobs.borrow().iter().any(|(t, _)| &now >= t)
-            };
+                // There are no timeout jobs to run IIF there are no jobs to execute right now.
+                let no_timeout_jobs_to_run = {
+                    let now = context.borrow().clock().now();
+                    !self.timeout_jobs.borrow().iter().any(|(t, _)| &now >= t)
+                };
 
-            if self.promise_jobs.borrow().is_empty()
-                && self.async_jobs.borrow().is_empty()
-                && self.generic_jobs.borrow().is_empty()
-                && no_timeout_jobs_to_run
-                && group.is_empty()
-            {
-                break;
-            }
+                if self.promise_jobs.borrow().is_empty()
+                    && self.async_jobs.borrow().is_empty()
+                    && self.generic_jobs.borrow().is_empty()
+                    && no_timeout_jobs_to_run
+                    && group.is_empty()
+                {
+                    break;
+                }
 
-            if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
-                self.clear();
-                return Err(err);
-            }
+                if let Some(Err(err)) = future::poll_once(group.next()).await.flatten() {
+                    self.clear();
+                    return Err(err);
+                }
 
-            {
-                let now = context.borrow().clock().now();
-                let mut timeouts_borrow = self.timeout_jobs.borrow_mut();
-                let mut jobs_to_keep = timeouts_borrow.split_off(&now);
-                jobs_to_keep.retain(|_, job| !job.is_cancelled());
-                let jobs_to_run = mem::replace(&mut *timeouts_borrow, jobs_to_keep);
-                drop(timeouts_borrow);
+                {
+                    let now = context.borrow().clock().now();
+                    let mut timeouts_borrow = self.timeout_jobs.borrow_mut();
+                    let mut jobs_to_keep = timeouts_borrow.split_off(&now);
+                    jobs_to_keep.retain(|_, job| !job.is_cancelled());
+                    let jobs_to_run = mem::replace(&mut *timeouts_borrow, jobs_to_keep);
+                    drop(timeouts_borrow);
 
-                for job in jobs_to_run.into_values() {
+                    for job in jobs_to_run.into_values() {
+                        if let Err(err) = job.call(&mut context.borrow_mut()) {
+                            self.clear();
+                            return Err(err);
+                        }
+                    }
+                }
+
+                let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
+                for job in jobs {
                     if let Err(err) = job.call(&mut context.borrow_mut()) {
                         self.clear();
                         return Err(err);
                     }
                 }
-            }
 
-            let jobs = mem::take(&mut *self.promise_jobs.borrow_mut());
-            for job in jobs {
-                if let Err(err) = job.call(&mut context.borrow_mut()) {
-                    self.clear();
-                    return Err(err);
+                let jobs = mem::take(&mut *self.generic_jobs.borrow_mut());
+                for job in jobs {
+                    if let Err(err) = job.call(&mut context.borrow_mut()) {
+                        self.clear();
+                        return Err(err);
+                    }
                 }
+                context.borrow_mut().clear_kept_objects();
+                future::yield_now().await;
             }
 
-            let jobs = mem::take(&mut *self.generic_jobs.borrow_mut());
-            for job in jobs {
-                if let Err(err) = job.call(&mut context.borrow_mut()) {
-                    self.clear();
-                    return Err(err);
-                }
-            }
-            context.borrow_mut().clear_kept_objects();
-            future::yield_now().await;
-        }
-
-        Ok(())
+            Ok(())
+        })
     }
 }
