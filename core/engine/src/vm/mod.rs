@@ -992,6 +992,7 @@ impl Context {
                         .try_take_result()
                         .expect("the suspension was just completed")
                 });
+                suspension.release_roots();
                 if let ControlFlow::Break(value) =
                     self.apply_native_call_completion(&placeholder, result)
                 {

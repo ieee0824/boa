@@ -28,8 +28,8 @@ impl fmt::Debug for NativeCallSuspension {
 
 #[derive(Trace, Finalize)]
 struct Inner {
-    origin: JsObject,
-    placeholder: JsObject,
+    origin: Option<JsObject>,
+    placeholder: Option<JsObject>,
     result: Option<JsResult<JsValue>>,
     resumed: bool,
     #[unsafe_ignore_trace]
@@ -52,8 +52,8 @@ impl NativeCallSuspension {
     pub(crate) fn new(origin: JsObject, placeholder: JsObject) -> Self {
         Self {
             inner: Gc::new(GcRefCell::new(Inner {
-                origin,
-                placeholder,
+                origin: Some(origin),
+                placeholder: Some(placeholder),
                 result: None,
                 resumed: false,
                 task: None,
@@ -91,11 +91,36 @@ impl NativeCallSuspension {
     }
 
     pub(crate) fn placeholder(&self) -> JsObject {
-        self.inner.borrow().placeholder.clone()
+        self.inner
+            .borrow()
+            .placeholder
+            .clone()
+            .expect("an active suspension must retain its placeholder")
     }
 
     pub(crate) fn originated_from(&self, function: &JsObject) -> bool {
-        JsObject::equals(&self.inner.borrow().origin, function)
+        self.inner
+            .borrow()
+            .origin
+            .as_ref()
+            .is_some_and(|origin| JsObject::equals(origin, function))
+    }
+
+    pub(crate) fn release_roots(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.origin = None;
+        inner.placeholder = None;
+    }
+}
+
+impl Drop for NativeCallWait {
+    fn drop(&mut self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.resumed = true;
+        inner.result = None;
+        inner.task = None;
+        inner.origin = None;
+        inner.placeholder = None;
     }
 }
 

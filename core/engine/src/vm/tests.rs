@@ -306,6 +306,32 @@ fn synchronous_evaluation_accepts_an_immediately_resumed_native_call() {
 }
 
 #[test]
+fn dropping_suspended_evaluation_cancels_the_handle_and_restores_the_context() {
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    let script = Script::parse(Source::from_bytes("suspend() + 1"), None, &mut context).unwrap();
+    let mut evaluation = Box::pin(script.evaluate_async(&mut context));
+
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    drop(evaluation);
+
+    assert_eq!(
+        slot.borrow()
+            .as_ref()
+            .unwrap()
+            .resume(Ok(JsValue::from(41))),
+        Err(NativeCallAlreadyResumed)
+    );
+    assert_eq!(
+        context.eval(Source::from_bytes("1 + 1")).unwrap(),
+        JsValue::from(2)
+    );
+}
+
+#[test]
 fn throwing_native_function_cancels_its_requested_suspension() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
