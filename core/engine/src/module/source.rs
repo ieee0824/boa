@@ -1,9 +1,5 @@
 use std::{
-    cell::{Cell, RefCell},
-    collections::HashSet,
-    hash::BuildHasherDefault,
-    mem::MaybeUninit,
-    path::PathBuf,
+    cell::Cell, collections::HashSet, hash::BuildHasherDefault, mem::MaybeUninit, path::PathBuf,
     rc::Rc,
 };
 
@@ -31,7 +27,7 @@ use crate::{
     builtins::{Promise, promise::PromiseCapability},
     bytecompiler::{BindingAccessOpcode, ByteCompiler, FunctionSpec, ToJsString},
     environments::{DeclarativeEnvironment, EnvironmentStack, EnvironmentStackEdges},
-    job::NativeAsyncJob,
+    job::{AsyncContext, NativeAsyncJob},
     js_string,
     module::ModuleKind,
     object::{FunctionObjectBuilder, JsPromise},
@@ -388,7 +384,7 @@ impl SourceTextModule {
             specifier: JsString,
             src: Module,
             state: Rc<GraphLoadingState>,
-            context: &RefCell<&mut Context>,
+            context: &AsyncContext<'_>,
         ) {
             let loader = context.borrow().module_loader();
             let fut = loader.load_imported_module(
@@ -1378,21 +1374,21 @@ impl SourceTextModule {
         let realm = context.realm().clone();
         context.enqueue_job(
             NativeAsyncJob::new_exclusive(async move |context| {
-                let old_realm = context.borrow_mut().enter_realm(realm);
+                let mut context = context.take();
+                let old_realm = context.enter_realm(realm);
                 let module = module.to_rooted();
                 let ModuleKind::SourceText(source) = module.kind() else {
                     unreachable!("async module must be source text")
                 };
                 let result = {
-                    let mut context = context.borrow_mut();
                     source
                         .execute_async_with_capability(&module, &capability, &mut context)
                         .await
                 };
                 if let Err(error) = result {
-                    async_module_execution_rejected(&module, &error, &mut context.borrow_mut());
+                    async_module_execution_rejected(&module, &error, &mut context);
                 }
-                context.borrow_mut().enter_realm(old_realm);
+                context.enter_realm(old_realm);
                 Ok(JsValue::undefined())
             })
             .into(),

@@ -8,12 +8,11 @@ use crate::{
         Promise,
         promise::{PromiseState, ResolvingFunctions},
     },
-    job::NativeAsyncJob,
+    job::{AsyncContext, NativeAsyncJob},
     object::JsObject,
     value::TryFromJs,
 };
 use boa_gc::{Finalize, GcRefCell, Rooted, Trace};
-use std::cell::RefCell;
 use std::{future::Future, pin::Pin, task};
 
 /// An ECMAScript [promise] object.
@@ -286,7 +285,7 @@ impl JsPromise {
     /// #    builtins::promise::PromiseState,
     /// #    Context, JsResult, JsValue
     /// # };
-    /// async fn f(_: &RefCell<&mut Context>) -> JsResult<JsValue> {
+    /// async fn f(_: &AsyncContext<'_>) -> JsResult<JsValue> {
     ///     Ok(JsValue::null())
     /// }
     /// let context = &mut Context::default();
@@ -301,7 +300,7 @@ impl JsPromise {
     /// [async_fn]: crate::native_function::NativeFunction::from_async_fn
     pub fn from_async_fn<F>(f: F, context: &mut Context) -> Self
     where
-        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+        F: AsyncFnOnce(&AsyncContext<'_>) -> JsResult<JsValue> + 'static,
     {
         let (promise, resolvers) = Self::new_pending(context);
 

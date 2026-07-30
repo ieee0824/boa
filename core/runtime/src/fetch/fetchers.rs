@@ -3,8 +3,7 @@
 use crate::fetch::Fetcher;
 use crate::fetch::request::JsRequest;
 use crate::fetch::response::JsResponse;
-use boa_engine::{Context, Finalize, JsData, JsResult, Trace, js_error};
-use std::cell::RefCell;
+use boa_engine::{Finalize, JsData, JsResult, Trace, job::AsyncContext, js_error};
 use std::rc::Rc;
 
 /// Implementation of `Fetcher` which will always reject any fetch.
@@ -15,7 +14,7 @@ impl Fetcher for ErrorFetcher {
     async fn fetch(
         self: Rc<Self>,
         _request: JsRequest,
-        _context: &RefCell<&mut Context>,
+        _context: &AsyncContext<'_>,
     ) -> JsResult<JsResponse> {
         Err(js_error!(ReferenceError: "ErrorFetcher used in fetch API."))
     }
@@ -34,7 +33,7 @@ impl Fetcher for BlockingReqwestFetcher {
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
-        _context: &RefCell<&mut Context>,
+        _context: &AsyncContext<'_>,
     ) -> JsResult<JsResponse> {
         use boa_engine::{JsError, JsString};
 

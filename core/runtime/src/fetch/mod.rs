@@ -11,6 +11,7 @@ use crate::fetch::headers::JsHeaders;
 use crate::fetch::request::{JsRequest, RequestInit};
 use crate::fetch::response::JsResponse;
 use boa_engine::class::Class;
+use boa_engine::job::AsyncContext;
 use boa_engine::realm::Realm;
 use boa_engine::{
     Context, Finalize, JsData, JsError, JsObject, JsResult, JsString, JsValue, NativeObject, Trace,
@@ -18,7 +19,6 @@ use boa_engine::{
 };
 use either::Either;
 use http::{HeaderName, HeaderValue, Request as HttpRequest, Request};
-use std::cell::RefCell;
 use std::rc::Rc;
 
 pub mod headers;
@@ -54,7 +54,7 @@ pub trait Fetcher: NativeObject {
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> JsResult<JsResponse>;
 }
 
@@ -92,7 +92,7 @@ fn get_fetcher<T: Fetcher>(context: &mut Context) -> JsResult<Rc<T>> {
 async fn fetch_inner<T: Fetcher>(
     resource: Either<JsString, JsObject>,
     options: Option<RequestInit>,
-    context: &RefCell<&mut Context>,
+    context: &AsyncContext<'_>,
 ) -> JsResult<JsValue> {
     let fetcher = get_fetcher::<T>(&mut context.borrow_mut())?;
 

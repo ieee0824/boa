@@ -3,7 +3,7 @@ use boa_engine::job::{GenericJob, TimeoutJob};
 use boa_engine::{
     Context, JsArgs, JsNativeError, JsResult, JsValue, Script, Source,
     context::ContextBuilder,
-    job::{Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
+    job::{AsyncContext, Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
     js_string,
     native_function::NativeFunction,
     property::Attribute,
@@ -110,14 +110,12 @@ impl JobExecutor for Queue {
             .build()
             .unwrap();
 
-        task::LocalSet::default().block_on(&runtime, self.run_jobs_async(&RefCell::new(context)))
+        task::LocalSet::default()
+            .block_on(&runtime, self.run_jobs_async(&AsyncContext::new(context)))
     }
 
     // ...the async flavor won't, which allows concurrent execution with external async tasks.
-    fn run_jobs_async<'a>(
-        self: Rc<Self>,
-        context: &'a RefCell<&mut Context>,
-    ) -> JobExecutorFuture<'a> {
+    fn run_jobs_async<'a>(self: Rc<Self>, context: &'a AsyncContext<'_>) -> JobExecutorFuture<'a> {
         Box::pin(async move {
             let mut group = FutureGroup::new();
             loop {
@@ -153,7 +151,7 @@ impl JobExecutor for Queue {
 fn delay(
     _this: &JsValue,
     args: &[JsValue],
-    context: &RefCell<&mut Context>,
+    context: &AsyncContext<'_>,
 ) -> impl Future<Output = JsResult<JsValue>> {
     let millis = args.get_or_undefined(0).to_u32(&mut context.borrow_mut());
 
@@ -182,7 +180,7 @@ fn interval(this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult
 
     context.enqueue_job(
         NativeAsyncJob::with_realm(
-            async move |context: &RefCell<&mut Context>| {
+            async move |context: &AsyncContext<'_>| {
                 let mut timer = time::interval(Duration::from_millis(u64::from(delay)));
                 for _ in 0..10 {
                     timer.tick().await;
@@ -325,7 +323,7 @@ async fn externally_async_event_loop() -> JsResult<()> {
 
         // Run the jobs asynchronously, which avoids blocking the main thread.
         println!("Running jobs...");
-        queue.run_jobs_async(&RefCell::new(context)).await
+        queue.run_jobs_async(&AsyncContext::new(context)).await
     });
 
     tokio::try_join!(counter, engine)?;

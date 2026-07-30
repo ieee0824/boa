@@ -1,9 +1,9 @@
 #![allow(unused_crate_dependencies, missing_docs)]
 
-use std::cell::RefCell;
 use std::rc::Rc;
 
 use boa_engine::builtins::promise::PromiseState;
+use boa_engine::job::AsyncContext;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::{Context, JsNativeError, JsResult, JsString, Module, Source, js_string};
 
@@ -15,7 +15,7 @@ fn test_json_module_from_str() {
             self: Rc<Self>,
             _referrer: Referrer,
             specifier: JsString,
-            context: &RefCell<&mut Context>,
+            context: &AsyncContext<'_>,
         ) -> JsResult<Module> {
             assert_eq!(specifier.to_std_string_escaped(), "basic");
             let src = self.0.clone();
@@ -70,7 +70,7 @@ fn async_load_link_evaluate_drives_module_graph_with_tla() {
             self: Rc<Self>,
             _referrer: Referrer,
             specifier: JsString,
-            context: &RefCell<&mut Context>,
+            context: &AsyncContext<'_>,
         ) -> JsResult<Module> {
             assert_eq!(specifier.to_std_string_escaped(), "dependency");
             Module::parse(
@@ -130,7 +130,7 @@ fn async_load_link_evaluate_propagates_load_error() {
             self: Rc<Self>,
             _referrer: Referrer,
             _specifier: JsString,
-            _context: &RefCell<&mut Context>,
+            _context: &AsyncContext<'_>,
         ) -> JsResult<Module> {
             Err(JsNativeError::error().with_message("load failed").into())
         }

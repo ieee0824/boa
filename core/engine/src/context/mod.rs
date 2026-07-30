@@ -1,10 +1,6 @@
 //! The ECMAScript context.
 
-use std::{
-    cell::{Cell, RefCell},
-    path::Path,
-    rc::Rc,
-};
+use std::{cell::Cell, path::Path, rc::Rc};
 
 use boa_ast::StatementList;
 use boa_interner::Interner;
@@ -533,7 +529,9 @@ impl Context {
     pub async fn run_jobs_async(&mut self) -> JsResult<()> {
         let executor = self.job_executor();
         self.async_jobs_enabled = true;
-        let result = executor.run_jobs_async(&RefCell::new(&mut *self)).await;
+        let result = executor
+            .run_jobs_async(&crate::job::AsyncContext::new(&mut *self))
+            .await;
         self.async_jobs_enabled = false;
         result
     }

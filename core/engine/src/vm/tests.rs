@@ -150,6 +150,46 @@ fn async_jobs_keep_promise_reactions_fifo() {
 }
 
 #[test]
+fn synchronous_jobs_reject_native_suspension_in_promise_callbacks() {
+    for script in [
+        "const p = Promise.resolve(); p.constructor = { [Symbol.species]: class { constructor(executor) { executor(value => suspend(value), () => {}); } } }; p.then(() => 1);",
+        "const p = Promise.resolve(); p.constructor = { [Symbol.species]: class { constructor(executor) { executor(() => {}, error => suspend(error)); } } }; p.then(() => { throw new Error('reject'); });",
+    ] {
+        let mut context = Context::default();
+        let slot = Gc::new(GcRefCell::new(None));
+        context
+            .register_global_callable(js_string!("suspend"), 0, suspending_function(slot))
+            .unwrap();
+        context.eval(Source::from_bytes(script)).unwrap();
+
+        let Err(error) = context.run_jobs() else {
+            panic!("suspension did not produce an error for {script}");
+        };
+
+        assert!(
+            error
+                .to_string()
+                .contains("native call suspension requires asynchronous"),
+            "unexpected error for {script}: {error}"
+        );
+    }
+
+    let mut context = Context::default();
+    let slot = Gc::new(GcRefCell::new(None));
+    context
+        .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+        .unwrap();
+    context
+        .eval(Source::from_bytes(
+            "Promise.resolve({ then: () => suspend() });",
+        ))
+        .unwrap();
+
+    context.run_jobs().unwrap();
+    assert!(slot.borrow().is_some());
+}
+
+#[test]
 fn async_module_propagates_suspension_after_top_level_await() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));

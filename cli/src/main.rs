@@ -18,7 +18,7 @@ use boa_engine::{
     Context, JsError, JsResult, Source,
     builtins::promise::PromiseState,
     context::ContextBuilder,
-    job::{Job, JobExecutor, NativeAsyncJob, PromiseJob},
+    job::{AsyncContext, Job, JobExecutor, NativeAsyncJob, PromiseJob},
     module::{Module, SimpleModuleLoader},
     optimizer::OptimizerOptions,
     script::Script,
@@ -644,12 +644,12 @@ impl JobExecutor for Executor {
     }
 
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        future::block_on(self.run_jobs_async(&RefCell::new(context)))
+        future::block_on(self.run_jobs_async(&AsyncContext::new(context)))
     }
 
     fn run_jobs_async<'a>(
         self: Rc<Self>,
-        context: &'a RefCell<&mut Context>,
+        context: &'a AsyncContext<'_>,
     ) -> boa_engine::job::JobExecutorFuture<'a> {
         Box::pin(async move {
             let mut group = FutureGroup::new();

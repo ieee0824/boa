@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
+use boa_engine::job::AsyncContext;
 use boa_engine::module::{ModuleLoader, Referrer};
 use boa_engine::{Context, JsNativeError, JsResult, JsString, Module, Source};
 
@@ -142,7 +143,7 @@ impl ModuleLoader for EmbeddedModuleLoader {
         self: Rc<Self>,
         referrer: Referrer,
         specifier: JsString,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> impl Future<Output = JsResult<Module>> {
         let result = (|| {
             let specifier_path = boa_engine::module::resolve_module_specifier(

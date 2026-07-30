@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem::MaybeUninit};
+use std::mem::MaybeUninit;
 
 use boa_string::JsString;
 use dynify::Dynify;
@@ -8,7 +8,7 @@ use crate::{
     Context, JsError, JsObject, JsResult, JsValue, NativeFunction,
     builtins::{Promise, promise::PromiseCapability},
     error::JsNativeError,
-    job::NativeAsyncJob,
+    job::{AsyncContext, NativeAsyncJob},
     module::{ModuleKind, Referrer},
     object::FunctionObjectBuilder,
     vm::opcode::Operation,
@@ -270,7 +270,7 @@ async fn load_dyn_import(
     referrer: Referrer,
     specifier: JsString,
     cap: PromiseCapability,
-    context: &RefCell<&mut Context>,
+    context: &AsyncContext<'_>,
 ) {
     let loader = context.borrow().module_loader();
     let fut = loader.load_imported_module(referrer.clone(), specifier.clone(), context);

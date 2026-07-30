@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 use boa_engine::{
     Context, JsNativeError, JsResult, JsString, JsValue, Module,
     builtins::promise::PromiseState,
-    job::{Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
+    job::{AsyncContext, Job, JobExecutor, JobExecutorFuture, NativeAsyncJob, PromiseJob},
     js_string,
     module::ModuleLoader,
 };
@@ -23,7 +23,7 @@ impl ModuleLoader for HttpModuleLoader {
         self: Rc<Self>,
         _referrer: boa_engine::module::Referrer,
         specifier: JsString,
-        context: &RefCell<&mut Context>,
+        context: &AsyncContext<'_>,
     ) -> JsResult<Module> {
         let url = specifier.to_std_string_escaped();
 
@@ -170,14 +170,13 @@ impl JobExecutor for Queue {
 
     // While the sync flavor of `run_jobs` will block the current thread until all the jobs have finished...
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        smol::block_on(smol::LocalExecutor::new().run(self.run_jobs_async(&RefCell::new(context))))
+        smol::block_on(
+            smol::LocalExecutor::new().run(self.run_jobs_async(&AsyncContext::new(context))),
+        )
     }
 
     // ...the async flavor won't, which allows concurrent execution with external async tasks.
-    fn run_jobs_async<'a>(
-        self: Rc<Self>,
-        context: &'a RefCell<&mut Context>,
-    ) -> JobExecutorFuture<'a> {
+    fn run_jobs_async<'a>(self: Rc<Self>, context: &'a AsyncContext<'_>) -> JobExecutorFuture<'a> {
         Box::pin(async move {
             let mut group = FutureGroup::new();
             loop {

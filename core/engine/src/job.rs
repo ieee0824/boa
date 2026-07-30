@@ -45,7 +45,13 @@ use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::mem;
 use std::rc::Rc;
-use std::{cell::RefCell, collections::VecDeque, fmt::Debug, future::Future, pin::Pin};
+use std::{
+    cell::{Ref, RefCell, RefMut},
+    collections::VecDeque,
+    fmt::Debug,
+    future::Future,
+    pin::Pin,
+};
 
 /// An ECMAScript [Job Abstract Closure].
 ///
@@ -285,6 +291,73 @@ impl GenericJob {
 /// The [`Future`] job returned by a [`NativeAsyncJob`] operation.
 pub type BoxedFuture<'a> = Pin<Box<dyn Future<Output = JsResult<JsValue>> + 'a>>;
 
+/// Mutable execution-context storage shared by asynchronous jobs.
+pub struct AsyncContext<'a>(RefCell<Option<&'a mut Context>>);
+
+impl Debug for AsyncContext<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncContext").finish_non_exhaustive()
+    }
+}
+
+impl<'a> AsyncContext<'a> {
+    /// Creates async job context storage from an execution context.
+    pub fn new(context: &'a mut Context) -> Self {
+        Self(RefCell::new(Some(context)))
+    }
+
+    /// Immutably borrows the execution context.
+    pub fn borrow(&self) -> Ref<'_, Context> {
+        Ref::map(self.0.borrow(), |context| {
+            context.as_deref().expect("execution context is in use")
+        })
+    }
+
+    /// Mutably borrows the execution context until the returned guard is dropped.
+    pub fn borrow_mut(&self) -> RefMut<'_, Context> {
+        RefMut::map(self.0.borrow_mut(), |context| {
+            context.as_deref_mut().expect("execution context is in use")
+        })
+    }
+
+    pub(crate) fn take(&self) -> ContextLease<'_, 'a> {
+        let context = self
+            .0
+            .borrow_mut()
+            .take()
+            .expect("execution context is already in use");
+        ContextLease {
+            owner: self,
+            context: Some(context),
+        }
+    }
+}
+
+pub(crate) struct ContextLease<'a, 'context> {
+    owner: &'a AsyncContext<'context>,
+    context: Option<&'context mut Context>,
+}
+
+impl std::ops::Deref for ContextLease<'_, '_> {
+    type Target = Context;
+
+    fn deref(&self) -> &Self::Target {
+        self.context.as_deref().expect("context lease is empty")
+    }
+}
+
+impl std::ops::DerefMut for ContextLease<'_, '_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.context.as_deref_mut().expect("context lease is empty")
+    }
+}
+
+impl Drop for ContextLease<'_, '_> {
+    fn drop(&mut self) {
+        self.owner.0.replace(self.context.take());
+    }
+}
+
 /// The boxed future returned by [`JobExecutor::run_jobs_async`].
 pub type JobExecutorFuture<'a> = Pin<Box<dyn Future<Output = JsResult<()>> + 'a>>;
 
@@ -294,7 +367,7 @@ pub type JobExecutorFuture<'a> = Pin<Box<dyn Future<Output = JsResult<()>> + 'a>
 /// created by ECMAScript code in an easier way.
 #[allow(clippy::type_complexity)]
 pub struct NativeAsyncJob {
-    f: Box<dyn for<'a> FnOnce(&'a RefCell<&mut Context>) -> BoxedFuture<'a>>,
+    f: Box<dyn for<'a> FnOnce(&'a AsyncContext<'_>) -> BoxedFuture<'a>>,
     realm: Option<Realm>,
     exclusive: bool,
 }
@@ -311,7 +384,7 @@ impl NativeAsyncJob {
     /// Creates a new `NativeAsyncJob` from an async closure.
     pub fn new<F>(f: F) -> Self
     where
-        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+        F: AsyncFnOnce(&AsyncContext<'_>) -> JsResult<JsValue> + 'static,
     {
         Self {
             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
@@ -323,7 +396,7 @@ impl NativeAsyncJob {
     /// Creates a new `NativeAsyncJob` from an async closure and an execution realm.
     pub fn with_realm<F>(f: F, realm: Realm) -> Self
     where
-        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+        F: AsyncFnOnce(&AsyncContext<'_>) -> JsResult<JsValue> + 'static,
     {
         Self {
             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
@@ -335,7 +408,7 @@ impl NativeAsyncJob {
     /// Creates an async job which exclusively owns the context while pending.
     pub(crate) fn new_exclusive<F>(f: F) -> Self
     where
-        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+        F: AsyncFnOnce(&AsyncContext<'_>) -> JsResult<JsValue> + 'static,
     {
         Self {
             f: Box::new(move |ctx| Box::pin(async move { f(ctx).await })),
@@ -362,7 +435,7 @@ impl NativeAsyncJob {
     /// context to the realm's before calling the inner closure, and resets it after execution.
     pub fn call<'a, 'b>(
         self,
-        context: &'a RefCell<&'b mut Context>,
+        context: &'a AsyncContext<'b>,
         // We can make our users assume `Unpin` because `self.f` is already boxed, so we shouldn't
         // need pin at all.
     ) -> impl Future<Output = JsResult<JsValue>> + Unpin + use<'a, 'b> {
@@ -403,7 +476,8 @@ impl NativeAsyncJob {
     }
 }
 
-/// An ECMAScript [Job Abstract Closure] executing code related to [`Promise`] objects.
+/// An ECMAScript [Job Abstract Closure] executing code related to
+/// [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) objects.
 ///
 /// This represents the [`HostEnqueuePromiseJob`] operation from the specification.
 ///
@@ -419,7 +493,6 @@ impl NativeAsyncJob {
 /// Of all the requirements, Boa guarantees the first two by its internal implementation of `NativeJob`, meaning
 /// implementations of [`JobExecutor`] must only guarantee that jobs are run in the same order as they're enqueued.
 ///
-/// [`Promise`]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise
 /// [`HostEnqueuePromiseJob`]: https://tc39.es/ecma262/#sec-hostenqueuepromisejob
 /// [Job Abstract Closure]: https://tc39.es/ecma262/#sec-jobs
 /// [Requirements]: https://tc39.es/ecma262/multipage/executable-code-and-execution-contexts.html#sec-hostenqueuepromisejob
@@ -429,7 +502,8 @@ enum PromiseJobInner {
     Async { job: NativeAsyncJob, realm: Realm },
 }
 
-/// An ECMAScript [Job Abstract Closure] executing code related to [`Promise`] objects.
+/// An ECMAScript [Job Abstract Closure] executing code related to
+/// [`Promise`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise) objects.
 pub struct PromiseJob(PromiseJobInner);
 
 impl Debug for PromiseJob {
@@ -458,7 +532,7 @@ impl PromiseJob {
     /// Creates an asynchronous `PromiseJob` from a closure and an execution realm.
     pub fn with_realm_async<F>(f: F, realm: Realm) -> Self
     where
-        F: AsyncFnOnce(&RefCell<&mut Context>) -> JsResult<JsValue> + 'static,
+        F: AsyncFnOnce(&AsyncContext<'_>) -> JsResult<JsValue> + 'static,
     {
         let job_realm = realm.clone();
         let job = NativeAsyncJob::new(async move |context| {
@@ -489,12 +563,12 @@ impl PromiseJob {
         match self.0 {
             PromiseJobInner::Sync(job) => job.call(context),
             PromiseJobInner::Async { job, .. } => {
-                future::block_on(job.call(&RefCell::new(context)))
+                future::block_on(job.call(&AsyncContext::new(context)))
             }
         }
     }
 
-    fn call_async<'a>(self, context: &'a RefCell<&mut Context>) -> BoxedFuture<'a> {
+    fn call_async<'a>(self, context: &'a AsyncContext<'_>) -> BoxedFuture<'a> {
         match self.0 {
             PromiseJobInner::Sync(job) => {
                 Box::pin(async move { job.call(&mut context.borrow_mut()) })
@@ -639,10 +713,7 @@ pub trait JobExecutor: Any {
     ///
     /// By default forwards to [`JobExecutor::run_jobs`]. Implementors using async should override this
     /// with a proper algorithm to run jobs asynchronously.
-    fn run_jobs_async<'a>(
-        self: Rc<Self>,
-        context: &'a RefCell<&mut Context>,
-    ) -> JobExecutorFuture<'a> {
+    fn run_jobs_async<'a>(self: Rc<Self>, context: &'a AsyncContext<'_>) -> JobExecutorFuture<'a> {
         Box::pin(async move { self.run_jobs(&mut context.borrow_mut()) })
     }
 }
@@ -727,17 +798,15 @@ impl JobExecutor for SimpleJobExecutor {
     }
 
     fn run_jobs(self: Rc<Self>, context: &mut Context) -> JsResult<()> {
-        future::block_on(self.run_jobs_async(&RefCell::new(context)))
+        future::block_on(self.run_jobs_async(&AsyncContext::new(context)))
     }
 
-    fn run_jobs_async<'a>(
-        self: Rc<Self>,
-        context: &'a RefCell<&mut Context>,
-    ) -> JobExecutorFuture<'a> {
+    fn run_jobs_async<'a>(self: Rc<Self>, context: &'a AsyncContext<'_>) -> JobExecutorFuture<'a> {
         Box::pin(async move {
             let mut group = FutureGroup::new();
             loop {
-                for job in mem::take(&mut *self.async_jobs.borrow_mut()) {
+                let async_jobs = mem::take(&mut *self.async_jobs.borrow_mut());
+                for job in async_jobs {
                     if job.is_exclusive() {
                         if let Err(err) = job.call(context).await {
                             self.clear();
