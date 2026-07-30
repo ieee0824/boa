@@ -423,12 +423,12 @@ pub(crate) fn native_function_call(
 
     context.vm.shadow_stack.pop();
 
-    if let Err(error) = &result
+    if result.is_err()
         && let Some(suspension) = context.vm.pending_native_call.take()
     {
         // A suspending native call must return normally. If it throws instead, reject the
         // suspension as well so a host-held handle cannot later resume unrelated execution.
-        let _ = suspension.resume(Err(error.clone()));
+        suspension.cancel();
     }
 
     let result = result?;

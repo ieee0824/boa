@@ -111,6 +111,15 @@ impl NativeCallSuspension {
         inner.origin = None;
         inner.placeholder = None;
     }
+
+    pub(crate) fn cancel(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.resumed = true;
+        inner.result = None;
+        inner.task = None;
+        inner.origin = None;
+        inner.placeholder = None;
+    }
 }
 
 impl Drop for NativeCallWait {
