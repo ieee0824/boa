@@ -10,6 +10,7 @@ use crate::{
     environments::EnvironmentStack,
     module::ModuleEdge,
     object::{JsFunction, JsFunctionEdge},
+    native_function::NativeCallSuspension,
     realm::Realm,
     script::{Script, ScriptEdge},
 };
@@ -92,6 +93,9 @@ pub struct Vm {
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
 
+    /// A synchronous native call waiting for an out-of-band host result.
+    pub(crate) pending_native_call: Option<NativeCallSuspension>,
+
     /// realm holds both the global object and the environment
     pub(crate) realm: Realm,
 
@@ -165,6 +169,26 @@ impl Stack {
         Self {
             stack: Vec::with_capacity(capacity),
         }
+    }
+
+    fn contains_object(&self, object: &JsObject) -> bool {
+        self.stack.iter().any(|value| {
+            value
+                .as_object()
+                .is_some_and(|value| JsObject::equals(&value, object))
+        })
+    }
+
+    fn replace_object(&mut self, object: &JsObject, replacement: JsValue) -> bool {
+        let Some(slot) = self.stack.iter_mut().rev().find(|value| {
+            value
+                .as_object()
+                .is_some_and(|value| JsObject::equals(&value, object))
+        }) else {
+            return false;
+        };
+        *slot = replacement;
+        true
     }
 
     /// Truncate the stack to the given frame.
@@ -460,6 +484,7 @@ impl Vm {
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
             native_active_function: None,
+            pending_native_call: None,
             realm,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
@@ -688,6 +713,34 @@ impl Context {
 }
 
 impl Context {
+    fn apply_native_call_completion(
+        &mut self,
+        placeholder: &JsObject,
+        result: JsResult<JsValue>,
+    ) -> ControlFlow<CompletionRecord> {
+        match result {
+            Ok(value) => {
+                if self.vm.stack.replace_object(placeholder, value) {
+                    ControlFlow::Continue(())
+                } else {
+                    self.handle_error(
+                        JsNativeError::error()
+                            .with_message(
+                                "suspended native call result was consumed before VM suspension",
+                            )
+                            .into(),
+                    )
+                }
+            }
+            Err(error) => {
+                self.vm
+                    .stack
+                    .replace_object(placeholder, JsValue::undefined());
+                self.handle_error(error)
+            }
+        }
+    }
+
     fn execute_instruction<F>(&mut self, f: F, opcode: Opcode) -> ControlFlow<CompletionRecord>
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
@@ -876,6 +929,22 @@ impl Context {
                 ControlFlow::Break(value) => return value,
             }
 
+            if let Some(suspension) = self.vm.pending_native_call.take() {
+                let placeholder = suspension.placeholder();
+                if !self.vm.stack.contains_object(&placeholder) {
+                    let error = JsNativeError::error()
+                        .with_message("native call cannot suspend from this execution path")
+                        .into();
+                    let _ = suspension.resume(Err(error));
+                }
+                let result = suspension.await;
+                if let ControlFlow::Break(value) =
+                    self.apply_native_call_completion(&placeholder, result)
+                {
+                    return value;
+                }
+            }
+
             if runtime_budget == 0 {
                 runtime_budget = budget;
                 yield_now().await;
@@ -904,6 +973,26 @@ impl Context {
             match self.execute_one(Self::execute_bytecode_instruction, opcode) {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(value) => return value,
+            }
+
+            if let Some(suspension) = self.vm.pending_native_call.take() {
+                let placeholder = suspension.placeholder();
+                let result = suspension.try_take_result().unwrap_or_else(|| {
+                    let error = JsNativeError::error()
+                        .with_message(
+                            "native call suspension requires asynchronous script evaluation",
+                        )
+                        .into();
+                    let _ = suspension.resume(Err(error));
+                    suspension
+                        .try_take_result()
+                        .expect("the suspension was just completed")
+                });
+                if let ControlFlow::Break(value) =
+                    self.apply_native_call_completion(&placeholder, result)
+                {
+                    return value;
+                }
             }
         }
 

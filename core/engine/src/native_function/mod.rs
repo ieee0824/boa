@@ -25,6 +25,9 @@ use crate::{
     realm::{Realm, RealmEdge},
 };
 
+mod suspension;
+pub use suspension::{NativeCallAlreadyResumed, NativeCallSuspension};
+
 #[cfg(feature = "experimental")]
 mod continuation;
 
@@ -412,7 +415,30 @@ pub(crate) fn native_function_call(
 
     context.vm.shadow_stack.pop();
 
-    context.vm.stack.push(result?);
+    if let Err(error) = &result
+        && let Some(suspension) = context.vm.pending_native_call.take()
+    {
+        // A suspending native call must return normally. If it throws instead, reject the
+        // suspension as well so a host-held handle cannot later resume unrelated execution.
+        let _ = suspension.resume(Err(error.clone()));
+    }
+
+    let result = result?;
+    if let Some(suspension) = context.vm.pending_native_call.as_ref() {
+        let placeholder = suspension.placeholder();
+        let result_propagates_placeholder = result
+            .as_object()
+            .is_some_and(|result| JsObject::equals(&result, &placeholder));
+        if !suspension.originated_from(obj) && !result_propagates_placeholder {
+            let error = JsNativeError::error()
+                .with_message("native call suspension was consumed by an enclosing native call")
+                .into();
+            let _ = suspension.resume(Err(error));
+        }
+        context.vm.stack.push(placeholder);
+    } else {
+        context.vm.stack.push(result);
+    }
 
     Ok(CallValue::Complete)
 }
