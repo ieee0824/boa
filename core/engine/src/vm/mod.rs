@@ -1080,16 +1080,23 @@ impl Context {
 
             if let Some(suspension) = self.vm.pending_native_call.take() {
                 let placeholder = suspension.placeholder();
-                if !self.vm.stack.contains_object(&placeholder) {
+                let placeholder_was_consumed = !self.vm.stack.contains_object(&placeholder);
+                if placeholder_was_consumed {
                     let error = JsNativeError::error()
                         .with_message("native call cannot suspend from this execution path")
                         .into();
                     let _ = suspension.resume(Err(error));
                 }
                 let result = suspension.wait().await;
-                if let ControlFlow::Break(value) =
+                let completion = if placeholder_was_consumed {
+                    match result {
+                        Ok(_) => unreachable!("the rejected suspension completed successfully"),
+                        Err(error) => self.handle_error(error),
+                    }
+                } else {
                     self.apply_native_call_completion(&placeholder, result)
-                {
+                };
+                if let ControlFlow::Break(value) = completion {
                     return value;
                 }
             }
