@@ -23,6 +23,7 @@ fn get_own_property_internal_method() {
         .templates()
         .ordinary_object()
         .create(OrdinaryObject, Vec::default());
+    let _o_root = o.clone().root();
 
     let property: PropertyKey = js_string!("prop").into();
     let value = 100;
@@ -68,6 +69,7 @@ fn get_internal_method() {
         .templates()
         .ordinary_object()
         .create(OrdinaryObject, Vec::default());
+    let _o_root = o.clone().root();
 
     let property: PropertyKey = js_string!("prop").into();
     let value = 100;
@@ -113,6 +115,7 @@ fn get_internal_method_in_prototype() {
         .templates()
         .ordinary_object()
         .create(OrdinaryObject, Vec::default());
+    let _o_root = o.clone().root();
 
     let property: PropertyKey = js_string!("prop").into();
     let value = 100;
@@ -161,6 +164,7 @@ fn define_own_property_internal_method_non_existant_property() {
         .templates()
         .ordinary_object()
         .create(OrdinaryObject, Vec::default());
+    let _o_root = o.clone().root();
 
     let property: PropertyKey = js_string!("prop").into();
     let value = 100;
@@ -215,6 +219,7 @@ fn define_own_property_internal_method_existing_property_property() {
         .templates()
         .ordinary_object()
         .create(OrdinaryObject, Vec::default());
+    let _o_root = o.clone().root();
 
     let property: PropertyKey = js_string!("prop").into();
     let value = 100;
@@ -281,6 +286,7 @@ fn set_internal_method() {
         .templates()
         .ordinary_object()
         .create(OrdinaryObject, Vec::default());
+    let _o_root = o.clone().root();
 
     let property: PropertyKey = js_string!("prop").into();
     let value = 100;
@@ -333,6 +339,7 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let context = &mut Context::default();
     let function = context.eval(Source::from_bytes("(function (o) { return o.test; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
+    let _function_root = function.clone().root();
 
     assert_eq!(code.ic.len(), 1);
     assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
@@ -340,6 +347,7 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
         .build();
+    let _o_root = o.clone().root();
     let o_shape = o.borrow().shape().clone();
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
@@ -403,6 +411,7 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let context = &mut Context::default();
     let function = context.eval(Source::from_bytes("(function (o) { o.test = 30; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
+    let _function_root = function.clone().root();
 
     assert_eq!(code.ic.len(), 1);
     assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
@@ -410,6 +419,7 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
         .build();
+    let _o_root = o.clone().root();
     let o_shape = o.borrow().shape().clone();
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;

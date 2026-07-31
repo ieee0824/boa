@@ -122,29 +122,39 @@ impl Realm {
     /// Create a new [`Realm`].
     #[inline]
     pub fn create(hooks: &dyn HostHooks, root_shape: &RootShape) -> JsResult<Self> {
-        let intrinsics = Intrinsics::uninit(root_shape).ok_or_else(|| {
-            JsNativeError::typ().with_message("failed to create the realm intrinsics")
-        })?;
+        // Bootstrap holds what it builds in locals and only links it into the heap at the
+        // end: the intrinsics, global object and global `this` until `RealmInner` is
+        // allocated as a root, and then each builtin's constructor, prototype and property
+        // storage until `initialize` installs them. A collection in either window would
+        // see no root for any of it. Creating a realm allocates a bounded amount, so
+        // suspending collection across it is the cheapest correct answer.
+        let _no_gc = boa_gc::NoGcScope::new();
 
-        let global_object = hooks.create_global_object(&intrinsics);
-        let global_this = hooks
-            .create_global_this(&intrinsics)
-            .unwrap_or_else(|| global_object.clone());
-        let environment = GcEdge::new(DeclarativeEnvironment::global());
-        let scope = Scope::new_global();
+        let realm = {
+            let intrinsics = Intrinsics::uninit(root_shape).ok_or_else(|| {
+                JsNativeError::typ().with_message("failed to create the realm intrinsics")
+            })?;
 
-        let realm = Self {
-            inner: Rooted::new(RealmInner {
-                intrinsics,
-                environment,
-                scope,
-                global_object,
-                global_this,
-                template_map: GcRefCell::default(),
-                loaded_modules: GcRefCell::default(),
-                host_classes: GcRefCell::default(),
-                host_defined: GcRefCell::default(),
-            }),
+            let global_object = hooks.create_global_object(&intrinsics);
+            let global_this = hooks
+                .create_global_this(&intrinsics)
+                .unwrap_or_else(|| global_object.clone());
+            let environment = GcEdge::new(DeclarativeEnvironment::global());
+            let scope = Scope::new_global();
+
+            Self {
+                inner: Rooted::new(RealmInner {
+                    intrinsics,
+                    environment,
+                    scope,
+                    global_object,
+                    global_this,
+                    template_map: GcRefCell::default(),
+                    loaded_modules: GcRefCell::default(),
+                    host_classes: GcRefCell::default(),
+                    host_defined: GcRefCell::default(),
+                }),
+            }
         };
 
         realm.initialize();

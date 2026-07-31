@@ -128,11 +128,15 @@ fn hash_rational() {
 
 #[test]
 fn hash_object() {
-    let object1 = JsValue::new(JsObject::with_null_proto());
+    let object1_raw = JsObject::with_null_proto();
+    let _object1_root = object1_raw.clone().root();
+    let object1 = JsValue::new(object1_raw);
     assert_eq!(object1, object1);
     assert_eq!(object1, object1.clone());
 
-    let object2 = JsValue::new(JsObject::with_null_proto());
+    let object2_raw = JsObject::with_null_proto();
+    let _object2_root = object2_raw.clone().root();
+    let object2 = JsValue::new(object2_raw);
     assert_ne!(object1, object2);
 
     assert_eq!(hash_value(&object1), hash_value(&object1.clone()));
@@ -1491,7 +1495,7 @@ mod abstract_relational_comparison {
 
 mod js_value_macro {
     use crate::value::TryIntoJs;
-    use crate::{JsValue, TestAction, js_string, run_test_actions};
+    use crate::{JsObject, JsValue, TestAction, js_string, run_test_actions};
     use boa_engine::{Context, JsResult, js_value};
     use boa_string::JsString;
     use std::ops::Neg;
@@ -1513,18 +1517,22 @@ mod js_value_macro {
     fn arrays() {
         run_test_actions([
             TestAction::assert_with_op("[1, 2, 3]", |value, context| {
+                let _value_root = value.as_object().map(JsObject::root);
                 let v = js_value!([1, 2, 3], context);
+                let _v_root = v.as_object().map(JsObject::root);
                 value.deep_strict_equals(&v, context).unwrap()
             }),
             TestAction::assert_with_op("[1, [2], 3]", |value, context| {
-                value
-                    .deep_strict_equals(&js_value!([1, [2], 3], context), context)
-                    .unwrap()
+                let _value_root = value.as_object().map(JsObject::root);
+                let other = js_value!([1, [2], 3], context);
+                let _other_root = other.as_object().map(JsObject::root);
+                value.deep_strict_equals(&other, context).unwrap()
             }),
             TestAction::assert_with_op("[1, [2], [], [[false]], 3]", |value, context| {
-                value
-                    .deep_strict_equals(&js_value!([1, [2], [], [[false]], 3], context), context)
-                    .unwrap()
+                let _value_root = value.as_object().map(JsObject::root);
+                let other = js_value!([1, [2], [], [[false]], 3], context);
+                let _other_root = other.as_object().map(JsObject::root);
+                value.deep_strict_equals(&other, context).unwrap()
             }),
         ]);
     }
@@ -1534,9 +1542,10 @@ mod js_value_macro {
         run_test_actions([TestAction::assert_with_op(
             r#"({ "hello": 1, "world": null })"#,
             |value, context| {
-                value
-                    .deep_strict_equals(&js_value!({ "hello": 1, "world": () }, context), context)
-                    .unwrap()
+                let _value_root = value.as_object().map(JsObject::root);
+                let other = js_value!({ "hello": 1, "world": () }, context);
+                let _other_root = other.as_object().map(JsObject::root);
+                value.deep_strict_equals(&other, context).unwrap()
             },
         )]);
     }
@@ -1546,14 +1555,14 @@ mod js_value_macro {
         run_test_actions([TestAction::assert_with_op(
             r#"({ "hello": 1, "world": null })"#,
             |value, context| {
+                let _value_root = value.as_object().map(JsObject::root);
                 let hello = JsValue::from(1);
                 let world = JsValue::null();
+                let other = js_value!({ "hello": hello, "world": world }, context);
+                let _other_root = other.as_object().map(JsObject::root);
 
                 value
-                    .deep_strict_equals(
-                        &js_value!({ "hello": hello, "world": world }, context),
-                        context,
-                    )
+                    .deep_strict_equals(&other, context)
                     .expect("No error should happen.")
             },
         )]);
@@ -1564,12 +1573,14 @@ mod js_value_macro {
         run_test_actions([TestAction::assert_with_op(
             r#"({ "hello": [{ "foo": [1, []] }], "world": { "bar": false } })"#,
             |value, context| {
+                let _value_root = value.as_object().map(JsObject::root);
                 let bar = false;
                 let other = js_value!({
                     "hello": [{ "foo": [1, []] }],
                     // Allow comments
                     "world": { "bar": bar },
                 }, context);
+                let _other_root = other.as_object().map(JsObject::root);
 
                 value
                     .deep_strict_equals(&other, context)
@@ -1583,12 +1594,14 @@ mod js_value_macro {
         run_test_actions([TestAction::assert_with_op(
             r#"({ "hello": [{ "foo": [1, []] }], "world": { "bar": false } })"#,
             |value, ctx| {
+                let _value_root = value.as_object().map(JsObject::root);
                 let bar = JsValue::from(false);
                 let other = js_value!({
                     "hello": [{ "foo": [1, []] }],
                     // Allow comments
                     "world": { "bar": bar },
                 }, ctx);
+                let _other_root = other.as_object().map(JsObject::root);
 
                 value
                     .deep_strict_equals(&other, ctx)

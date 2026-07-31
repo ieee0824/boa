@@ -1031,6 +1031,7 @@ impl RegExp {
         // 20. Let A be ! ArrayCreate(n + 1).
         // 21. Assert: The mathematical value of A's "length" property is n + 1.
         let a = Array::array_create(n + 1, None, context)?;
+        let _a_root = a.clone().root();
 
         // 22. Perform ! CreateDataPropertyOrThrow(A, "index", 𝔽(lastIndex)).
         a.create_data_property_or_throw(js_string!("index"), last_index, context)
@@ -1048,9 +1049,11 @@ impl RegExp {
             [match_value.start().into(), match_value.end().into()],
             context,
         );
+        let _match_record_root = match_record.clone().root();
 
         // 25. Let indices be a new empty List.
         let indices = Array::array_create(n + 1, None, context)?;
+        let _indices_root = indices.clone().root();
 
         // 27. Append match to indices.
         indices
@@ -1232,6 +1235,7 @@ impl RegExp {
 
         // c. Let A be ! ArrayCreate(0).
         let a = Array::array_create(0, None, context).expect("this ArrayCreate call must not fail");
+        let _a_root = a.clone().root();
 
         // d. Let n be 0.
         let mut n = 0;
@@ -1244,6 +1248,7 @@ impl RegExp {
             // ii. If result is null, then
             // iii. Else,
             if let Some(result) = result {
+                let _result_root = result.clone().root();
                 // 1. Let matchStr be ? ToString(? Get(result, "0")).
                 let match_str = result.get(0, context)?.to_string(context)?;
 
@@ -1356,6 +1361,7 @@ impl RegExp {
 
         // 6. Let matcher be ? Construct(C, « R, flags »).
         let matcher = c.construct(&[this.clone(), flags.clone().into()], Some(&c), context)?;
+        let _matcher_root = matcher.clone().root();
 
         // 7. Let lastIndex be ? ToLength(? Get(R, "lastIndex")).
         let last_index = regexp

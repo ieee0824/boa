@@ -1148,9 +1148,10 @@ impl JsObject {
         };
 
         // 3. If initializer is not empty, then
-        // a. Let initValue be ? Call(initializer, receiver).
+        // a. Let initValue be ? Call(initializer, receiver).
         // 4. Else, let initValue be undefined.
         let init_value = initializer.call(&self.clone().into(), &[], context)?;
+        let _init_value_root = init_value.as_object().map(JsObject::root);
 
         match field_record {
             // 1. Let fieldName be fieldRecord.[[Name]].

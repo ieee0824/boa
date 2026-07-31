@@ -83,28 +83,28 @@ fn c_style_inheritance() {
 
     run_test(|| {
         let value = vec![1, 2, 3];
-        let derived = Gc::new(Derived {
+        let derived = Rooted::new(Derived {
             base: Base {
                 base_field: value.clone(),
             },
             derived_field: vec![4, 5, 6],
         });
 
-        assert_eq!(Gc::type_id(&derived), TypeId::of::<Derived>());
-        assert!(Gc::is::<Derived>(&derived));
+        assert_eq!(Gc::type_id(derived.as_gc()), TypeId::of::<Derived>());
+        assert!(Rooted::is::<Derived>(&derived));
 
         // SAFETY: The structs have #[repr(C)] so this is safe.
-        let base = unsafe { Gc::cast_unchecked::<Base>(derived.clone()) };
+        let base = unsafe { Rooted::cast_unchecked::<Base>(derived.clone()) };
 
-        assert_eq!(Gc::type_id(&base), TypeId::of::<Derived>());
-        assert!(Gc::is::<Derived>(&base));
+        assert_eq!(Gc::type_id(base.as_gc()), TypeId::of::<Derived>());
+        assert!(Rooted::is::<Derived>(&base));
 
         assert_eq!(base.base_field, value);
         assert_eq!(base.base_field, derived.base.base_field);
 
-        assert!(Gc::ptr_eq(&base, &derived));
+        assert!(Rooted::ptr_eq(&base, &derived));
 
-        assert_eq!(Gc::downcast::<i32>(base.clone()), None);
-        assert_eq!(*Gc::downcast::<Derived>(base).unwrap(), *derived);
+        assert!(Rooted::downcast::<i32>(base.clone()).is_none());
+        assert_eq!(*Rooted::downcast::<Derived>(base).unwrap(), *derived);
     });
 }

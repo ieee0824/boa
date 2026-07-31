@@ -102,7 +102,7 @@ impl GeneratorContext {
         resume_kind: GeneratorResumeKind,
         context: &mut Context,
     ) -> CompletionRecord {
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
+        std::mem::swap(&mut *context.vm.stack, &mut self.stack);
         let frame = self
             .call_frame
             .take()
@@ -122,7 +122,7 @@ impl GeneratorContext {
 
         let result = context.run();
 
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
+        std::mem::swap(&mut *context.vm.stack, &mut self.stack);
         self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
         assert!(self.call_frame.is_some());
         result
@@ -134,7 +134,7 @@ impl GeneratorContext {
         resume_kind: GeneratorResumeKind,
         context: &mut Context,
     ) -> CompletionRecord {
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
+        std::mem::swap(&mut *context.vm.stack, &mut self.stack);
         let frame = self
             .call_frame
             .take()
@@ -151,7 +151,7 @@ impl GeneratorContext {
         context.vm.stack.push(resume_kind);
 
         let result = context.run_async_with_budget(256).await;
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
+        std::mem::swap(&mut *context.vm.stack, &mut self.stack);
         self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
         assert!(self.call_frame.is_some());
         result

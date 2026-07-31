@@ -6,7 +6,7 @@ use crate::{
     context::intrinsics::Intrinsics,
     error::JsNativeError,
     js_string,
-    object::JsObject,
+    object::{JsObject, RootedJsObject},
     realm::Realm,
     symbol::JsSymbol,
 };
@@ -318,7 +318,7 @@ impl JsValue {
 /// The result of the iteration process.
 #[derive(Debug, Clone, Trace, Finalize)]
 pub struct IteratorResult {
-    object: JsObject,
+    object: RootedJsObject,
 }
 
 impl IteratorResult {
@@ -326,7 +326,9 @@ impl IteratorResult {
     /// the value is not a [`JsObject`]
     pub(crate) fn from_value(value: JsValue) -> JsResult<Self> {
         if let Some(object) = value.into_object() {
-            Ok(Self { object })
+            Ok(Self {
+                object: object.root(),
+            })
         } else {
             Err(JsNativeError::typ()
                 .with_message("next value should be an object")
@@ -335,7 +337,7 @@ impl IteratorResult {
     }
 
     /// Gets the inner object of this `IteratorResult`.
-    pub(crate) const fn object(&self) -> &JsObject {
+    pub(crate) fn object(&self) -> &JsObject {
         &self.object
     }
 
@@ -385,12 +387,16 @@ pub struct IteratorRecord {
     /// `[[Iterator]]`
     ///
     /// An object that conforms to the `Iterator` or `AsyncIterator` interface.
-    iterator: JsObject,
+    iterator: RootedJsObject,
 
     /// `[[NextMethod]]`
     ///
     /// The `next` method of the `[[Iterator]]` object.
     next_method: JsValue,
+
+    /// Keeps the object held by `[[NextMethod]]` rooted while this native record
+    /// is temporarily removed from a call frame's iterator stack.
+    next_method_root: Option<RootedJsObject>,
 
     /// `[[Done]]`
     ///
@@ -406,18 +412,27 @@ impl IteratorRecord {
     #[inline]
     #[must_use]
     pub fn new(iterator: JsObject, next_method: JsValue) -> Self {
+        // Promote incoming edges before allocating anything else. Constructing the
+        // bootstrap result below can itself trigger a collection.
+        let iterator = iterator.root();
+        let next_method_root = next_method.as_object().map(JsObject::root);
+        // Keep the bootstrap result rooted while the surrounding record is being
+        // assembled. `JsObject::with_null_proto` returns an unregistered heap edge,
+        // and constructing its shape can itself trigger a collection.
+        let last_result = JsObject::with_null_proto().root();
         Self {
             iterator,
             next_method,
+            next_method_root,
             done: false,
             last_result: IteratorResult {
-                object: JsObject::with_null_proto(),
+                object: last_result,
             },
         }
     }
 
     /// Get the `[[Iterator]]` field of the `IteratorRecord`.
-    pub(crate) const fn iterator(&self) -> &JsObject {
+    pub(crate) fn iterator(&self) -> &JsObject {
         &self.iterator
     }
 
@@ -508,7 +523,7 @@ impl IteratorRecord {
         self.set_done_on_err(|iter| {
             iter.next_method
                 .call(
-                    &iter.iterator.clone().into(),
+                    &iter.iterator.to_edge().into(),
                     value.map_or(&[], std::slice::from_ref),
                     context,
                 )
@@ -604,7 +619,7 @@ impl IteratorRecord {
 
                 if let Some(r#return) = r#return {
                     // c. Set innerResult to Completion(Call(return, iterator)).
-                    r#return.call(&iterator.clone().into(), &[], context)
+                    r#return.call(&iterator.to_edge().into(), &[], context)
                 } else {
                     // b. If return is undefined, return ? completion.
                     return completion;

@@ -27,7 +27,6 @@ use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
     mem,
     ptr::NonNull,
 };
@@ -38,40 +37,37 @@ pub use cell::{GcRef, GcRefCell, GcRefMut};
 pub use internals::GcBox;
 pub use pointers::{
     Ephemeron, EphemeronEdge, Gc, GcEdge, GcErased, GcErasedEdge, Rooted, WeakGc, WeakGcEdge,
-    WeakMap, WeakMapEdge,
+    WeakGcRoot, WeakMap, WeakMapEdge, WeakMapRoot,
 };
 
 type GcErasedPointer = NonNull<GcBox<NonTraceable>>;
 type EphemeronPointer = NonNull<dyn ErasedEphemeronBox>;
 type ErasedWeakMapBoxPointer = NonNull<dyn ErasedWeakMapBox>;
-
-#[derive(Debug, Clone, Copy)]
-struct RootEntry {
-    // Read by the marker after the compatibility migration is complete. Tests
-    // exercise it now so registration cannot silently drift from the handle.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pointer: GcErasedPointer,
-    handles: usize,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct EphemeronRootEntry {
-    // Read by the marker after the compatibility migration is complete. Tests
-    // exercise it now so registration cannot silently drift from the handle.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pointer: EphemeronPointer,
-    handles: usize,
-}
+type RootProviderPointer = NonNull<dyn Trace>;
 
 thread_local!(static GC_DROPPING: Cell<bool> = const { Cell::new(false) });
-thread_local!(static GC_ROOTS: RefCell<HashMap<usize, RootEntry>> = RefCell::new(HashMap::new()));
-thread_local!(static EPHEMERON_ROOTS: RefCell<HashMap<usize, EphemeronRootEntry>> = RefCell::new(HashMap::new()));
+thread_local!(static GC_SUSPENDED: Cell<usize> = const { Cell::new(0) });
+// A collection cannot trace through a `GcRefCell` while its value is mutably
+// borrowed. Defer collection until all writing borrows have been released.
+thread_local!(static COLLECTION_BLOCKED_BORROWS: Cell<usize> = const { Cell::new(0) });
+// Set while the collector is tearing the whole heap down. Root counts live in the
+// allocation headers, so a handle dropped after its allocation was freed must not touch
+// them. During a sweep this cannot happen — an allocation a root points at is kept — but
+// teardown frees everything regardless of what still points at it.
+thread_local!(static GC_TEARDOWN: Cell<bool> = const { Cell::new(false) });
+thread_local!(static ROOT_PROVIDERS: RefCell<Vec<(usize, RootProviderPointer)>> = RefCell::new(Vec::new()));
+// How many allocations currently have at least one registered root. Maintained
+// alongside the per-allocation counts so that "are there any roots" and the tests'
+// whole-registry assertions stay O(1).
+thread_local!(static ROOTED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) });
+thread_local!(static ROOTED_EPHEMERONS: Cell<usize> = const { Cell::new(0) });
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // The collector can own traced values containing `Rooted` handles. Initialize
-    // the root registry first so it remains alive while the collector is dropped
+    // the root bookkeeping first so it remains alive while the collector is dropped
     // during thread teardown.
-    GC_ROOTS.with(|_| {});
-    EPHEMERON_ROOTS.with(|_| {});
+    ROOTED_ALLOCATIONS.with(|_| {});
+    ROOTED_EPHEMERONS.with(|_| {});
+    ROOT_PROVIDERS.with(|_| {});
     RefCell::new(BoaGc {
         config: GcConfig::default(),
         runtime: GcRuntimeData::default(),
@@ -81,74 +77,260 @@ thread_local!(static BOA_GC: RefCell<BoaGc> = {
     })
 });
 
+/// Registers one root pointing at `pointer`.
+///
+/// The count lives in the allocation's own header, so this is a counter increment
+/// rather than a side-table insertion.
 fn register_root(pointer: GcErasedPointer) {
-    GC_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = pointer.as_ptr().addr();
-        roots
-            .entry(key)
-            .and_modify(|entry| entry.handles += 1)
-            .or_insert(RootEntry {
-                pointer,
-                handles: 1,
-            });
-    });
+    if teardown_in_progress() {
+        return;
+    }
+
+    // SAFETY: a caller holding a handle to the allocation proves the pointer is valid.
+    let became_rooted = unsafe { pointer.as_ref() }.header.register_root();
+    if became_rooted {
+        ROOTED_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 fn unregister_root(pointer: GcErasedPointer) {
-    GC_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = pointer.as_ptr().addr();
-        let entry = roots
-            .get_mut(&key)
-            .expect("attempted to unregister an unknown GC root");
-        entry.handles -= 1;
-        if entry.handles == 0 {
-            roots.remove(&key);
-        }
-    });
-}
+    if teardown_in_progress() {
+        return;
+    }
 
-fn ephemeron_pointer_key(pointer: EphemeronPointer) -> usize {
-    pointer.as_ptr().cast::<()>().addr()
+    // SAFETY: a caller holding a handle to the allocation proves the pointer is valid.
+    let became_unrooted = unsafe { pointer.as_ref() }.header.unregister_root();
+    if became_unrooted {
+        ROOTED_ALLOCATIONS.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .checked_sub(1)
+                    .expect("rooted allocation count underflowed"),
+            );
+        });
+    }
 }
 
 fn register_ephemeron_root(pointer: EphemeronPointer) {
-    EPHEMERON_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = ephemeron_pointer_key(pointer);
-        roots
-            .entry(key)
-            .and_modify(|entry| entry.handles += 1)
-            .or_insert(EphemeronRootEntry {
-                pointer,
-                handles: 1,
-            });
-    });
+    if teardown_in_progress() {
+        return;
+    }
+
+    // SAFETY: a caller holding a handle to the ephemeron proves the pointer is valid.
+    if unsafe { pointer.as_ref() }.header().register_root() {
+        ROOTED_EPHEMERONS.with(|count| count.set(count.get() + 1));
+    }
 }
 
 fn unregister_ephemeron_root(pointer: EphemeronPointer) {
-    EPHEMERON_ROOTS.with(|roots| {
-        let mut roots = roots.borrow_mut();
-        let key = ephemeron_pointer_key(pointer);
-        let entry = roots
-            .get_mut(&key)
-            .expect("attempted to unregister an unknown ephemeron root");
-        entry.handles -= 1;
-        if entry.handles == 0 {
-            roots.remove(&key);
-        }
+    if teardown_in_progress() {
+        return;
+    }
+
+    // SAFETY: a caller holding a handle to the ephemeron proves the pointer is valid.
+    if unsafe { pointer.as_ref() }.header().unregister_root() {
+        ROOTED_EPHEMERONS.with(|count| {
+            count.set(
+                count
+                    .get()
+                    .checked_sub(1)
+                    .expect("rooted ephemeron count underflowed"),
+            );
+        });
+    }
+}
+
+/// Suspends collection for as long as the guard is alive.
+///
+/// Bootstrap code builds a graph of objects in native locals and only links it into the
+/// heap at the end, so there is no root to register while it runs. Suspending collection
+/// over such a window is only sound when the window allocates a bounded amount — it
+/// defers reclamation rather than preventing it.
+#[derive(Debug)]
+pub struct NoGcScope;
+
+impl NoGcScope {
+    /// Suspends collection until the returned guard is dropped.
+    #[must_use]
+    pub fn new() -> Self {
+        GC_SUSPENDED.with(|suspended| suspended.set(suspended.get() + 1));
+        Self
+    }
+}
+
+impl Default for NoGcScope {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Drop for NoGcScope {
+    fn drop(&mut self) {
+        GC_SUSPENDED.with(|suspended| {
+            suspended.set(
+                suspended
+                    .get()
+                    .checked_sub(1)
+                    .expect("unbalanced `NoGcScope` drop"),
+            );
+        });
+    }
+}
+
+fn collection_suspended() -> bool {
+    // `GcRefCell::trace` deliberately skips the value while a mutable borrow is
+    // active.  Collecting at that point would therefore make the collector observe
+    // an incomplete graph.  Treat the borrow as a safepoint boundary: allocations
+    // remain allowed, but reclamation is deferred until the borrow is released.
+    GC_SUSPENDED.with(Cell::get) > 0 || COLLECTION_BLOCKED_BORROWS.with(Cell::get) > 0
+}
+
+pub(crate) fn begin_collection_block() {
+    COLLECTION_BLOCKED_BORROWS.with(|active| active.set(active.get() + 1));
+}
+
+pub(crate) fn end_collection_block() {
+    COLLECTION_BLOCKED_BORROWS.with(|active| {
+        active.set(
+            active
+                .get()
+                .checked_sub(1)
+                .expect("unbalanced GC collection block"),
+        );
     });
 }
 
 #[cfg(test)]
-fn registered_roots() -> Vec<RootEntry> {
-    GC_ROOTS.with(|roots| roots.borrow().values().copied().collect())
+pub(crate) fn collection_blocked_borrows() -> usize {
+    COLLECTION_BLOCKED_BORROWS.with(Cell::get)
 }
 
+/// Whether the collector is freeing the entire heap, so allocation headers may already
+/// be gone and must not be touched by root bookkeeping.
+fn teardown_in_progress() -> bool {
+    GC_TEARDOWN.with(Cell::get)
+}
+
+/// Marks the whole-heap teardown window for the root bookkeeping.
+struct TeardownGuard;
+
+impl TeardownGuard {
+    fn new() -> Self {
+        GC_TEARDOWN.with(|teardown| teardown.set(true));
+        Self
+    }
+}
+
+impl Drop for TeardownGuard {
+    fn drop(&mut self) {
+        GC_TEARDOWN.with(|teardown| teardown.set(false));
+    }
+}
+
+/// A registration of a heap-external structure that owns garbage collected roots.
+///
+/// Individual [`Rooted`] handles register themselves one at a time, which is the right
+/// trade for handles a native caller holds for a while. It is the wrong trade for the
+/// VM's value stack: registering there would put a hash map operation on every push and
+/// pop. Instead the stack registers *itself* once, and the collector traces it as a root
+/// during the mark phase — no per-value bookkeeping, and a mark cost proportional to the
+/// live stack depth rather than to the heap.
+///
+/// The registration lasts until the guard is dropped.
+#[derive(Debug)]
+pub struct RootProvider {
+    key: usize,
+}
+
+impl RootProvider {
+    /// Registers `provider` as a source of garbage collected roots.
+    ///
+    /// # Safety
+    ///
+    /// - `provider` must point to a live value that stays at this address until the
+    ///   returned guard is dropped. Registering a value that can move (because it is
+    ///   held by value in a structure the caller may move) is Undefined Behaviour.
+    /// - `provider` must not be mutably aliased at any point where an allocation, and so
+    ///   a collection, can run. Tracing reads the value, so an outstanding `&mut` to it
+    ///   while the collector runs is Undefined Behaviour.
+    #[must_use]
+    pub unsafe fn register(provider: RootProviderPointer) -> Self {
+        let key = provider.as_ptr().cast::<()>().addr();
+        ROOT_PROVIDERS.with(|providers| {
+            providers.borrow_mut().push((key, provider));
+        });
+        Self { key }
+    }
+}
+
+impl Drop for RootProvider {
+    fn drop(&mut self) {
+        ROOT_PROVIDERS.with(|providers| {
+            let mut providers = providers.borrow_mut();
+            let index = providers
+                .iter()
+                .rposition(|(key, _)| *key == self.key)
+                .expect("attempted to unregister an unknown GC root provider");
+            providers.remove(index);
+        });
+    }
+}
+
+struct TemporaryStrongRoot(GcErasedPointer);
+
+impl TemporaryStrongRoot {
+    fn new(pointer: GcErasedPointer) -> Self {
+        register_root(pointer);
+        Self(pointer)
+    }
+}
+
+impl Drop for TemporaryStrongRoot {
+    fn drop(&mut self) {
+        unregister_root(self.0);
+    }
+}
+
+struct TemporaryEphemeronRoot(EphemeronPointer);
+
+impl TemporaryEphemeronRoot {
+    fn new(pointer: EphemeronPointer) -> Self {
+        register_ephemeron_root(pointer);
+        Self(pointer)
+    }
+}
+
+impl Drop for TemporaryEphemeronRoot {
+    fn drop(&mut self) {
+        unregister_ephemeron_root(self.0);
+    }
+}
+
+/// The number of allocations with at least one registered root.
 #[cfg(test)]
-fn registered_ephemeron_roots() -> Vec<EphemeronRootEntry> {
-    EPHEMERON_ROOTS.with(|roots| roots.borrow().values().copied().collect())
+fn registered_root_count() -> usize {
+    ROOTED_ALLOCATIONS.with(Cell::get)
+}
+
+/// The number of ephemerons with at least one registered root.
+#[cfg(test)]
+fn registered_ephemeron_root_count() -> usize {
+    ROOTED_EPHEMERONS.with(Cell::get)
+}
+
+/// How many registered roots point at `pointer`.
+#[cfg(test)]
+fn root_handles(pointer: GcErasedPointer) -> u32 {
+    // SAFETY: the caller holds a handle to the allocation, so the pointer is valid.
+    unsafe { pointer.as_ref() }.header.root_count()
+}
+
+/// How many registered roots point at the ephemeron `pointer`.
+#[cfg(test)]
+fn ephemeron_root_handles(pointer: EphemeronPointer) -> u32 {
+    // SAFETY: the caller holds a handle to the ephemeron, so the pointer is valid.
+    unsafe { pointer.as_ref() }.header().root_count()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -246,17 +428,23 @@ impl Allocator {
     /// Allocate a new garbage collected value to the Garbage Collector's heap.
     fn alloc_gc<T: Trace>(value: GcBox<T>) -> NonNull<GcBox<T>> {
         let element_size = size_of_val::<GcBox<T>>(&value);
+        // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
+        let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
+        let erased: NonNull<GcBox<NonTraceable>> = ptr.cast();
+        let temporary_root = TemporaryStrongRoot::new(erased);
+
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
 
-            Self::manage_state(&mut gc);
-            // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
-            let erased: NonNull<GcBox<NonTraceable>> = ptr.cast();
-
+            // Publish the allocation before the collection that `manage_state` may run.
+            // Roots are found by walking the heap, so an allocation the collector cannot
+            // see is one whose contents it would not keep alive.
             gc.strongs.push(erased);
             gc.runtime.bytes_allocated += element_size;
 
+            Self::manage_state(&mut gc);
+
+            drop(temporary_root);
             ptr
         })
     }
@@ -265,17 +453,22 @@ impl Allocator {
         value: EphemeronBox<K, V>,
     ) -> NonNull<EphemeronBox<K, V>> {
         let element_size = size_of_val::<EphemeronBox<K, V>>(&value);
+        // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
+        let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
+        let erased: NonNull<dyn ErasedEphemeronBox> = ptr;
+        let temporary_root = TemporaryEphemeronRoot::new(erased);
+
         BOA_GC.with(|st| {
             let mut gc = st.borrow_mut();
 
-            Self::manage_state(&mut gc);
-            // Safety: value cannot be a null pointer, since `Box` cannot return null pointers.
-            let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(Box::new(value))) };
-            let erased: NonNull<dyn ErasedEphemeronBox> = ptr;
-
+            // Publish before the collection that `manage_state` may run, for the same
+            // reason as in `alloc_gc`.
             gc.weaks.push(erased);
             gc.runtime.bytes_allocated += element_size;
 
+            Self::manage_state(&mut gc);
+
+            drop(temporary_root);
             ptr
         })
     }
@@ -302,6 +495,10 @@ impl Allocator {
     }
 
     fn manage_state(gc: &mut BoaGc) {
+        if collection_suspended() {
+            return;
+        }
+
         if gc.runtime.bytes_allocated > gc.config.threshold {
             Collector::collect(gc);
 
@@ -340,8 +537,6 @@ impl Collector {
     /// Run a collection on the full heap.
     fn collect(gc: &mut BoaGc) {
         gc.runtime.collections += 1;
-
-        Self::trace_non_roots(gc);
 
         let mut tracer = Tracer::new();
 
@@ -393,26 +588,6 @@ impl Collector {
         gc.weak_maps.shrink_to(gc.weak_maps.len() >> 2);
     }
 
-    fn trace_non_roots(gc: &BoaGc) {
-        // Count all the handles located in GC heap.
-        // Then, we can find whether there is a reference from other places, and they are the roots.
-        for node in &gc.strongs {
-            // SAFETY: node must be valid as this phase cannot drop any node.
-            let trace_non_roots_fn = unsafe { node.as_ref() }.trace_non_roots_fn();
-
-            // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-            unsafe {
-                trace_non_roots_fn(*node);
-            }
-        }
-
-        for eph in &gc.weaks {
-            // SAFETY: node must be valid as this phase cannot drop any node.
-            let eph_ref = unsafe { eph.as_ref() };
-            eph_ref.trace_non_roots();
-        }
-    }
-
     /// Walk the heap and mark any nodes deemed reachable
     fn mark_heap(
         tracer: &mut Tracer,
@@ -426,18 +601,33 @@ impl Collector {
 
         // === Preliminary mark phase ===
         //
-        // 0. Get the naive list of possibly dead nodes.
+        // 0. Trace every explicitly registered strong root. The registration lives in
+        // each allocation's header, so finding the roots is one pass reading a counter
+        // rather than tracing every object's fields to work out which handles are
+        // internal to the heap.
         for node in strongs {
             // SAFETY: node must be valid as this phase cannot drop any node.
             let node_ref = unsafe { node.as_ref() };
-            if node_ref.is_rooted() {
+            if node_ref.header.is_rooted() {
                 tracer.enqueue(*node);
+            }
+        }
+        // 0.0. Trace every registered heap-external root provider, such as the VM's
+        // value stack, which holds roots without registering them one by one.
+        ROOT_PROVIDERS.with(|providers| {
+            for (_, provider) in providers.borrow().iter() {
+                // SAFETY: `RootProvider::register` requires the provider to stay valid and
+                // free of mutable aliases for as long as it is registered.
+                unsafe { provider.as_ref().trace(tracer) };
+            }
+        });
+        // SAFETY: registered roots point to live collector allocations.
+        unsafe { tracer.trace_until_empty() };
 
-                // SAFETY: all nodes must be valid as this phase cannot drop any node.
-                unsafe {
-                    tracer.trace_until_empty();
-                }
-            } else if !node_ref.is_marked() {
+        // Get the naive list of possibly dead nodes.
+        for node in strongs {
+            // SAFETY: node must be valid as this phase cannot drop any node.
+            if unsafe { !node.as_ref().is_marked() } {
                 strong_dead.push(*node);
             }
         }
@@ -457,16 +647,19 @@ impl Collector {
         // === Weak mark phase ===
         //
         //
-        // 1. Get the naive list of ephemerons that are supposedly dead or their key is dead and
-        // trace all the ephemerons that have roots and their keys are live. Also remove from
-        // this list the ephemerons that are marked but their value is dead.
+        // 1. Mark explicitly registered ephemeron roots, then get the naive list of ephemerons
+        // that are supposedly dead or whose key is dead.
         for eph in weaks {
             // SAFETY: node must be valid as this phase cannot drop any node.
-            let eph_ref = unsafe { eph.as_ref() };
-            let header = eph_ref.header();
+            let header = unsafe { eph.as_ref() }.header();
             if header.is_rooted() {
                 header.mark();
             }
+        }
+
+        for eph in weaks {
+            // SAFETY: node must be valid as this phase cannot drop any node.
+            let eph_ref = unsafe { eph.as_ref() };
             // SAFETY: the garbage collector ensures `eph_ref` always points to valid data.
             if unsafe { !eph_ref.trace(tracer) } {
                 pending_ephemerons.push(*eph);
@@ -571,7 +764,6 @@ impl Collector {
             let node_ref = unsafe { node.as_ref() };
             if node_ref.is_marked() {
                 node_ref.header.unmark();
-                node_ref.reset_non_root_count();
 
                 true
             } else {
@@ -596,7 +788,6 @@ impl Collector {
             let header = eph_ref.header();
             if header.is_marked() {
                 header.unmark();
-                header.reset_non_root_count();
 
                 true
             } else {
@@ -613,6 +804,11 @@ impl Collector {
 
     // Clean up the heap when BoaGc is dropped
     fn dump(gc: &mut BoaGc) {
+        // Everything here is freed regardless of what still points at it, so a handle
+        // dropped along the way must not reach into an allocation's header to update its
+        // root count.
+        let _teardown = TeardownGuard::new();
+
         // Weak maps have to be dropped first, since the process dereferences GcBoxes.
         // This can be done without initializing a dropguard since no GcBox's are being dropped.
         for node in mem::take(&mut gc.weak_maps) {
@@ -651,7 +847,10 @@ pub fn force_collect() {
     BOA_GC.with(|current| {
         let mut gc = current.borrow_mut();
 
-        if gc.runtime.bytes_allocated > 0 {
+        // A mutable `GcRefCell` borrow is not traceable, so forcing a collection
+        // inside it would be just as unsound as an allocation-triggered collection.
+        // Defer the request until the caller releases the borrow.
+        if !collection_suspended() && gc.runtime.bytes_allocated > 0 {
             Collector::collect(&mut gc);
         }
     });

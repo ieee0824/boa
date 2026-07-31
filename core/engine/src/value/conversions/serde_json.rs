@@ -59,17 +59,24 @@ impl JsValue {
                 }),
             Value::String(string) => Ok(Self::from(js_string!(string.as_str()))),
             Value::Array(vec) => {
-                let mut arr = Vec::with_capacity(vec.len());
+                let values =
+                    boa_gc::Rooted::new(boa_gc::GcRefCell::new(Vec::with_capacity(vec.len())));
                 for val in vec {
-                    arr.push(Self::from_json(val, context)?);
+                    let value = Self::from_json(val, context)?;
+                    values.borrow_mut().push(value);
                 }
-                Ok(Array::create_array_from_list(arr, context).into())
+                let array = Array::create_array_from_list(values.borrow().iter().cloned(), context);
+                let _array_root = array.clone().root();
+                Ok(array.into())
             }
             Value::Object(obj) => {
                 let js_obj = JsObject::with_object_proto(context.intrinsics());
+                let _js_obj_root = js_obj.clone().root();
                 for (key, value) in obj {
+                    let value = Self::from_json(value, context)?;
+                    let _value_root = value.as_object().map(JsObject::root);
                     let property = PropertyDescriptor::builder()
-                        .value(Self::from_json(value, context)?)
+                        .value(value)
                         .writable(true)
                         .enumerable(true)
                         .configurable(true);
@@ -337,11 +344,13 @@ mod tests {
             // }
 
             let inner = JsObject::with_null_proto();
+            let _inner_root = inner.clone().root();
             inner
                 .create_data_property(js_string!("inner_a"), JsValue::undefined(), &mut context)
                 .expect("should add property");
 
             let array = JsArray::new(&mut context);
+            let _array_root = JsObject::from(array.clone()).root();
             array.push(2, &mut context).expect("should push");
             array
                 .push(JsValue::undefined(), &mut context)
@@ -350,6 +359,7 @@ mod tests {
             array.push(inner, &mut context).expect("should push");
 
             let outer = JsObject::with_null_proto();
+            let _outer_root = outer.clone().root();
             outer
                 .create_data_property(js_string!("outer_a"), JsValue::new(1), &mut context)
                 .expect("should add property");

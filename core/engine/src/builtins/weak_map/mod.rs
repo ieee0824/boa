@@ -96,11 +96,14 @@ impl BuiltInConstructor for WeakMap {
         // 3. Set map.[[WeakMapData]] to a new empty List.
         let prototype =
             get_prototype_from_constructor(new_target, StandardConstructors::weak_map, context)?;
+        let map_data = NativeWeakMap::new();
+        let _map_data_root = map_data.root();
         let map = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
-            NativeWeakMap::new(),
+            map_data,
         );
+        let _map_root = map.clone().root();
 
         // 4. If iterable is either undefined or null, return map.
         let iterable = args.get_or_undefined(0);

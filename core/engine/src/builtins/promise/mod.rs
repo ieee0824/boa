@@ -16,7 +16,7 @@ use crate::{
     js_string,
     native_function::NativeFunction,
     object::{
-        CONSTRUCTOR, FunctionObjectBuilder, JsFunction, JsFunctionEdge, JsObject,
+        CONSTRUCTOR, FunctionObjectBuilder, JsFunction, JsFunctionEdge, JsObject, RootedJsObject,
         internal_methods::get_prototype_from_constructor,
     },
     property::Attribute,
@@ -183,6 +183,14 @@ pub(crate) struct PromiseCapability {
     pub(crate) functions: ResolvingFunctionsEdge,
 }
 
+/// External owners for the handles in a [`PromiseCapability`] while the
+/// capability is temporarily outside the traced heap.
+pub(crate) struct PromiseCapabilityRoots {
+    _promise: RootedJsObject,
+    _resolve: JsFunction,
+    _reject: JsFunction,
+}
+
 // SAFETY: manually implementing `Trace` to allow destructuring.
 unsafe impl Trace for PromiseCapability {
     custom_trace!(this, mark, {
@@ -210,6 +218,52 @@ pub(crate) struct ReactionRecord {
     handler: Option<JobCallback>,
 }
 
+/// Explicit roots retained by a promise job while it is waiting in the host
+/// job queue or executing.
+///
+/// Promise jobs are opaque Rust closures, so the collector cannot inspect the
+/// JavaScript handles captured by them. Keep the handles that are copied into
+/// the closure registered until the job is consumed.
+struct PromiseJobRoots {
+    objects: Vec<RootedJsObject>,
+    functions: Vec<JsFunction>,
+}
+
+impl PromiseJobRoots {
+    fn for_reaction(reaction: &ReactionRecord, argument: &JsValue) -> Self {
+        let mut roots = Self {
+            objects: Vec::new(),
+            functions: Vec::new(),
+        };
+
+        if let Some(capability) = reaction.promise_capability.as_ref() {
+            roots.objects.push(capability.promise.clone().root());
+            roots.functions.push(capability.functions.resolve.root());
+            roots.functions.push(capability.functions.reject.root());
+        }
+        if let Some(handler) = reaction.handler.as_ref() {
+            roots.functions.push(handler.callback());
+        }
+        roots.root_value(argument);
+        roots
+    }
+
+    fn for_thenable(promise_to_resolve: &JsObject, thenable: &JsValue, then: &JobCallback) -> Self {
+        let mut roots = Self {
+            objects: vec![promise_to_resolve.clone().root()],
+            functions: vec![then.callback()],
+        };
+        roots.root_value(thenable);
+        roots
+    }
+
+    fn root_value(&mut self, value: &JsValue) {
+        if let Some(object) = value.as_object() {
+            self.objects.push(object.clone().root());
+        }
+    }
+}
+
 /// The `[[Type]]` field values of a `PromiseReaction` record.
 ///
 /// More information:
@@ -223,6 +277,14 @@ enum ReactionType {
 }
 
 impl PromiseCapability {
+    pub(crate) fn root_handles(&self) -> PromiseCapabilityRoots {
+        PromiseCapabilityRoots {
+            _promise: self.promise.clone().root(),
+            _resolve: self.functions.resolve.root(),
+            _reject: self.functions.reject.root(),
+        }
+    }
+
     /// `NewPromiseCapability ( C )`
     ///
     /// More information:
@@ -2257,6 +2319,8 @@ fn new_promise_reaction_job(
     //   c. Else, set handlerRealm to the current Realm Record.
     //   d. NOTE: handlerRealm is never null unless the handler is undefined. When the handler is a
     // revoked Proxy and no ECMAScript code runs, handlerRealm is used to create error objects.
+    let job_roots = PromiseJobRoots::for_reaction(&reaction, &argument);
+
     let realm = reaction
         .handler
         .as_ref()
@@ -2265,6 +2329,7 @@ fn new_promise_reaction_job(
 
     // 1. Let job be a new Job Abstract Closure with no parameters that captures reaction and argument and performs the following steps when called:
     let job = async move |context: &AsyncContext<'_>| {
+        let _job_roots = job_roots;
         let mut context = context.take();
         //   a. Let promiseCapability be reaction.[[Capability]].
         let promise_capability = reaction.promise_capability.take();
@@ -2369,6 +2434,8 @@ fn new_promise_resolve_thenable_job(
     // 3. If getThenRealmResult is a normal completion, let thenRealm be getThenRealmResult.[[Value]].
     // 4. Else, let thenRealm be the current Realm Record.
     // 5. NOTE: thenRealm is never null. When then.[[Callback]] is a revoked Proxy and no code runs, thenRealm is used to create error objects.
+    let job_roots = PromiseJobRoots::for_thenable(&promise_to_resolve, &thenable, &then);
+
     let realm = then
         .callback()
         .get_function_realm(context)
@@ -2376,6 +2443,7 @@ fn new_promise_resolve_thenable_job(
 
     // 1. Let job be a new Job Abstract Closure with no parameters that captures promiseToResolve, thenable, and then and performs the following steps when called:
     let job = async move |context: &AsyncContext<'_>| {
+        let _job_roots = job_roots;
         let mut context = context.take();
         //    a. Let resolvingFunctions be CreateResolvingFunctions(promiseToResolve).
         let resolving_functions =

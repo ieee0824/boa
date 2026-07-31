@@ -208,9 +208,19 @@ struct JsValue {
 
 impl JsValue {
     fn output(&self) -> TokenStream {
-        self.value
+        let value = self
+            .value
             .output(self.context_ident.as_ref())
-            .unwrap_or_else(|err| err.to_compile_error())
+            .unwrap_or_else(|err| err.to_compile_error());
+        quote! {
+            {
+                // A literal is built as one bounded object graph. Keep its
+                // intermediate edges alive until the graph is linked into the
+                // returned value.
+                let _boa_no_gc = ::boa_engine::gc::NoGcScope::new();
+                #value
+            }
+        }
     }
 }
 
@@ -239,9 +249,16 @@ struct JsObject {
 
 impl JsObject {
     fn output(&self) -> TokenStream {
-        self.value
+        let value = self
+            .value
             .output(self.context_ident.as_ref())
-            .unwrap_or_else(|err| err.to_compile_error())
+            .unwrap_or_else(|err| err.to_compile_error());
+        quote! {
+            {
+                let _boa_no_gc = ::boa_engine::gc::NoGcScope::new();
+                #value
+            }
+        }
     }
 }
 

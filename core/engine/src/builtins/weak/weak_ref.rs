@@ -84,14 +84,17 @@ impl BuiltInConstructor for WeakRef {
         // 5. Set weakRef.[[WeakRefTarget]] to target.
         let prototype =
             get_prototype_from_constructor(new_target, StandardConstructors::weak_ref, context)?;
+        let weak_target = WeakGcEdge::new_rooted(&target.root_inner());
+        let _weak_target_root = weak_target.root();
         let weak_ref = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
-            WeakGcEdge::new_rooted(&target.root_inner()),
+            weak_target,
         );
+        let _weak_ref_root = weak_ref.clone().root();
 
         // 4. Perform AddToKeptObjects(target).
-        context.kept_alive.push(target.clone());
+        context.keep_alive(target.clone());
 
         // 6. Return weakRef.
         Ok(weak_ref.into())
@@ -128,7 +131,7 @@ impl WeakRef {
             let object = JsObject::from(object);
 
             // a. Perform AddToKeptObjects(target).
-            context.kept_alive.push(object.clone());
+            context.keep_alive(object.clone());
 
             // b. Return target.
             Ok(object.into())

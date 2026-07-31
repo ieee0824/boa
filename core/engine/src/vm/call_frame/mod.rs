@@ -13,7 +13,7 @@ use crate::{
 };
 use boa_ast::Position;
 use boa_ast::scope::BindingLocator;
-use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, Tracer, custom_trace};
 use boa_string::JsString;
 use thin_vec::ThinVec;
 
@@ -120,6 +120,20 @@ where
 
 /// ---- `CallFrame` creation methods ----
 impl CallFrame {
+    /// Traces the edges held by the native VM representation of this frame.
+    ///
+    /// The code block, realm, active runnable and declarative environments are
+    /// explicit roots in the native frame. Iterator records are native structs,
+    /// however, so their edges need to be exposed to the root provider manually.
+    pub(crate) unsafe fn trace_native_roots(&self, tracer: &mut Tracer) {
+        for iterator in &self.iterators {
+            // SAFETY: The iterator record is live for the duration of the frame.
+            unsafe { iterator.trace(tracer) };
+        }
+        // SAFETY: The environment stack is live for the duration of the frame.
+        unsafe { self.environments.trace_native_roots(tracer) };
+    }
+
     pub(crate) const FUNCTION_PROLOGUE: u32 = 2;
     const THIS_POSITION: usize = 2;
     const FUNCTION_POSITION: usize = 1;

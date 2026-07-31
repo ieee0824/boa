@@ -49,7 +49,7 @@ use crate::{
     builtins,
     builtins::promise::{PromiseCapability, PromiseState},
     environments::DeclarativeEnvironment,
-    object::{JsObject, JsPromise},
+    object::{JsFunction, JsObject, JsPromise, RootedJsObject},
     realm::{Realm, RealmEdge},
 };
 
@@ -159,9 +159,26 @@ impl ResolvedBinding {
 #[derive(Debug, Clone)]
 struct GraphLoadingState {
     capability: PromiseCapability,
+    _promise_root: RootedJsObject,
+    _resolve_root: JsFunction,
+    _reject_root: JsFunction,
     loading: Cell<bool>,
     pending_modules: Cell<usize>,
     visited: RefCell<HashSet<Module>>,
+}
+
+impl GraphLoadingState {
+    fn new(capability: PromiseCapability) -> Self {
+        Self {
+            _promise_root: capability.promise.clone().root(),
+            _resolve_root: capability.functions.resolve.root(),
+            _reject_root: capability.functions.reject.root(),
+            capability,
+            loading: Cell::new(true),
+            pending_modules: Cell::new(1),
+            visited: RefCell::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -331,19 +348,14 @@ impl Module {
                 );
 
                 // 4. Perform InnerModuleLoading(state, module).
-                self.inner_load(
-                    // 3. Let state be the GraphLoadingState Record {
-                    //     [[IsLoading]]: true, [[PendingModulesCount]]: 1, [[Visited]]: « »,
-                    //     [[PromiseCapability]]: pc, [[HostDefined]]: hostDefined
-                    // }.
-                    &Rc::new(GraphLoadingState {
-                        capability: pc.clone(),
-                        loading: Cell::new(true),
-                        pending_modules: Cell::new(1),
-                        visited: RefCell::default(),
-                    }),
-                    context,
-                );
+                // 3. Let state be the GraphLoadingState Record {
+                //     [[IsLoading]]: true, [[PendingModulesCount]]: 1, [[Visited]]: « »,
+                //     [[PromiseCapability]]: pc, [[HostDefined]]: hostDefined
+                // }.
+                // The state can outlive this call in an async module-loader job,
+                // so it also owns explicit roots for the capability's handles.
+                let state = Rc::new(GraphLoadingState::new(pc.clone()));
+                self.inner_load(&state, context);
 
                 // 5. Return pc.[[Promise]].
                 JsPromise::from_object(pc.promise().clone())
@@ -764,8 +776,9 @@ impl<T: IntoIterator<Item = (JsString, NativeFunction)> + Clone> IntoJsModule fo
             unsafe {
                 SyntheticModuleInitializer::from_closure(move |module, context| {
                     for (name, f) in names.iter().zip(fns.iter()) {
-                        module
-                            .set_export(name, f.clone().to_js_function(context.realm()).into())?;
+                        let function = f.clone().to_js_function(context.realm());
+                        let _function_root = function.clone();
+                        module.set_export(name, function.into())?;
                     }
                     Ok(())
                 })

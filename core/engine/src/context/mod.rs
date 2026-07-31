@@ -1,8 +1,9 @@
 //! The ECMAScript context.
 
-use std::{cell::Cell, path::Path, rc::Rc};
+use std::{cell::Cell, path::Path, ptr::NonNull, rc::Rc};
 
 use boa_ast::StatementList;
+use boa_gc::{Finalize, RootProvider, Trace};
 use boa_interner::Interner;
 use boa_parser::source::ReadChar;
 pub use hooks::{DefaultHooks, HostHooks};
@@ -45,6 +46,13 @@ pub mod intrinsics;
 
 thread_local! {
     static CANNOT_BLOCK_COUNTER: Cell<u64> = const { Cell::new(0) };
+}
+
+/// GC handles owned by a [`Context`] but stored outside the VM heap.
+#[derive(Default, Trace, Finalize)]
+struct ContextRoots {
+    kept_alive: Vec<JsObject>,
+    data: HostDefined,
 }
 
 /// ECMAScript context. It is the primary way to interact with the runtime.
@@ -101,9 +109,13 @@ pub struct Context {
     #[cfg(feature = "fuzz")]
     pub(crate) instructions_remaining: usize,
 
-    pub(crate) vm: Vm,
+    pub(crate) vm: Box<Vm>,
 
-    pub(crate) kept_alive: Vec<JsObject>,
+    // Keep this before `roots` so the provider is unregistered before the
+    // allocation it points at is dropped.
+    _roots_provider: Option<RootProvider>,
+
+    roots: Box<ContextRoots>,
 
     can_block: bool,
 
@@ -131,8 +143,6 @@ pub struct Context {
 
     /// Unique identifier for each parser instance used during the context lifetime.
     parser_identifier: u32,
-
-    data: HostDefined,
 }
 
 impl std::fmt::Debug for Context {
@@ -445,6 +455,12 @@ impl Context {
                 .into());
         }
 
+        // The builder holds the class's prototype, constructor and shapes in locals until
+        // `register_class` links them into the realm, so a collection in that window
+        // would see no root for any of them. Registering one class allocates a bounded
+        // amount, so suspending collection across it is the cheapest correct answer.
+        let _no_gc = boa_gc::NoGcScope::new();
+
         let mut class_builder = ClassBuilder::new::<C>(self);
         C::init(&mut class_builder)?;
 
@@ -594,7 +610,11 @@ impl Context {
     /// [weak]: https://tc39.es/ecma262/multipage/managing-memory.html#sec-weak-ref-objects
     #[inline]
     pub fn clear_kept_objects(&mut self) {
-        self.kept_alive.clear();
+        self.roots.kept_alive.clear();
+    }
+
+    pub(crate) fn keep_alive(&mut self, object: JsObject) {
+        self.roots.kept_alive.push(object);
     }
 
     /// Retrieves the current stack trace of the context.
@@ -698,27 +718,27 @@ impl Context {
     /// Insert a type into the context-specific [`HostDefined`] field.
     #[inline]
     pub fn insert_data<T: NativeObject>(&mut self, value: T) -> Option<Box<T>> {
-        self.data.insert(value)
+        self.roots.data.insert(value)
     }
 
     /// Check if the context-specific [`HostDefined`] has type T.
     #[inline]
     #[must_use]
     pub fn has_data<T: NativeObject>(&self) -> bool {
-        self.data.has::<T>()
+        self.roots.data.has::<T>()
     }
 
     /// Remove type T from the context-specific [`HostDefined`], if it exists.
     #[inline]
     pub fn remove_data<T: NativeObject>(&mut self) -> Option<Box<T>> {
-        self.data.remove::<T>()
+        self.roots.data.remove::<T>()
     }
 
     /// Get type T from the context-specific [`HostDefined`], if it exists.
     #[inline]
     #[must_use]
     pub fn get_data<T: NativeObject>(&self) -> Option<&T> {
-        self.data.get::<T>()
+        self.roots.data.get::<T>()
     }
 }
 
@@ -1194,6 +1214,9 @@ impl ContextBuilder {
             .job_executor
             .unwrap_or_else(|| Rc::new(SimpleJobExecutor::new()));
 
+        let roots = Box::new(ContextRoots::default());
+        let roots_provider = unsafe { RootProvider::register(NonNull::from(&*roots)) };
+
         let mut context = Context {
             interner: self.interner.unwrap_or_default(),
             vm,
@@ -1217,7 +1240,8 @@ impl ContextBuilder {
             },
             #[cfg(feature = "fuzz")]
             instructions_remaining: self.instructions_remaining,
-            kept_alive: Vec::new(),
+            _roots_provider: Some(roots_provider),
+            roots,
             host_hooks,
             clock,
             job_executor,
@@ -1228,7 +1252,6 @@ impl ContextBuilder {
             can_block: self.can_block,
             async_jobs_enabled: false,
             pending_async_resume: None,
-            data: HostDefined::default(),
         };
 
         builtins::set_default_global_bindings(&mut context)?;

@@ -574,6 +574,7 @@ impl Array {
                 Some(constructor) => constructor.construct(&[len.into()], None, context)?,
                 _ => Self::array_create(len, None, context)?,
             };
+            let _a_root = a.clone().root();
 
             // 11. Let k be 0.
             // 12. Repeat, while k < len,
@@ -614,6 +615,7 @@ impl Array {
             Some(constructor) => constructor.construct(&[], None, context)?,
             _ => Self::array_create(0, None, context)?,
         };
+        let _a_root = a.clone().root();
 
         // c. Let iteratorRecord be ? GetIteratorFromMethod(items, usingIterator).
         let mut iterator_record = items.get_iterator_from_method(&using_iterator, context)?;
@@ -710,6 +712,7 @@ impl Array {
             Some(constructor) => constructor.construct(&[len.into()], None, context)?,
             _ => Self::array_create(len as u64, None, context)?,
         };
+        let _a_root = a.clone().root();
 
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
@@ -1410,6 +1413,7 @@ impl Array {
 
         // 4. Let A be ? ArraySpeciesCreate(O, len).
         let a = Self::array_species_create(&o, len, context)?;
+        let _a_root = a.clone().root();
 
         let this_arg = args.get_or_undefined(1);
 
@@ -1780,6 +1784,7 @@ impl Array {
 
         // 5. Let A be ArraySpeciesCreate(O, 0)
         let a = Self::array_species_create(&o, 0, context)?;
+        let _a_root = a.clone().root();
 
         // 6. Perform ? FlattenIntoArray(A, O, sourceLen, 0, depthNum)
         Self::flatten_into_array(
@@ -1827,6 +1832,7 @@ impl Array {
 
         // 4. Let A be ? ArraySpeciesCreate(O, 0).
         let a = Self::array_species_create(&o, 0, context)?;
+        let _a_root = a.clone().root();
 
         // 5. Perform ? FlattenIntoArray(A, O, sourceLen, 0, 1, mapperFunction, thisArg).
         Self::flatten_into_array(

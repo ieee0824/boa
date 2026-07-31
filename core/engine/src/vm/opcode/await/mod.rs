@@ -39,6 +39,9 @@ impl Await {
             Ok(promise) => promise,
             Err(err) => return context.handle_error(err),
         };
+        // `promise_resolve` may have allocated a new promise. Keep the raw
+        // edge alive while the fulfillment/rejection handlers are created.
+        let _promise_root = promise.clone().root();
 
         let return_value = context
             .vm

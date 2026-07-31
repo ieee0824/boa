@@ -33,6 +33,20 @@ pub struct WeakMapEdge<K: Trace + ?Sized + 'static, V: Trace + 'static> {
     pub(crate) inner: GcEdge<GcRefCell<RawWeakMap<K, V>>>,
 }
 
+/// A temporary external root for the backing storage of a [`WeakMapEdge`].
+pub struct WeakMapRoot<K: Trace + ?Sized + 'static, V: Trace + 'static> {
+    #[allow(dead_code)]
+    inner: Rooted<GcRefCell<RawWeakMap<K, V>>>,
+}
+
+impl<K: Trace + ?Sized + 'static, V: Trace + 'static> fmt::Debug for WeakMapRoot<K, V> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("WeakMapRoot")
+            .finish_non_exhaustive()
+    }
+}
+
 unsafe impl<K: Trace + ?Sized + 'static, V: Trace + 'static> Trace for WeakMapEdge<K, V> {
     custom_trace!(this, mark, {
         mark(&this.inner);
@@ -40,6 +54,15 @@ unsafe impl<K: Trace + ?Sized + 'static, V: Trace + 'static> Trace for WeakMapEd
 }
 
 impl<K: Trace + ?Sized, V: Trace + Clone> WeakMapEdge<K, V> {
+    /// Registers the backing map while an external caller is assembling a heap object
+    /// that will take ownership of this edge.
+    #[must_use]
+    pub fn root(&self) -> WeakMapRoot<K, V> {
+        WeakMapRoot {
+            inner: self.inner.clone().root(),
+        }
+    }
+
     /// Creates a weak map edge for storage inside a traced allocation.
     #[must_use]
     #[inline]

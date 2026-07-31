@@ -28,6 +28,7 @@ use crate::{
     value::IntegerOrInfinity,
 };
 use crate::{builtins::array_buffer::utils::memmove_naive, value::JsVariant};
+use boa_gc::Rooted;
 
 /// The JavaScript `%TypedArray%` object.
 ///
@@ -2776,7 +2777,9 @@ impl BuiltinTypedArray {
         let len = values.len() as u64;
         // 2. Perform ? AllocateTypedArrayBuffer(O, len).
         let buf = Self::allocate_buffer::<T>(len, context)?;
+        let _buffer_root = Rooted::new(buf.viewed_array_buffer().clone());
         let obj = JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), proto, buf);
+        let _obj_root = obj.clone().root();
 
         // 3. Let k be 0.
         // 4. Repeat, while k < len,
@@ -2997,6 +3000,12 @@ impl BuiltinTypedArray {
         length: &JsValue,
         context: &mut Context,
     ) -> JsResult<JsObject> {
+        // `buffer` is held by a native local until the new typed-array object
+        // is linked to it. Keep the underlying object alive across the
+        // conversions below, which may allocate and collect.
+        let buffer_object: JsObject = buffer.clone().into();
+        let _buffer_root = buffer_object.root_inner();
+
         // 1. Let elementSize be TypedArrayElementSize(O).
         let element_size = T::ERASED.element_size();
 
@@ -3113,7 +3122,9 @@ impl BuiltinTypedArray {
 
         // 2. Perform ? AllocateTypedArrayBuffer(O, len).
         let buf = Self::allocate_buffer::<T>(len, context)?;
+        let _buffer_root = Rooted::new(buf.viewed_array_buffer().clone());
         let obj = JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), proto, buf);
+        let _obj_root = obj.clone().root();
 
         // 3. Let k be 0.
         // 4. Repeat, while k < len,
