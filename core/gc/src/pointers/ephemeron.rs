@@ -195,15 +195,11 @@ impl<K: Trace + ?Sized, V: Trace> EphemeronEdge<K, V> {
 
 impl<K: Trace + ?Sized, V: Trace> Finalize for EphemeronEdge<K, V> {}
 
-// SAFETY: `EphemeronEdge`s trace implementation only marks its inner box because we want to stop
-// tracing through weakly held pointers.
+// SAFETY: `EphemeronEdge`s trace implementation only queues its inner box because we want to stop
+// tracing through weakly held pointers until the collector has checked the key.
 unsafe impl<K: Trace + ?Sized, V: Trace> Trace for EphemeronEdge<K, V> {
-    unsafe fn trace(&self, _tracer: &mut Tracer) {
-        // SAFETY: We need to mark the inner box of the `EphemeronEdge` since it is reachable
-        // from a root and this means it cannot be dropped.
-        unsafe {
-            self.inner().mark();
-        }
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        tracer.enqueue_ephemeron(self.inner_ptr);
     }
 
     fn run_finalizer(&self) {

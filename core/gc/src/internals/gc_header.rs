@@ -1,5 +1,14 @@
 use std::{cell::Cell, fmt};
 
+/// The generation of a collector allocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Generation {
+    /// Newly allocated objects are collected by a minor collection.
+    Young,
+    /// Objects that survived enough minor collections are collected by a major collection.
+    Old,
+}
+
 /// The `Gcheader` contains the `GcBox`'s and `EphemeronBox`'s current state for the `Collector`'s
 /// Mark/Sweep as well as a pointer to the next node in the heap.
 ///
@@ -7,6 +16,15 @@ use std::{cell::Cell, fmt};
 /// `Collector` during the sweep phase.
 pub(crate) struct GcHeader {
     marked: Cell<bool>,
+
+    /// Mark bit used only by minor collections. Major collection marks are kept
+    /// separate because old objects are not swept by a minor collection.
+    minor_marked: Cell<bool>,
+
+    /// The current generation and the number of minor collections survived while
+    /// young. The latter is deliberately small: it only controls promotion.
+    generation: Cell<Generation>,
+    minor_survivals: Cell<u8>,
 
     /// How many explicitly registered roots point at this allocation.
     ///
@@ -22,6 +40,9 @@ impl GcHeader {
     pub(crate) fn new() -> Self {
         Self {
             marked: Cell::new(false),
+            minor_marked: Cell::new(false),
+            generation: Cell::new(Generation::Young),
+            minor_survivals: Cell::new(0),
             root_count: Cell::new(0),
         }
     }
@@ -39,6 +60,52 @@ impl GcHeader {
     /// Sets [`GcHeader`]'s mark bit to 0.
     pub(crate) fn unmark(&self) {
         self.marked.set(false);
+    }
+
+    /// Returns whether this allocation belongs to the nursery.
+    pub(crate) fn is_young(&self) -> bool {
+        self.generation.get() == Generation::Young
+    }
+
+    /// Returns whether this allocation has been promoted out of the nursery.
+    pub(crate) fn is_old(&self) -> bool {
+        self.generation.get() == Generation::Old
+    }
+
+    /// Returns whether this allocation was marked by the current minor collection.
+    pub(crate) fn is_minor_marked(&self) -> bool {
+        self.minor_marked.get()
+    }
+
+    /// Marks this allocation as reachable by the current minor collection.
+    pub(crate) fn minor_mark(&self) {
+        self.minor_marked.set(true);
+    }
+
+    /// Clears the minor mark at the end of a minor collection.
+    pub(crate) fn minor_unmark(&self) {
+        self.minor_marked.set(false);
+    }
+
+    /// Records one minor collection survived and promotes after the first
+    /// survivor pass. Keeping the threshold here makes it easy to tune without
+    /// changing the collector's pointer representation.
+    pub(crate) fn promote_if_mature(&self) -> bool {
+        const PROMOTION_SURVIVALS: u8 = 1;
+
+        if self.is_old() {
+            return false;
+        }
+
+        let survivals = self.minor_survivals.get();
+        if survivals >= PROMOTION_SURVIVALS {
+            self.generation.set(Generation::Old);
+            self.minor_survivals.set(0);
+            true
+        } else {
+            self.minor_survivals.set(survivals + 1);
+            false
+        }
     }
 
     /// Returns how many explicitly registered roots point at this allocation.
@@ -75,6 +142,9 @@ impl fmt::Debug for GcHeader {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("GcHeader")
             .field("marked", &self.is_marked())
+            .field("minor_marked", &self.is_minor_marked())
+            .field("generation", &self.generation.get())
+            .field("minor_survivals", &self.minor_survivals.get())
             .field("root_count", &self.root_count())
             .finish_non_exhaustive()
     }
