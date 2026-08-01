@@ -15,7 +15,9 @@ use crate::{
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     error::JsNativeError,
     js_string,
-    object::{CONSTRUCTOR, JsObject, internal_methods::get_prototype_from_constructor},
+    object::{
+        CONSTRUCTOR, JsObject, RootedJsObject, internal_methods::get_prototype_from_constructor,
+    },
     property::Attribute,
     realm::Realm,
     string::{CodePoint, JsStrVariant, StaticJsStrings},
@@ -1459,7 +1461,7 @@ impl RegExp {
         };
 
         // 10. Let results be a new empty List.
-        let mut results = Vec::new();
+        let mut results: Vec<RootedJsObject> = Vec::new();
 
         // SKIPPED: 11. Let done be false.
         //
@@ -1478,6 +1480,11 @@ impl RegExp {
 
             // c. Else,
             //  i. Append result to results.
+            //
+            // The later replacement loop invokes user-visible operations while
+            // these match objects are still retained. Keep every result rooted
+            // across those calls, since they may trigger a collection.
+            let result = result.root();
             results.push(result.clone());
 
             //  ii. If global is false, then

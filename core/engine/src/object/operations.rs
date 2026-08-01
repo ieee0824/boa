@@ -9,7 +9,7 @@ use crate::{
     context::intrinsics::{StandardConstructor, StandardConstructors},
     error::JsNativeError,
     native_function::NativeFunctionObject,
-    object::{CONSTRUCTOR, JsObject, PROTOTYPE, PrivateElement, PrivateName},
+    object::{CONSTRUCTOR, JsObject, PROTOTYPE, PrivateElement, PrivateName, RootedJsObject},
     property::{PropertyDescriptor, PropertyDescriptorBuilder, PropertyKey, PropertyNameKind},
     realm::{Realm, RealmEdge},
     string::StaticJsStrings,
@@ -750,11 +750,16 @@ impl JsObject {
         context: &mut Context,
     ) -> JsResult<Vec<JsValue>> {
         // 1. Assert: Type(O) is Object.
+        let _self_root = self.clone().root();
         // 2. Let ownKeys be ? O.[[OwnPropertyKeys]]().
         let own_keys =
             self.__own_property_keys__(&mut InternalMethodPropertyContext::new(context))?;
         // 3. Let properties be a new empty List.
         let mut properties = vec![];
+        // `properties` is native storage and each key+value entry can itself
+        // be a newly allocated object. Keep those entries alive while the
+        // enumeration continues to allocate more entry arrays.
+        let mut property_roots: Vec<RootedJsObject> = Vec::new();
 
         // 4. For each element key of ownKeys, do
         for key in own_keys {
@@ -780,19 +785,24 @@ impl JsObject {
                         // a. Let value be ? Get(O, key).
                         // b. If kind is value, append value to properties.
                         PropertyNameKind::Value => {
-                            properties.push(self.get(key.clone(), context)?);
+                            let value = self.get(key.clone(), context)?;
+                            if let Some(object) = value.as_object() {
+                                property_roots.push(object.root());
+                            }
+                            properties.push(value);
                         }
                         // c. Else,
                         // i. Assert: kind is key+value.
                         // ii. Let entry be ! CreateArrayFromList(« key, value »).
                         // iii. Append entry to properties.
-                        PropertyNameKind::KeyAndValue => properties.push(
-                            Array::create_array_from_list(
+                        PropertyNameKind::KeyAndValue => {
+                            let entry = Array::create_array_from_list(
                                 [key_str.into(), self.get(key.clone(), context)?],
                                 context,
-                            )
-                            .into(),
-                        ),
+                            );
+                            property_roots.push(entry.clone().root());
+                            properties.push(entry.into());
+                        }
                     }
                 }
             }

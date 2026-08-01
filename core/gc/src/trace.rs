@@ -25,7 +25,6 @@ enum TraceMode {
 #[derive(Debug, Clone, Copy)]
 struct StrongEntry {
     pointer: GcErasedPointer,
-    is_root: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,9 +40,8 @@ pub struct Tracer {
     ephemeron_queue: VecDeque<EphemeronEntry>,
     discovered_ephemerons: Vec<EphemeronPointer>,
     discovered_ephemeron_set: HashSet<EphemeronPointer>,
-    scanned_old_roots: HashSet<GcErasedPointer>,
+    scanned_old: HashSet<GcErasedPointer>,
     mode: TraceMode,
-    root_scope: bool,
 }
 
 impl Tracer {
@@ -53,9 +51,8 @@ impl Tracer {
             ephemeron_queue: VecDeque::default(),
             discovered_ephemerons: Vec::default(),
             discovered_ephemeron_set: HashSet::default(),
-            scanned_old_roots: HashSet::default(),
+            scanned_old: HashSet::default(),
             mode: TraceMode::Major,
-            root_scope: false,
         }
     }
 
@@ -67,17 +64,11 @@ impl Tracer {
     }
 
     pub(crate) fn enqueue(&mut self, node: GcErasedPointer) {
-        self.queue.push_back(StrongEntry {
-            pointer: node,
-            is_root: self.root_scope,
-        });
+        self.queue.push_back(StrongEntry { pointer: node });
     }
 
     pub(crate) fn enqueue_root(&mut self, node: GcErasedPointer) {
-        self.queue.push_back(StrongEntry {
-            pointer: node,
-            is_root: true,
-        });
+        self.enqueue(node);
     }
 
     /// Queues an ephemeron allocation without tracing through its weak value.
@@ -97,11 +88,8 @@ impl Tracer {
     /// the provider are roots; pointers emitted later while tracing a heap node
     /// are ordinary edges.
     pub(crate) unsafe fn trace_root(&mut self, provider: &dyn Trace) {
-        let previous = self.root_scope;
-        self.root_scope = true;
         // SAFETY: forwarded from the collector's Trace invariant.
         unsafe { provider.trace(self) };
-        self.root_scope = previous;
     }
 
     /// Traces through all the queued nodes until the queue is empty.
@@ -114,7 +102,6 @@ impl Tracer {
             while let Some(entry) = self.queue.pop_front() {
                 let node = entry.pointer;
                 let node_ref = unsafe { node.as_ref() };
-
                 match self.mode {
                     TraceMode::Major => {
                         if node_ref.is_marked() {
@@ -128,7 +115,7 @@ impl Tracer {
                                 continue;
                             }
                             node_ref.header.minor_mark();
-                        } else if !(entry.is_root && self.scanned_old_roots.insert(node)) {
+                        } else if !self.scanned_old.insert(node) {
                             continue;
                         }
                     }

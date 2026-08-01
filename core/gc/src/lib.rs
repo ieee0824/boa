@@ -213,7 +213,7 @@ fn remember_young_ephemeron(pointer: EphemeronPointer) {
 /// This is intentionally shallow: a young child is enough to make its entire
 /// reachable young graph visible to a minor collection.
 pub(crate) fn remember_young_children<T: Trace + ?Sized>(value: &T) {
-    let mut tracer = Tracer::new();
+    let mut tracer = Tracer::new_minor();
     // SAFETY: the caller holds the cell's mutable borrow, so the value cannot be
     // concurrently changed while its Trace implementation reads it.
     unsafe { value.trace(&mut tracer) };
@@ -240,7 +240,7 @@ fn remember_ephemeron_pointer(pointer: EphemeronPointer) {
 fn remember_young_allocation(pointer: GcErasedPointer) {
     // SAFETY: the allocation is live and is being promoted before any sweep.
     let node = unsafe { pointer.as_ref() };
-    let mut tracer = Tracer::new();
+    let mut tracer = Tracer::new_minor();
     // SAFETY: the allocation's vtable matches its erased pointer.
     unsafe { (node.trace_fn())(pointer, &mut tracer) };
 
@@ -835,29 +835,34 @@ impl Collector {
         gc.weaks
             .retain(|pointer| !dead_ephemeron_set.contains(pointer));
 
-        for pointer in dead_strong_set {
-            // SAFETY: only unmarked young allocations are present here.
-            let node = unsafe { pointer.as_ref() };
-            gc.runtime.bytes_allocated = gc
-                .runtime
-                .bytes_allocated
-                .checked_sub(node.size())
-                .expect("allocation byte count underflowed during minor sweep");
-            let drop_fn = node.drop_fn();
-            // SAFETY: the allocation is unreachable and is removed exactly once.
-            unsafe { drop_fn(pointer) };
-        }
+        {
+            // Match the full-heap sweep: destructors of GC edges must not run
+            // finalizers while the collector is reclaiming storage.
+            let _drop_guard = DropGuard::new();
+            for pointer in dead_strong_set {
+                // SAFETY: only unmarked young allocations are present here.
+                let node = unsafe { pointer.as_ref() };
+                gc.runtime.bytes_allocated = gc
+                    .runtime
+                    .bytes_allocated
+                    .checked_sub(node.size())
+                    .expect("allocation byte count underflowed during minor sweep");
+                let drop_fn = node.drop_fn();
+                // SAFETY: the allocation is unreachable and is removed exactly once.
+                unsafe { drop_fn(pointer) };
+            }
 
-        for pointer in dead_ephemeron_set {
-            // SAFETY: only unmarked young ephemerons are present here.
-            let eph = unsafe { pointer.as_ref() };
-            gc.runtime.bytes_allocated = gc
-                .runtime
-                .bytes_allocated
-                .checked_sub(size_of_val(eph))
-                .expect("allocation byte count underflowed during minor sweep");
-            // SAFETY: the allocation is unreachable and is removed exactly once.
-            unsafe { drop(Box::from_raw(pointer.as_ptr())) };
+            for pointer in dead_ephemeron_set {
+                // SAFETY: only unmarked young ephemerons are present here.
+                let eph = unsafe { pointer.as_ref() };
+                gc.runtime.bytes_allocated = gc
+                    .runtime
+                    .bytes_allocated
+                    .checked_sub(size_of_val(eph))
+                    .expect("allocation byte count underflowed during minor sweep");
+                // SAFETY: the allocation is unreachable and is removed exactly once.
+                unsafe { drop(Box::from_raw(pointer.as_ptr())) };
+            }
         }
 
         // A weak map may contain young keys whose ephemerons were cleared above.

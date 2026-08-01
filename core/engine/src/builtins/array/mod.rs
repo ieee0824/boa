@@ -19,7 +19,7 @@ use crate::{
     error::JsNativeError,
     js_string,
     object::{
-        CONSTRUCTOR, IndexedProperties, JsData, JsObject,
+        CONSTRUCTOR, IndexedProperties, JsData, JsObject, RootedJsObject,
         internal_methods::{
             InternalMethodPropertyContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
             get_prototype_from_constructor, ordinary_define_own_property,
@@ -403,6 +403,13 @@ impl Array {
         // 5. Return array.
         // NOTE: This deviates from the spec, but it should have the same behaviour.
         let elements: ThinVec<_> = elements.into_iter().collect();
+        // The input list is native storage. Keep object values rooted while the
+        // destination array allocation publishes the list into the GC heap.
+        let _element_roots: Vec<RootedJsObject> = elements
+            .iter()
+            .filter_map(JsValue::as_object)
+            .map(JsObject::root)
+            .collect();
         let length = elements.len();
 
         context
@@ -951,6 +958,7 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        let _o_root = o.clone().root();
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
         // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
