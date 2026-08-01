@@ -456,8 +456,8 @@ impl JsObject {
 
         let frame_index = context.vm.frames.len();
         if self.__call__(argument_count).resolve(context)? {
-            if let Some(mut pending) = context.take_pending_async_resume() {
-                pending
+            if let Some(pending) = context.take_pending_async_resume() {
+                let (generator_context, _) = pending
                     .context
                     .resume_async(pending.value, pending.kind, context)
                     .await;
@@ -465,7 +465,7 @@ impl JsObject {
                     async_generator
                         .downcast_mut::<crate::builtins::async_generator::AsyncGenerator>()
                         .expect("must be async generator")
-                        .context = Some(pending.context);
+                        .context = Some(generator_context);
                 }
             }
             return Ok(context.vm.stack.pop());

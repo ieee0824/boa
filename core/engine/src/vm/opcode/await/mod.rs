@@ -67,7 +67,7 @@ impl Await {
                     // b. Suspend prevContext.
                     // c. Push asyncContext onto the execution context stack; asyncContext is now the running execution context.
                     // d. Resume the suspended evaluation of asyncContext using NormalCompletion(value) as the result of the operation that suspended it.
-                    let mut r#gen = captures.take().expect("should only run once");
+                    let r#gen = captures.take().expect("should only run once");
 
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
@@ -82,7 +82,7 @@ impl Await {
                         });
                         return Ok(JsValue::undefined());
                     }
-                    r#gen.resume(value, GeneratorResumeKind::Normal, context);
+                    let (r#gen, _) = r#gen.resume(value, GeneratorResumeKind::Normal, context);
 
                     if let Some(async_generator) = async_generator {
                         async_generator
@@ -114,7 +114,7 @@ impl Await {
                     // d. Resume the suspended evaluation of asyncContext using ThrowCompletion(reason) as the result of the operation that suspended it.
                     // e. Assert: When we reach this step, asyncContext has already been removed from the execution context stack and prevContext is the currently running execution context.
                     // f. Return undefined.
-                    let mut r#gen = captures.take().expect("should only run once");
+                    let r#gen = captures.take().expect("should only run once");
 
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
@@ -129,7 +129,7 @@ impl Await {
                         });
                         return Ok(JsValue::undefined());
                     }
-                    r#gen.resume(value, GeneratorResumeKind::Throw, context);
+                    let (r#gen, _) = r#gen.resume(value, GeneratorResumeKind::Throw, context);
 
                     if let Some(async_generator) = async_generator {
                         async_generator

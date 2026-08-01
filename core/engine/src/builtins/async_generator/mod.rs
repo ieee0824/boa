@@ -454,7 +454,7 @@ impl AsyncGenerator {
         ));
 
         // 2. Let genContext be generator.[[AsyncGeneratorContext]].
-        let mut generator_context = generator
+        let generator_context = generator
             .borrow_mut()
             .data_mut()
             .context
@@ -473,7 +473,8 @@ impl AsyncGenerator {
         // 3. Let callerContext be the running execution context.
         // 4. Suspend callerContext.
         // 6. Push genContext onto the execution context stack; genContext is now the running execution context.
-        let result = generator_context.resume(Some(value), resume_kind, context);
+        let (generator_context, result) =
+            generator_context.resume(Some(value), resume_kind, context);
 
         // 7. Resume the suspended evaluation of genContext using completion as the result of the operation that suspended it. Let result be the Completion Record returned by the resumed computation.
         generator.borrow_mut().data_mut().context = Some(generator_context);
