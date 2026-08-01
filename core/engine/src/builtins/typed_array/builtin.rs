@@ -28,7 +28,7 @@ use crate::{
     value::IntegerOrInfinity,
 };
 use crate::{builtins::array_buffer::utils::memmove_naive, value::JsVariant};
-use boa_gc::Rooted;
+use boa_gc::{NoGcScope, Rooted};
 
 /// The JavaScript `%TypedArray%` object.
 ///
@@ -2777,7 +2777,10 @@ impl BuiltinTypedArray {
         let len = values.len() as u64;
         // 2. Perform ? AllocateTypedArrayBuffer(O, len).
         let buf = Self::allocate_buffer::<T>(len, context)?;
-        let _buffer_root = Rooted::new(buf.viewed_array_buffer().clone());
+        let _buffer_root = {
+            let _no_gc = NoGcScope::new();
+            Rooted::new(buf.viewed_array_buffer().clone())
+        };
         let obj = JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), proto, buf);
         let _obj_root = obj.clone().root();
 
@@ -3122,7 +3125,10 @@ impl BuiltinTypedArray {
 
         // 2. Perform ? AllocateTypedArrayBuffer(O, len).
         let buf = Self::allocate_buffer::<T>(len, context)?;
-        let _buffer_root = Rooted::new(buf.viewed_array_buffer().clone());
+        let _buffer_root = {
+            let _no_gc = NoGcScope::new();
+            Rooted::new(buf.viewed_array_buffer().clone())
+        };
         let obj = JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), proto, buf);
         let _obj_root = obj.clone().root();
 

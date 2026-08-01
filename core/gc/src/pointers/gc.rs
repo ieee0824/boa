@@ -411,8 +411,9 @@ impl<T: Trace + ?Sized> Gc<T> {
 
 impl<T: Trace + ?Sized> Finalize for Gc<T> {}
 
-// SAFETY: `Gc` maintains it's own rootedness and implements all methods of
-// Trace. It is not possible to root an already rooted `Gc` and vice versa.
+// SAFETY: `Gc` is a non-owning handle and delegates tracing to the collector's
+// queue. Native owners must use `Rooted`; a standalone `Gc` is kept alive only
+// when it is reachable from an explicitly registered root or root provider.
 unsafe impl<T: Trace + ?Sized> Trace for Gc<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         tracer.enqueue(self.as_erased_pointer());
