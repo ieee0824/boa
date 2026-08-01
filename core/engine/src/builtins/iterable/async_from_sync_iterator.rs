@@ -108,6 +108,7 @@ impl AsyncFromSyncIterator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 5. If value is present, then
         //     a. Let result be Completion(IteratorNext(syncIteratorRecord, value)).
@@ -154,6 +155,7 @@ impl AsyncFromSyncIterator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 6. Let return be Completion(GetMethod(syncIterator, "return")).
         let r#return = sync_iterator.get_method(js_string!("return"), context);
@@ -236,6 +238,7 @@ impl AsyncFromSyncIterator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 6. Let throw be Completion(GetMethod(syncIterator, "throw")).
         let throw = sync_iterator.get_method(js_string!("throw"), context);

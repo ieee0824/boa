@@ -41,11 +41,6 @@ impl GcHeader {
         self.marked.set(false);
     }
 
-    /// Returns whether any explicitly registered root points at this allocation.
-    pub(crate) fn is_rooted(&self) -> bool {
-        self.root_count.get() > 0
-    }
-
     /// Returns how many explicitly registered roots point at this allocation.
     pub(crate) fn root_count(&self) -> u32 {
         self.root_count.get()

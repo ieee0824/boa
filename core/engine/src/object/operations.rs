@@ -456,7 +456,7 @@ impl JsObject {
 
         let frame_index = context.vm.frames.len();
         if self.__call__(argument_count).resolve(context)? {
-            if let Some(mut pending) = context.pending_async_resume.take() {
+            if let Some(mut pending) = context.take_pending_async_resume() {
                 pending
                     .context
                     .resume_async(pending.value, pending.kind, context)

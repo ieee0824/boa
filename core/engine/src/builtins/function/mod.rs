@@ -1117,6 +1117,7 @@ fn function_construct(
     let env_fp = environments.len() as u32;
 
     let new_target = context.vm.stack.pop();
+    let _new_target_root = new_target.as_object().map(JsObject::root);
 
     let mut _this_root = None;
     let this = if code.is_derived_constructor() {
@@ -1128,6 +1129,7 @@ fn function_construct(
         // see <https://tc39.es/ecma262/#sec-getprototypefromconstructor>
         let prototype =
             get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?;
+        let _prototype_root = prototype.clone().root();
         let this = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,

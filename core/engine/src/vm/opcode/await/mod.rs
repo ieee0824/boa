@@ -74,7 +74,7 @@ impl Await {
 
                     let value = Some(args.get_or_undefined(0).clone());
                     if context.async_jobs_enabled {
-                        context.pending_async_resume = Some(PendingAsyncResume {
+                        context.set_pending_async_resume(PendingAsyncResume {
                             context: r#gen,
                             value,
                             kind: GeneratorResumeKind::Normal,
@@ -121,7 +121,7 @@ impl Await {
 
                     let value = Some(args.get_or_undefined(0).clone());
                     if context.async_jobs_enabled {
-                        context.pending_async_resume = Some(PendingAsyncResume {
+                        context.set_pending_async_resume(PendingAsyncResume {
                             context: r#gen,
                             value,
                             kind: GeneratorResumeKind::Throw,

@@ -1243,6 +1243,7 @@ impl JsPromise {
                     if let crate::native_function::CoroutineState::Yielded(value) =
                         continuation.call(Ok(args.get_or_undefined(0).clone()), context)
                     {
+                        let _value_root = value.as_object().map(JsObject::root);
                         JsPromise::resolve(value, context)
                             .await_native(&continuation.to_rooted(), context);
                     }
@@ -1307,6 +1308,7 @@ impl JsPromise {
                             context,
                         )
                     {
+                        let _value_root = value.as_object().map(JsObject::root);
                         JsPromise::resolve(value, context)
                             .await_native(&continuation.to_rooted(), context);
                     }

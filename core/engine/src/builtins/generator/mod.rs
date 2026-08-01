@@ -25,7 +25,8 @@ use crate::{
         CallFrame, CallFrameFlags, CompletionRecord, GeneratorResumeKind, Stack, SuspendedCallFrame,
     },
 };
-use boa_gc::{Finalize, Trace, custom_trace};
+use boa_gc::{Finalize, RootProvider, Trace, custom_trace};
+use std::ptr::NonNull;
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
@@ -64,11 +65,20 @@ pub(crate) struct GeneratorContext {
     pub(crate) call_frame: Option<SuspendedCallFrame>,
 }
 
+#[derive(Debug, Finalize)]
 pub(crate) struct PendingAsyncResume {
     pub(crate) context: GeneratorContext,
     pub(crate) value: Option<JsValue>,
     pub(crate) kind: GeneratorResumeKind,
     pub(crate) async_generator: Option<JsObject>,
+}
+
+unsafe impl Trace for PendingAsyncResume {
+    custom_trace!(this, mark, {
+        mark(&this.context);
+        mark(&this.value);
+        mark(&this.async_generator);
+    });
 }
 
 impl GeneratorContext {
@@ -102,6 +112,11 @@ impl GeneratorContext {
         resume_kind: GeneratorResumeKind,
         context: &mut Context,
     ) -> CompletionRecord {
+        // The generator context is temporarily removed from the generator object
+        // while it executes. Keep its detached stack and suspended frame visible
+        // to the collector during nested generator resumes.
+        // SAFETY: `self` remains at a stable address until this guard is dropped.
+        let _context_roots = unsafe { RootProvider::register(NonNull::from(&*self)) };
         std::mem::swap(&mut *context.vm.stack, &mut self.stack);
         let frame = self
             .call_frame
@@ -134,6 +149,10 @@ impl GeneratorContext {
         resume_kind: GeneratorResumeKind,
         context: &mut Context,
     ) -> CompletionRecord {
+        // See the synchronous resume path above. The guard must remain alive
+        // across the await because the async execution can allocate as well.
+        // SAFETY: `self` remains at a stable address until this guard is dropped.
+        let _context_roots = unsafe { RootProvider::register(NonNull::from(&*self)) };
         std::mem::swap(&mut *context.vm.stack, &mut self.stack);
         let frame = self
             .call_frame

@@ -1722,6 +1722,7 @@ impl RegExp {
 
         // 4. Let C be ? SpeciesConstructor(rx, %RegExp%).
         let constructor = rx.species_constructor(StandardConstructors::regexp, context)?;
+        let _constructor_root = constructor.clone().root();
 
         // 5. Let flags be ? ToString(? Get(rx, "flags")).
         let flags = rx.get(js_string!("flags"), context)?.to_string(context)?;
@@ -1744,9 +1745,11 @@ impl RegExp {
             Some(&constructor),
             context,
         )?;
+        let _splitter_root = splitter.clone().root();
 
         // 11. Let A be ! ArrayCreate(0).
         let a = Array::array_create(0, None, context).expect("this ArrayCreate call must not fail");
+        let _a_root = a.clone().root();
 
         // 12. Let lengthA be 0.
         let mut length_a = 0;
@@ -1801,6 +1804,7 @@ impl RegExp {
             // c. If z is null, set q to AdvanceStringIndex(S, q, unicodeMatching).
             // d. Else,
             if let Some(result) = result {
+                let _result_root = result.clone().root();
                 // i. Let e be ℝ(? ToLength(? Get(splitter, "lastIndex"))).
                 let mut e = splitter
                     .get(js_string!("lastIndex"), context)?

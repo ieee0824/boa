@@ -53,6 +53,7 @@ thread_local! {
 struct ContextRoots {
     kept_alive: Vec<JsObject>,
     data: HostDefined,
+    pending_async_resume: Option<builtins::generator::PendingAsyncResume>,
 }
 
 /// ECMAScript context. It is the primary way to interact with the runtime.
@@ -121,8 +122,6 @@ pub struct Context {
 
     pub(crate) async_jobs_enabled: bool,
 
-    pub(crate) pending_async_resume: Option<builtins::generator::PendingAsyncResume>,
-
     #[cfg(feature = "temporal")]
     tz_provider: CompiledTzdbProvider,
 
@@ -185,6 +184,19 @@ impl Default for Context {
 
 // ==== Public API ====
 impl Context {
+    pub(crate) fn set_pending_async_resume(
+        &mut self,
+        pending: builtins::generator::PendingAsyncResume,
+    ) {
+        self.roots.pending_async_resume = Some(pending);
+    }
+
+    pub(crate) fn take_pending_async_resume(
+        &mut self,
+    ) -> Option<builtins::generator::PendingAsyncResume> {
+        self.roots.pending_async_resume.take()
+    }
+
     /// Create a new [`ContextBuilder`] to specify the [`Interner`] and/or
     /// the icu data provider.
     #[must_use]
@@ -1251,7 +1263,6 @@ impl ContextBuilder {
             parser_identifier: 0,
             can_block: self.can_block,
             async_jobs_enabled: false,
-            pending_async_resume: None,
         };
 
         builtins::set_default_global_bindings(&mut context)?;

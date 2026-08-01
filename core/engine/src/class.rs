@@ -198,6 +198,7 @@ pub trait Class: NativeObject + Sized {
 
         let object =
             JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), prototype, data);
+        let _object_root = object.clone().root();
 
         Self::object_constructor(&object, args, context)?;
 
@@ -230,6 +231,7 @@ pub trait Class: NativeObject + Sized {
 
         let object =
             JsObject::from_proto_and_data_with_shared_shape(context.root_shape(), prototype, data);
+        let _object_root = object.clone().root();
 
         Self::object_constructor(&object, &[], context)?;
 

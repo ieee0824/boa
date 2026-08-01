@@ -490,6 +490,7 @@ impl CallValue {
             native_source_info,
         } = self
         {
+            let _object_root = object.clone().root();
             self = func(
                 &object,
                 argument_count,

@@ -651,6 +651,7 @@ impl Promise {
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(&c, context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let promiseResolve be Completion(GetPromiseResolve(C)).
         let promise_resolve = Self::get_promise_resolve(&c, context);
@@ -658,6 +659,7 @@ impl Promise {
         // 4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
         let promise_resolve =
             if_abrupt_reject_promise!(promise_resolve, promise_capability, context);
+        let _promise_resolve_root = promise_resolve.clone().root();
 
         // 5. Let iteratorRecord be Completion(GetIterator(iterable, sync)).
         let iterator_record = args
@@ -1257,6 +1259,10 @@ impl Promise {
             remaining_elements_count: Rc<Cell<i32>>,
         }
 
+        let _result_capability_roots = result_capability.root_handles();
+        let _constructor_root = constructor.clone().root();
+        let _promise_resolve_root = promise_resolve.clone().root();
+
         // 1. Let errors be a new empty List.
         let errors = Rooted::new(GcRefCell::new(Vec::new()));
 
@@ -1275,6 +1281,7 @@ impl Promise {
             // d. Let nextPromise be ? Call(promiseResolve, constructor, « next »).
             let next_promise =
                 promise_resolve.call(&constructor.clone().into(), &[next], context)?;
+            let _next_promise_root = next_promise.as_object().map(|object| object.clone().root());
 
             // e. Let stepsRejected be the algorithm steps defined in Promise.any Reject Element Functions.
             // f. Let lengthRejected be the number of non-optional parameters of the function definition in Promise.any Reject Element Functions.
@@ -1353,6 +1360,9 @@ impl Promise {
             .length(1)
             .constructor(false)
             .build();
+            // Keep the function owner alive after converting the callback into
+            // the unrooted edge stored in the `then` argument list.
+            let _on_rejected_root = on_rejected.clone();
 
             // m. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
             remaining_elements_count.set(remaining_elements_count.get() + 1);
@@ -1588,6 +1598,10 @@ impl Promise {
         x: JsValue,
         context: &mut Context,
     ) -> JsResult<JsObject> {
+        // `x` can be the result of a detached VM/native continuation. Keep it
+        // alive while `PromiseResolve` performs the allocations below.
+        let _x_root = x.as_object().map(JsObject::root);
+
         // 1. If IsPromise(x) is true, then
         if let Some(x) = x.as_promise_object() {
             // a. Let xConstructor be ? Get(x, "constructor").

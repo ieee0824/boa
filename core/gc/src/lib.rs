@@ -27,6 +27,7 @@ use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
 use std::{
     cell::{Cell, RefCell},
+    collections::HashSet,
     mem,
     ptr::NonNull,
 };
@@ -61,12 +62,18 @@ thread_local!(static ROOT_PROVIDERS: RefCell<Vec<(usize, RootProviderPointer)>> 
 // whole-registry assertions stay O(1).
 thread_local!(static ROOTED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) });
 thread_local!(static ROOTED_EPHEMERONS: Cell<usize> = const { Cell::new(0) });
+// The header count makes repeated root clones cheap; these registries make the
+// mark phase enumerate roots without scanning every allocation in the heap.
+thread_local!(static ROOT_REGISTRY: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
+thread_local!(static EPHEMERON_ROOT_REGISTRY: RefCell<HashSet<EphemeronPointer>> = RefCell::new(HashSet::new()));
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // The collector can own traced values containing `Rooted` handles. Initialize
     // the root bookkeeping first so it remains alive while the collector is dropped
     // during thread teardown.
     ROOTED_ALLOCATIONS.with(|_| {});
     ROOTED_EPHEMERONS.with(|_| {});
+    ROOT_REGISTRY.with(|_| {});
+    EPHEMERON_ROOT_REGISTRY.with(|_| {});
     ROOT_PROVIDERS.with(|_| {});
     RefCell::new(BoaGc {
         config: GcConfig::default(),
@@ -90,6 +97,12 @@ fn register_root(pointer: GcErasedPointer) {
     let became_rooted = unsafe { pointer.as_ref() }.header.register_root();
     if became_rooted {
         ROOTED_ALLOCATIONS.with(|count| count.set(count.get() + 1));
+        ROOT_REGISTRY.with(|roots| {
+            assert!(
+                roots.borrow_mut().insert(pointer),
+                "GC root registry already contained a newly rooted allocation"
+            );
+        });
     }
 }
 
@@ -109,6 +122,12 @@ fn unregister_root(pointer: GcErasedPointer) {
                     .expect("rooted allocation count underflowed"),
             );
         });
+        ROOT_REGISTRY.with(|roots| {
+            assert!(
+                roots.borrow_mut().remove(&pointer),
+                "GC root registry did not contain an allocation losing its last root"
+            );
+        });
     }
 }
 
@@ -120,6 +139,12 @@ fn register_ephemeron_root(pointer: EphemeronPointer) {
     // SAFETY: a caller holding a handle to the ephemeron proves the pointer is valid.
     if unsafe { pointer.as_ref() }.header().register_root() {
         ROOTED_EPHEMERONS.with(|count| count.set(count.get() + 1));
+        EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            assert!(
+                roots.borrow_mut().insert(pointer),
+                "GC ephemeron root registry already contained a newly rooted allocation"
+            );
+        });
     }
 }
 
@@ -136,6 +161,12 @@ fn unregister_ephemeron_root(pointer: EphemeronPointer) {
                     .get()
                     .checked_sub(1)
                     .expect("rooted ephemeron count underflowed"),
+            );
+        });
+        EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            assert!(
+                roots.borrow_mut().remove(&pointer),
+                "GC ephemeron root registry did not contain an allocation losing its last root"
             );
         });
     }
@@ -218,6 +249,8 @@ struct TeardownGuard;
 impl TeardownGuard {
     fn new() -> Self {
         GC_TEARDOWN.with(|teardown| teardown.set(true));
+        ROOT_REGISTRY.with(|roots| roots.borrow_mut().clear());
+        EPHEMERON_ROOT_REGISTRY.with(|roots| roots.borrow_mut().clear());
         Self
     }
 }
@@ -601,17 +634,14 @@ impl Collector {
 
         // === Preliminary mark phase ===
         //
-        // 0. Trace every explicitly registered strong root. The registration lives in
-        // each allocation's header, so finding the roots is one pass reading a counter
-        // rather than tracing every object's fields to work out which handles are
-        // internal to the heap.
-        for node in strongs {
-            // SAFETY: node must be valid as this phase cannot drop any node.
-            let node_ref = unsafe { node.as_ref() };
-            if node_ref.header.is_rooted() {
-                tracer.enqueue(*node);
+        // 0. Trace every explicitly registered strong root. The registry is
+        // maintained only when an allocation changes between zero and one roots,
+        // so the mark phase is proportional to the root set rather than the heap.
+        ROOT_REGISTRY.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue(pointer);
             }
-        }
+        });
         // 0.0. Trace every registered heap-external root provider, such as the VM's
         // value stack, which holds roots without registering them one by one.
         ROOT_PROVIDERS.with(|providers| {
@@ -647,15 +677,15 @@ impl Collector {
         // === Weak mark phase ===
         //
         //
-        // 1. Mark explicitly registered ephemeron roots, then get the naive list of ephemerons
-        // that are supposedly dead or whose key is dead.
-        for eph in weaks {
-            // SAFETY: node must be valid as this phase cannot drop any node.
-            let header = unsafe { eph.as_ref() }.header();
-            if header.is_rooted() {
-                header.mark();
+        // 1. Mark explicitly registered ephemeron roots, then get the naive list
+        // of ephemerons that are supposedly dead or whose key is dead.
+        EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            for pointer in roots.borrow().iter() {
+                // SAFETY: registered ephemeron roots point to live collector
+                // allocations until the root is dropped.
+                unsafe { pointer.as_ref() }.header().mark();
             }
-        }
+        });
 
         for eph in weaks {
             // SAFETY: node must be valid as this phase cannot drop any node.
