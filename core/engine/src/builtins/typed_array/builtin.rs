@@ -21,7 +21,7 @@ use crate::{
     },
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     js_string,
-    object::internal_methods::get_prototype_from_constructor,
+    object::{RootedJsObject, internal_methods::get_prototype_from_constructor},
     property::{Attribute, PropertyNameKind},
     realm::Realm,
     string::StaticJsStrings,
@@ -232,10 +232,16 @@ impl BuiltinTypedArray {
             let values = source
                 .get_iterator_from_method(&using_iterator, context)?
                 .into_list(context)?;
+            let _value_roots: Vec<RootedJsObject> = values
+                .iter()
+                .filter_map(JsValue::as_object)
+                .map(JsObject::root)
+                .collect();
 
             // b. Let len be the number of elements in values.
             // c. Let targetObj be ? TypedArrayCreate(C, « 𝔽(len) »).
             let target_obj = Self::create(&constructor, &[values.len().into()], context)?.upcast();
+            let _target_obj_root = target_obj.clone().root();
 
             // d. Let k be 0.
             // e. Repeat, while k < len,
@@ -251,6 +257,7 @@ impl BuiltinTypedArray {
                 else {
                     k_value.clone()
                 };
+                let _mapped_value_root = mapped_value.as_object().map(JsObject::root);
 
                 // v. Perform ? Set(targetObj, Pk, mappedValue, true).
                 target_obj.set(k, mapped_value, true, context)?;
@@ -266,12 +273,14 @@ impl BuiltinTypedArray {
         let array_like = source
             .to_object(context)
             .expect("ToObject cannot fail here");
+        let _array_like_root = array_like.clone().root();
 
         // 9. Let len be ? LengthOfArrayLike(arrayLike).
         let len = array_like.length_of_array_like(context)?;
 
         // 10. Let targetObj be ? TypedArrayCreate(C, « 𝔽(len) »).
         let target_obj = Self::create(&constructor, &[len.into()], context)?.upcast();
+        let _target_obj_root = target_obj.clone().root();
 
         // 11. Let k be 0.
         // 12. Repeat, while k < len,
@@ -279,6 +288,7 @@ impl BuiltinTypedArray {
             // a. Let Pk be ! ToString(𝔽(k)).
             // b. Let kValue be ? Get(arrayLike, Pk).
             let k_value = array_like.get(k, context)?;
+            let _k_value_root = k_value.as_object().map(JsObject::root);
 
             // c. If mapping is true, then
             let mapped_value = if let Some(map_fn) = &mapping {
@@ -289,6 +299,7 @@ impl BuiltinTypedArray {
             else {
                 k_value
             };
+            let _mapped_value_root = mapped_value.as_object().map(JsObject::root);
 
             // e. Perform ? Set(targetObj, Pk, mappedValue, true).
             target_obj.set(k, mapped_value, true, context)?;
@@ -840,6 +851,7 @@ impl BuiltinTypedArray {
 
         // 9. Let A be ? TypedArraySpeciesCreate(O, « 𝔽(captured) »).
         let a = Self::species_create(&ta, typed_array_kind, &[captured.into()], context)?.upcast();
+        let _a_root = a.clone().root();
 
         // 10. Let n be 0.
         // 11. For each element e of kept, do
@@ -1382,6 +1394,7 @@ impl BuiltinTypedArray {
 
         // 5. Let A be ? TypedArraySpeciesCreate(O, « 𝔽(len) »).
         let a = Self::species_create(&ta, typed_array_kind, &[len.into()], context)?.upcast();
+        let _a_root = a.clone().root();
 
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
@@ -1396,6 +1409,7 @@ impl BuiltinTypedArray {
                 &[k_value, k.into(), this.clone()],
                 context,
             )?;
+            let _mapped_value_root = mapped_value.as_object().map(JsObject::root);
 
             // d. Perform ? Set(A, Pk, mappedValue, true).
             a.set(k, mapped_value, true, context)?;
