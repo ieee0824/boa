@@ -879,7 +879,8 @@ pub fn force_collect() {
 
         // A mutable `GcRefCell` borrow is not traceable, so forcing a collection
         // inside it would be just as unsound as an allocation-triggered collection.
-        // Defer the request until the caller releases the borrow.
+        // This call is a no-op while collection is suspended; callers that need a
+        // forced collection must retry after releasing the borrow or scope.
         if !collection_suspended() && gc.runtime.bytes_allocated > 0 {
             Collector::collect(&mut gc);
         }

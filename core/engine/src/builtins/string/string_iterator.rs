@@ -77,7 +77,7 @@ impl StringIterator {
         let mut string_iterator = object
             .as_ref()
             .and_then(JsObject::downcast_mut::<Self>)
-            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
+            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a StringIterator"))?;
 
         if string_iterator.string.is_empty() {
             // Released before building the result. Allocating can collect, and the

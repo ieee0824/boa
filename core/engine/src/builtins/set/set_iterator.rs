@@ -106,7 +106,7 @@ impl SetIterator {
         let mut set_iterator = object
             .as_ref()
             .and_then(JsObject::downcast_mut::<Self>)
-            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an SetIterator"))?;
+            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a SetIterator"))?;
 
         if set_iterator.iterated_set.is_undefined() {
             // Released before building the result. Allocating can collect, and the
