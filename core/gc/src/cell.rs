@@ -256,12 +256,10 @@ unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
         self.barrier.value.set(Some(self.cell.get()));
         self.barrier.callback.set(Some(trace_barrier::<T>));
 
-        let value = unsafe { &*self.cell.get() };
-
         match self.borrow.get().borrowed() {
             BorrowState::Writing => (),
             // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { value.trace(tracer) },
+            _ => unsafe { (&*self.cell.get()).trace(tracer) },
         }
     }
 
