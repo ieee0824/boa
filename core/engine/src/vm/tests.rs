@@ -2395,6 +2395,100 @@ fn long_object_chain_gc_trace_stack_overflow() {
 }
 
 #[test]
+fn temporary_define_property_receivers_survive_collection() {
+    let mut context = Context::default();
+    context
+        .register_global_builtin_callable(
+            js_string!("collect"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+
+    run_test_actions_with(
+        [
+            TestAction::run(indoc! {r#"
+                let objectChecksum = 0;
+                let accessorChecksum = 0;
+                for (let i = 0; i < 2000; i++) {
+                    const dataDescriptor = {
+                        get value() {
+                            collect();
+                            return { i };
+                        },
+                        writable: true,
+                        enumerable: true,
+                        configurable: true,
+                    };
+                    const dataTarget = Object.defineProperty({}, "value", dataDescriptor);
+                    objectChecksum += dataTarget.value.i;
+
+                    const accessorDescriptor = {
+                        get get() {
+                            collect();
+                            return function() {
+                                return i;
+                            };
+                        },
+                        enumerable: true,
+                        configurable: true,
+                    };
+                    const accessorTarget = Object.defineProperty({}, "value", accessorDescriptor);
+                    accessorChecksum += accessorTarget.value;
+                    collect();
+                }
+            "#}),
+            TestAction::assert_eq("objectChecksum", 1_999_000),
+            TestAction::assert_eq("accessorChecksum", 1_999_000),
+        ],
+        &mut context,
+    );
+}
+
+#[test]
+fn existing_define_property_receivers_survive_collection() {
+    let mut context = Context::default();
+    context
+        .register_global_builtin_callable(
+            js_string!("collect"),
+            0,
+            NativeFunction::from_fn_ptr(|_, _, _| {
+                boa_gc::force_collect();
+                Ok(JsValue::undefined())
+            }),
+        )
+        .unwrap();
+
+    run_test_actions_with(
+        [
+            TestAction::run(indoc! {r#"
+                const target = { value: { i: -1 } };
+                let checksum = 0;
+                for (let i = 0; i < 2000; i++) {
+                    const descriptor = {
+                        get value() {
+                            collect();
+                            return { i };
+                        },
+                        writable: true,
+                        enumerable: true,
+                        configurable: true,
+                    };
+                    Object.defineProperty(target, "value", descriptor);
+                    checksum += target.value.i;
+                    collect();
+                }
+            "#}),
+            TestAction::assert_eq("checksum", 1_999_000),
+        ],
+        &mut context,
+    );
+}
+
+#[test]
 fn suspended_generator_code_survives_forced_collection() {
     run_test_actions([
         TestAction::run(indoc! {r#"
