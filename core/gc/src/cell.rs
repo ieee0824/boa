@@ -1,7 +1,7 @@
 //! A garbage collected cell implementation
 
 use crate::{
-    Tracer, begin_collection_block, end_collection_block, remember_young_children,
+    GcErasedPointer, Tracer, begin_collection_block, end_collection_block, remember_old_parent,
     trace::{Finalize, Trace},
 };
 use std::{
@@ -94,20 +94,23 @@ impl Debug for BorrowFlag {
 /// This object is a `RefCell` that can be used inside of a `Gc<T>`.
 pub struct GcRefCell<T: ?Sized + 'static> {
     borrow: Cell<BorrowFlag>,
-    barrier: BarrierState<T>,
+    barrier: BarrierState,
     cell: UnsafeCell<T>,
 }
 
 type BarrierFn = unsafe fn(*const ());
 
-struct BarrierState<T: ?Sized> {
-    // Set the first time the cell is traced. A cell cannot be promoted to old
-    // before that trace, so a mutable borrow before initialization is safe to
-    // leave unremembered. The state itself is sized even when T is a DST,
-    // which lets the mutable-borrow guard erase its pointer without losing
-    // metadata.
+struct BarrierState {
+    // Set when the cell is traced as part of an old allocation. Young parents
+    // do not need a write barrier, and promotion traces them once to install it.
+    // The state itself is sized even when T is a DST, which lets the
+    // mutable-borrow guard erase its pointer without losing metadata.
     callback: Cell<Option<BarrierFn>>,
-    value: Cell<Option<*const T>>,
+    owner: Cell<Option<GcErasedPointer>>,
+    // Avoid hashing the same old parent on every write between collections. A
+    // minor collection resets this while consuming the remembered parent, so a
+    // later write can enqueue it for the next nursery pass.
+    dirty: Cell<bool>,
 }
 
 impl<T> GcRefCell<T> {
@@ -117,7 +120,8 @@ impl<T> GcRefCell<T> {
             borrow: Cell::new(BORROWFLAG_INIT),
             barrier: BarrierState {
                 callback: Cell::new(None),
-                value: Cell::new(None),
+                owner: Cell::new(None),
+                dirty: Cell::new(false),
             },
             cell: UnsafeCell::new(value),
         }
@@ -200,11 +204,39 @@ impl<T: ?Sized> GcRefCell<T> {
     ///
     /// Returns an `Err` if the value is currently borrowed.
     pub fn try_borrow_mut(&self) -> Result<GcRefMut<'_, T>, BorrowMutError> {
+        self.try_borrow_mut_impl(true)
+    }
+
+    /// Mutably borrows the wrapped value without blocking garbage collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is already borrowed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not allocate garbage-collected memory or otherwise
+    /// trigger collection until the returned guard is dropped.
+    #[must_use]
+    pub unsafe fn borrow_mut_no_gc(&self) -> GcRefMut<'_, T> {
+        match self.try_borrow_mut_impl(false) {
+            Ok(value) => value,
+            Err(e) => panic!("{}", e),
+        }
+    }
+
+    #[inline]
+    fn try_borrow_mut_impl(
+        &self,
+        blocks_collection: bool,
+    ) -> Result<GcRefMut<'_, T>, BorrowMutError> {
         if self.borrow.get().borrowed() != BorrowState::Unused {
             return Err(BorrowMutError);
         }
         self.borrow.set(self.borrow.get().set_writing());
-        begin_collection_block();
+        if blocks_collection {
+            begin_collection_block();
+        }
 
         // SAFETY: This is safe as the value is rooted if it was not previously rooted,
         // so it cannot be dropped.
@@ -215,6 +247,7 @@ impl<T: ?Sized> GcRefCell<T> {
                     borrow: &self.borrow,
                     barrier: self.barrier.callback.get(),
                     barrier_state,
+                    blocks_collection,
                 },
                 value: NonNull::new_unchecked(self.cell.get()),
                 marker: PhantomData,
@@ -251,10 +284,15 @@ impl<T: Trace + ?Sized> Finalize for GcRefCell<T> {}
 // on GcCell's value may cause Undefined Behavior
 unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
-        // Keep a stable erased pointer for the write barrier. The cell lives
-        // inside a stable GC allocation whenever this callback can be used.
-        self.barrier.value.set(Some(self.cell.get()));
-        self.barrier.callback.set(Some(trace_barrier::<T>));
+        if let Some(owner) = tracer
+            .current_node()
+            // SAFETY: the current node is live for the duration of tracing.
+            .filter(|owner| unsafe { owner.as_ref() }.header.is_old())
+        {
+            self.barrier.owner.set(Some(owner));
+            self.barrier.callback.set(Some(trace_barrier));
+            self.barrier.dirty.set(false);
+        }
 
         match self.borrow.get().borrowed() {
             BorrowState::Writing => (),
@@ -273,16 +311,17 @@ unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
     }
 }
 
-unsafe fn trace_barrier<T: Trace + ?Sized>(state: *const ()) {
+unsafe fn trace_barrier(state: *const ()) {
     // SAFETY: `state` is the stable BarrierState belonging to a traced cell,
-    // and its value pointer was initialized by that cell's Trace method.
-    let state = unsafe { &*(state.cast::<BarrierState<T>>()) };
-    let value = state
-        .value
+    // and its owner pointer was initialized by that cell's Trace method.
+    let state = unsafe { &*(state.cast::<BarrierState>()) };
+    let owner = state
+        .owner
         .get()
-        .expect("traced cell barrier was missing its value pointer");
-    // SAFETY: the cell's mutable borrow keeps its value and allocation alive.
-    remember_young_children(unsafe { &*value });
+        .expect("traced cell barrier was missing its owner pointer");
+    if !state.dirty.replace(true) {
+        remember_old_parent(owner);
+    }
 }
 
 struct BorrowGcRef<'a> {
@@ -435,6 +474,7 @@ struct BorrowGcRefMut<'a> {
     borrow: &'a Cell<BorrowFlag>,
     barrier: Option<BarrierFn>,
     barrier_state: *const (),
+    blocks_collection: bool,
 }
 
 impl Drop for BorrowGcRefMut<'_> {
@@ -447,7 +487,9 @@ impl Drop for BorrowGcRefMut<'_> {
             unsafe { barrier(self.barrier_state) };
         }
         self.borrow.set(BorrowFlag(UNUSED));
-        end_collection_block();
+        if self.blocks_collection {
+            end_collection_block();
+        }
     }
 }
 

@@ -515,6 +515,10 @@ pub(crate) struct WeakSharedShape {
 }
 
 impl WeakSharedShape {
+    pub(crate) fn retarget(&mut self, value: &SharedShape<GcEdge<Inner>>) {
+        self.inner.retarget_edge(&value.inner);
+    }
+
     /// Return location in memory of the [`WeakSharedShape`].
     ///
     /// Returns `0` if the inner [`SharedShape`] has been freed.

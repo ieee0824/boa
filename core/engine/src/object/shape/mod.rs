@@ -305,6 +305,22 @@ pub(crate) enum WeakShape {
 }
 
 impl WeakShape {
+    /// Retargets an existing weak allocation when the shape kind is unchanged.
+    /// Returns `false` when the caller must replace this value instead.
+    pub(crate) fn retarget(&mut self, value: &ShapeEdge) -> bool {
+        match (self, &value.inner) {
+            (Self::Shared(weak), Inner::Shared(shape)) => {
+                weak.retarget(shape);
+                true
+            }
+            (Self::Unique(weak), Inner::Unique(shape)) => {
+                weak.retarget(shape);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Return location in memory of the [`Shape`].
     ///
     /// Returns `0` if the shape has been freed.

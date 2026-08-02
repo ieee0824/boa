@@ -1,4 +1,6 @@
-use crate::{Ephemeron, EphemeronEdge, Finalize, Gc, GcEdge, Rooted, Trace};
+use crate::{
+    Ephemeron, EphemeronEdge, Finalize, Gc, GcEdge, Rooted, Trace, remember_ephemeron_pointer,
+};
 use std::{
     hash::{Hash, Hasher},
     mem::ManuallyDrop,
@@ -133,6 +135,19 @@ impl<T: Trace + ?Sized> WeakGcEdge<T> {
     #[must_use]
     pub fn new_rooted(value: &Rooted<T>) -> Self {
         Self::new_gc(value.as_gc())
+    }
+
+    /// Retargets this weak edge to another heap allocation without allocating a
+    /// new ephemeron.
+    ///
+    /// The ephemeron is added to the remembered set because either its key or
+    /// the ephemeron itself may already be old while the new key is young.
+    pub fn retarget_edge(&mut self, value: &GcEdge<T>) {
+        // SAFETY: this handle uniquely mutates the ephemeron's data on the
+        // collector thread, outside collection. Its allocation remains live
+        // through `self`, and the remembered set covers the new weak edge.
+        unsafe { self.inner.inner_ptr().as_ref().set(value.as_gc(), ()) };
+        remember_ephemeron_pointer(self.inner.erased_inner_ptr());
     }
 
     /// Upgrade returns a `Gc` pointer for the internal value if the pointer is still live, or `None`

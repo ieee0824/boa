@@ -2,6 +2,8 @@ use boa_macros::{Finalize, Trace};
 
 use super::{Harness, run_test};
 use crate::{GcBox, GcEdge, GcRefCell, Rooted, force_collect};
+#[cfg(feature = "gc-profile")]
+use crate::{force_minor_collect, profile, reset_profile};
 
 #[derive(Debug, Finalize, Trace)]
 struct EdgeHolder {
@@ -129,19 +131,16 @@ fn gc_recursion() {
     });
 }
 
-/// The collection threshold decides how much garbage piles up before a collection,
-/// and a collection walks the whole heap — everything allocated since the last one,
-/// live or not. Pinned because lowering it is a large slowdown that no other test
-/// would notice: measured on the omoikane benchmark, `1 MiB` put 40% of
-/// `closure-alloc`'s wall time inside the collector, and `4 MiB` took 21% off the shape.
-///
-/// Raising it further is not free either. `16 MiB` bought no more speed than `4 MiB` and
-/// cost 61% more peak RSS on an allocation-heavy workload, because a collection's cost
-/// grows with the garbage it has to walk past while the amount it reclaims does not.
+/// Pin the measured split between nursery and full-heap collection. A 4 `MiB` nursery
+/// cut Omoikane's allocation-shape collection counts by roughly 3-4x against 1 `MiB`.
+/// The 8 `MiB` major threshold avoids following every nursery pass with a full-heap
+/// traversal, while bounding old-generation growth sooner than the equally fast
+/// 16 `MiB` alternative.
 #[test]
-fn default_threshold_is_the_measured_one() {
+fn default_generation_thresholds_are_the_measured_ones() {
     run_test(|| {
-        Harness::assert_threshold(4 * 1024 * 1024);
+        Harness::assert_threshold(8 * 1024 * 1024);
+        Harness::assert_nursery_threshold(4 * 1024 * 1024);
     });
 }
 
@@ -151,7 +150,7 @@ fn default_threshold_is_the_measured_one() {
 #[cfg_attr(miri, ignore)]
 fn allocating_under_the_threshold_does_not_collect() {
     run_test(|| {
-        // 256 KiB of live data, comfortably inside a `4 MiB` threshold.
+        // 256 KiB of live data, comfortably inside the nursery threshold.
         let mut held = Vec::new();
         for _ in 0..256 {
             held.push(Rooted::new([0u8; 1024]));
@@ -175,5 +174,28 @@ fn allocating_past_the_threshold_collects() {
         }
 
         Harness::assert_collected_at_least(1);
+    });
+}
+
+#[test]
+#[cfg(feature = "gc-profile")]
+fn profiles_minor_and_major_collection_phases() {
+    run_test(|| {
+        reset_profile();
+
+        let value = Rooted::new(42_u32);
+        force_minor_collect();
+        force_collect();
+
+        let profile = profile();
+        assert_eq!(profile.minor.collections, 1);
+        assert_eq!(profile.major.collections, 1);
+        assert!(profile.minor.total >= profile.minor.mark);
+        assert!(profile.minor.total >= profile.minor.finalize);
+        assert!(profile.minor.total >= profile.minor.sweep);
+        assert!(profile.major.total >= profile.major.mark);
+        assert!(profile.major.total >= profile.major.finalize);
+        assert!(profile.major.total >= profile.major.sweep);
+        assert_eq!(*value, 42);
     });
 }

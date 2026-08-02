@@ -277,6 +277,10 @@ pub(crate) struct WeakUniqueShape {
 }
 
 impl WeakUniqueShape {
+    pub(crate) fn retarget(&mut self, value: &UniqueShape<GcEdge<Inner>>) {
+        self.inner.retarget_edge(&value.inner);
+    }
+
     /// Return location in memory of the [`WeakUniqueShape`].
     ///
     /// Returns `0` if the inner [`UniqueShape`] has been freed.

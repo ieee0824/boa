@@ -20,6 +20,21 @@ fn tracks_collection_blocking_borrows() {
 }
 
 #[test]
+fn no_gc_borrow_does_not_block_collection() {
+    run_test(|| {
+        let cell = GcRefCell::new(1);
+
+        assert_eq!(collection_blocked_borrows(), 0);
+        // SAFETY: the test only mutates an integer while the guard is alive.
+        let mut value = unsafe { cell.borrow_mut_no_gc() };
+        *value = 2;
+        assert_eq!(collection_blocked_borrows(), 0);
+        drop(value);
+        assert_eq!(collection_blocked_borrows(), 0);
+    });
+}
+
+#[test]
 fn boa_borrow_mut_test() {
     run_test(|| {
         let v = Rooted::new(GcRefCell::new(Vec::new()));

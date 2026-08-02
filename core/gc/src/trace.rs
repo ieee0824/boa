@@ -32,6 +32,20 @@ struct EphemeronEntry {
     pointer: EphemeronPointer,
 }
 
+struct CurrentNodeGuard {
+    slot: *mut Option<GcErasedPointer>,
+    previous: Option<GcErasedPointer>,
+}
+
+impl Drop for CurrentNodeGuard {
+    fn drop(&mut self) {
+        // SAFETY: `slot` points into the tracer that created this guard. The
+        // guard cannot outlive that tracer and only restores the field after
+        // the nested trace call has returned or unwound.
+        unsafe { *self.slot = self.previous };
+    }
+}
+
 /// A queue used to trace [`crate::Gc<T>`] non-recursively.
 #[doc(hidden)]
 #[allow(missing_debug_implementations)]
@@ -40,7 +54,7 @@ pub struct Tracer {
     ephemeron_queue: VecDeque<EphemeronEntry>,
     discovered_ephemerons: Vec<EphemeronPointer>,
     discovered_ephemeron_set: HashSet<EphemeronPointer>,
-    scanned_old: HashSet<GcErasedPointer>,
+    current_node: Option<GcErasedPointer>,
     mode: TraceMode,
 }
 
@@ -51,7 +65,7 @@ impl Tracer {
             ephemeron_queue: VecDeque::default(),
             discovered_ephemerons: Vec::default(),
             discovered_ephemeron_set: HashSet::default(),
-            scanned_old: HashSet::default(),
+            current_node: None,
             mode: TraceMode::Major,
         }
     }
@@ -92,6 +106,29 @@ impl Tracer {
         unsafe { provider.trace(self) };
     }
 
+    /// Returns the allocation whose `Trace` implementation is currently
+    /// running. Heap-external root providers have no current allocation.
+    pub(crate) fn current_node(&self) -> Option<GcErasedPointer> {
+        self.current_node
+    }
+
+    /// Traces one allocation shallowly without draining edges it emits.
+    ///
+    /// # Safety
+    ///
+    /// `node` must point to a live allocation owned by this collector.
+    pub(crate) unsafe fn trace_shallow_node(&mut self, node: GcErasedPointer) {
+        let node_ref = unsafe { node.as_ref() };
+        let previous = self.current_node.replace(node);
+        let _current_node_guard = CurrentNodeGuard {
+            slot: std::ptr::addr_of_mut!(self.current_node),
+            previous,
+        };
+        let trace_fn = node_ref.trace_fn();
+        // SAFETY: the function pointer comes from this allocation's vtable.
+        unsafe { trace_fn(node, self) };
+    }
+
     /// Traces through all the queued nodes until the queue is empty.
     ///
     /// # Safety
@@ -110,22 +147,24 @@ impl Tracer {
                         node_ref.header.mark();
                     }
                     TraceMode::Minor => {
-                        if node_ref.header.is_young() {
-                            if node_ref.header.is_minor_marked() {
-                                continue;
-                            }
-                            node_ref.header.minor_mark();
-                        } else if !self.scanned_old.insert(node) {
+                        // Old allocations are outside the nursery. Their young
+                        // children are seeded directly from the remembered set,
+                        // populated when an allocation is promoted and whenever
+                        // a traced cell is mutated. Recursively tracing old nodes
+                        // here turns every minor collection back into an old-heap
+                        // traversal and defeats the generational split.
+                        if !node_ref.header.is_young() {
                             continue;
                         }
+                        if node_ref.header.is_minor_marked() {
+                            continue;
+                        }
+                        node_ref.header.minor_mark();
                     }
                 }
 
-                let trace_fn = node_ref.trace_fn();
-
-                // SAFETY: The function pointer is appropriate for this node type because we extract it from its vtable.
-                // Additionally, the node pointer is valid per the caller's guarantee.
-                unsafe { trace_fn(node, self) }
+                // SAFETY: the queued node is valid by this function's contract.
+                unsafe { self.trace_shallow_node(node) }
             }
 
             while let Some(entry) = self.ephemeron_queue.pop_front() {
