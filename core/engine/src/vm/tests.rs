@@ -2411,23 +2411,38 @@ fn temporary_define_property_receivers_survive_collection() {
     run_test_actions_with(
         [
             TestAction::run(indoc! {r#"
-                let checksum = 0;
+                let objectChecksum = 0;
+                let accessorChecksum = 0;
                 for (let i = 0; i < 2000; i++) {
-                    const descriptor = {
+                    const dataDescriptor = {
                         get value() {
                             collect();
-                            return i;
+                            return { i };
                         },
                         writable: true,
                         enumerable: true,
                         configurable: true,
                     };
-                    const target = Object.defineProperty({}, "value", descriptor);
-                    checksum += target.value;
+                    const dataTarget = Object.defineProperty({}, "value", dataDescriptor);
+                    objectChecksum += dataTarget.value.i;
+
+                    const accessorDescriptor = {
+                        get get() {
+                            collect();
+                            return function() {
+                                return i;
+                            };
+                        },
+                        enumerable: true,
+                        configurable: true,
+                    };
+                    const accessorTarget = Object.defineProperty({}, "value", accessorDescriptor);
+                    accessorChecksum += accessorTarget.value;
                     collect();
                 }
             "#}),
-            TestAction::assert_eq("checksum", 1_999_000),
+            TestAction::assert_eq("objectChecksum", 1_999_000),
+            TestAction::assert_eq("accessorChecksum", 1_999_000),
         ],
         &mut context,
     );
