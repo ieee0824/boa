@@ -2530,6 +2530,9 @@ impl Array {
 
         // 4. Let A be ? ArraySpeciesCreate(O, 0).
         let a = Self::array_species_create(&o, 0, context)?;
+        // The destination is retained across callback calls, each of which may
+        // allocate and trigger a collection.
+        let _a_root = a.clone().root();
 
         // 5. Let k be 0.
         // 6. Let to be 0.
