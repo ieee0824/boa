@@ -1,6 +1,7 @@
 use super::Array;
 use crate::{
-    Context, JsNativeErrorKind, JsValue, TestAction, builtins::Number, js_string, run_test_actions,
+    Context, JsNativeErrorKind, JsValue, NativeFunction, TestAction, builtins::Number, js_string,
+    run_test_actions,
 };
 use boa_macros::js_str;
 use indoc::indoc;
@@ -566,6 +567,41 @@ fn filter_roots_result_during_callback_allocations() {
             });
             arrayEquals(result, input)
         "#}),
+    ]);
+}
+
+#[test]
+fn filter_species_callback_can_collect() {
+    run_test_actions([
+        TestAction::inspect_context(|ctx| {
+            ctx.register_global_callable(
+                js_string!("forceCollect"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .unwrap();
+        }),
+        TestAction::assert(indoc! {r#"
+                class FilterSpeciesArray extends Array {
+                    static get [Symbol.species]() {
+                        return function () {
+                            return function result() {};
+                        };
+                    }
+                }
+
+                const input = new FilterSpeciesArray(1);
+                input[0] = 7;
+                const filtered = input.filter((_) => {
+                    forceCollect();
+                    return true;
+                });
+
+                typeof filtered === "function" && filtered[0] === 7;
+            "#}),
     ]);
 }
 

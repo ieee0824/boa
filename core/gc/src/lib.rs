@@ -25,6 +25,8 @@ pub(crate) mod internals;
 
 use internals::{EphemeronBox, ErasedEphemeronBox, ErasedWeakMapBox, WeakMapBox};
 use pointers::{NonTraceable, RawWeakMap};
+#[cfg(feature = "gc-profile")]
+use std::time::{Duration, Instant};
 use std::{
     cell::{Cell, RefCell},
     collections::HashSet,
@@ -66,11 +68,19 @@ thread_local!(static ROOTED_EPHEMERONS: Cell<usize> = const { Cell::new(0) });
 // mark phase enumerate roots without scanning every allocation in the heap.
 thread_local!(static ROOT_REGISTRY: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
 thread_local!(static EPHEMERON_ROOT_REGISTRY: RefCell<HashSet<EphemeronPointer>> = RefCell::new(HashSet::new()));
-// A mutable borrow of a traced cell is the write barrier. It records the young
-// allocations directly reachable from the value; entries remain until the
-// allocation is promoted or a major collection proves them dead.
+// Allocations can trigger collection before the newly allocated pointer reaches
+// its caller. These stacks keep that one in-flight allocation alive without
+// paying for a root-count update and hash-table insertion on every allocation.
+thread_local!(static TEMPORARY_STRONG_ROOTS: RefCell<Vec<GcErasedPointer>> = const { RefCell::new(Vec::new()) });
+thread_local!(static TEMPORARY_EPHEMERON_ROOTS: RefCell<Vec<EphemeronPointer>> = const { RefCell::new(Vec::new()) });
+// Young edges already discovered while promoting an allocation.
 thread_local!(static REMEMBERED_STRONGS: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
 thread_local!(static REMEMBERED_EPHEMERONS: RefCell<HashSet<EphemeronPointer>> = RefCell::new(HashSet::new()));
+// A mutable borrow of a cell in an old allocation is the write barrier. The hot
+// path only dirties the parent; minor collection scans each dirty parent once.
+thread_local!(static REMEMBERED_OLD_PARENTS: RefCell<HashSet<GcErasedPointer>> = RefCell::new(HashSet::new()));
+#[cfg(feature = "gc-profile")]
+thread_local!(static GC_PROFILE: Cell<GcProfile> = const { Cell::new(GcProfile::new()) });
 thread_local!(static BOA_GC: RefCell<BoaGc> = {
     // The collector can own traced values containing `Rooted` handles. Initialize
     // the root bookkeeping first so it remains alive while the collector is dropped
@@ -79,16 +89,19 @@ thread_local!(static BOA_GC: RefCell<BoaGc> = {
     ROOTED_EPHEMERONS.with(|_| {});
     ROOT_REGISTRY.with(|_| {});
     EPHEMERON_ROOT_REGISTRY.with(|_| {});
+    TEMPORARY_STRONG_ROOTS.with(|_| {});
+    TEMPORARY_EPHEMERON_ROOTS.with(|_| {});
     REMEMBERED_STRONGS.with(|_| {});
     REMEMBERED_EPHEMERONS.with(|_| {});
+    REMEMBERED_OLD_PARENTS.with(|_| {});
     ROOT_PROVIDERS.with(|_| {});
     RefCell::new(BoaGc {
         config: GcConfig::default(),
         runtime: GcRuntimeData::default(),
-        strongs: Vec::default(),
         youngs: Vec::default(),
-        weaks: Vec::default(),
+        old_strongs: Vec::default(),
         young_weaks: Vec::default(),
+        old_weaks: Vec::default(),
         weak_maps: Vec::default(),
     })
 });
@@ -195,38 +208,17 @@ fn remember_young(pointer: GcErasedPointer) {
     }
 }
 
-fn remember_young_ephemeron(pointer: EphemeronPointer) {
-    if teardown_in_progress() {
-        return;
-    }
-
-    // SAFETY: the pointer was emitted by tracing a live value during a mutable
-    // borrow, so its allocation is valid until the barrier has finished.
-    if unsafe { pointer.as_ref() }.header().is_young() {
-        REMEMBERED_EPHEMERONS.with(|remembered| {
+/// Marks an old allocation as mutated so its direct edges are reconsidered by
+/// the next minor collection.
+pub(crate) fn remember_old_parent(pointer: GcErasedPointer) {
+    if !teardown_in_progress() {
+        REMEMBERED_OLD_PARENTS.with(|remembered| {
             remembered.borrow_mut().insert(pointer);
         });
     }
 }
 
-/// Records the direct young edges emitted by a mutable write to a traced value.
-/// This is intentionally shallow: a young child is enough to make its entire
-/// reachable young graph visible to a minor collection.
-pub(crate) fn remember_young_children<T: Trace + ?Sized>(value: &T) {
-    let mut tracer = Tracer::new_minor();
-    // SAFETY: the caller holds the cell's mutable borrow, so the value cannot be
-    // concurrently changed while its Trace implementation reads it.
-    unsafe { value.trace(&mut tracer) };
-
-    for pointer in tracer.take_shallow_strong() {
-        remember_young(pointer);
-    }
-    for pointer in tracer.take_shallow_ephemerons() {
-        remember_young_ephemeron(pointer);
-    }
-}
-
-fn remember_ephemeron_pointer(pointer: EphemeronPointer) {
+pub(crate) fn remember_ephemeron_pointer(pointer: EphemeronPointer) {
     if !teardown_in_progress() {
         REMEMBERED_EPHEMERONS.with(|remembered| {
             remembered.borrow_mut().insert(pointer);
@@ -239,10 +231,10 @@ fn remember_ephemeron_pointer(pointer: EphemeronPointer) {
 /// though the parent is no longer in the nursery.
 fn remember_young_allocation(pointer: GcErasedPointer) {
     // SAFETY: the allocation is live and is being promoted before any sweep.
-    let node = unsafe { pointer.as_ref() };
     let mut tracer = Tracer::new_minor();
-    // SAFETY: the allocation's vtable matches its erased pointer.
-    unsafe { (node.trace_fn())(pointer, &mut tracer) };
+    // SAFETY: the allocation's vtable matches its erased pointer. Setting the
+    // current node also installs parent-aware barriers in nested cells.
+    unsafe { tracer.trace_shallow_node(pointer) };
 
     for child in tracer.take_shallow_strong() {
         remember_young(child);
@@ -333,6 +325,7 @@ impl TeardownGuard {
         EPHEMERON_ROOT_REGISTRY.with(|roots| roots.borrow_mut().clear());
         REMEMBERED_STRONGS.with(|remembered| remembered.borrow_mut().clear());
         REMEMBERED_EPHEMERONS.with(|remembered| remembered.borrow_mut().clear());
+        REMEMBERED_OLD_PARENTS.with(|remembered| remembered.borrow_mut().clear());
         Self
     }
 }
@@ -396,14 +389,22 @@ struct TemporaryStrongRoot(GcErasedPointer);
 
 impl TemporaryStrongRoot {
     fn new(pointer: GcErasedPointer) -> Self {
-        register_root(pointer);
+        TEMPORARY_STRONG_ROOTS.with(|roots| roots.borrow_mut().push(pointer));
         Self(pointer)
     }
 }
 
 impl Drop for TemporaryStrongRoot {
     fn drop(&mut self) {
-        unregister_root(self.0);
+        TEMPORARY_STRONG_ROOTS.with(|roots| {
+            let mut roots = roots.borrow_mut();
+            assert_eq!(
+                roots.last().copied(),
+                Some(self.0),
+                "temporary strong roots must be released in stack order"
+            );
+            roots.pop();
+        });
     }
 }
 
@@ -411,14 +412,22 @@ struct TemporaryEphemeronRoot(EphemeronPointer);
 
 impl TemporaryEphemeronRoot {
     fn new(pointer: EphemeronPointer) -> Self {
-        register_ephemeron_root(pointer);
+        TEMPORARY_EPHEMERON_ROOTS.with(|roots| roots.borrow_mut().push(pointer));
         Self(pointer)
     }
 }
 
 impl Drop for TemporaryEphemeronRoot {
     fn drop(&mut self) {
-        unregister_ephemeron_root(self.0);
+        TEMPORARY_EPHEMERON_ROOTS.with(|roots| {
+            let mut roots = roots.borrow_mut();
+            assert_eq!(
+                roots.last().copied(),
+                Some(self.0),
+                "temporary ephemeron roots must be released in stack order"
+            );
+            roots.pop();
+        });
     }
 }
 
@@ -464,24 +473,18 @@ struct GcConfig {
 impl Default for GcConfig {
     fn default() -> Self {
         Self {
-            // A collection walks the whole heap, so it costs time proportional to
-            // everything allocated since the last one — live or not — while reclaiming
-            // only the garbage. The threshold sets how much garbage that is, and so
-            // trades collection frequency against the cost of each one.
+            // The nursery handles short-lived allocation without walking the old
+            // generation. Omoikane's 300,000-iteration allocation shapes measured a
+            // 1 MiB nursery at 106/37 minor collections and 43.5%/37.6% GC time for
+            // closure/object allocation. At 4 MiB that fell to 27/10 collections and
+            // 28.4%/21.6% GC time.
             //
-            // Measured on the omoikane benchmark: 1 MiB left `closure-alloc` spending
-            // 40% of its wall time in the collector, at 239 collections over 300,000
-            // iterations. 4 MiB cuts that to 27 collections and takes 21% off the
-            // shape, for 1.8% more peak RSS on an allocation-heavy workload and no
-            // measurable change on a page render. 16 MiB is no faster than 4 MiB and
-            // costs 61% more peak RSS, since by then the growth in what each
-            // collection must walk past has caught up with the drop in their number.
-            //
-            // The nursery is ~1-8MB in V8 and up to 16MB in SpiderMonkey, but both are
-            // generational and so never walk the accumulated garbage at all, which is
-            // why they can hold more of it without paying for it.
-            threshold: 4 * 1_048_576,
-            nursery_threshold: 1_048_576,
+            // The full-heap threshold must sit above the nursery or every nursery
+            // fill immediately triggers a major collection. 4 MiB caused 37/11
+            // majors in those same shapes; 8 and 16 MiB caused none. Choose the
+            // smaller bound so long-lived garbage cannot grow for no measured gain.
+            threshold: 8 * 1_048_576,
+            nursery_threshold: 4 * 1_048_576,
             used_space_percentage: 70,
         }
     }
@@ -494,16 +497,104 @@ struct GcRuntimeData {
     nursery_bytes: usize,
 }
 
+/// Timing totals for one kind of collection.
+#[cfg(feature = "gc-profile")]
+#[derive(Debug, Clone, Copy)]
+pub struct CollectionProfile {
+    /// Number of collections recorded.
+    pub collections: usize,
+    /// Total wall time spent in this kind of collection.
+    pub total: Duration,
+    /// Time spent marking reachable allocations.
+    pub mark: Duration,
+    /// Time spent running finalizers and preparing a second mark.
+    pub finalize: Duration,
+    /// Time spent sweeping allocations and maintaining heap indexes.
+    pub sweep: Duration,
+}
+
+#[cfg(feature = "gc-profile")]
+impl CollectionProfile {
+    const fn new() -> Self {
+        Self {
+            collections: 0,
+            total: Duration::ZERO,
+            mark: Duration::ZERO,
+            finalize: Duration::ZERO,
+            sweep: Duration::ZERO,
+        }
+    }
+}
+
+/// Per-phase garbage-collection timings for the current thread.
+#[cfg(feature = "gc-profile")]
+#[derive(Debug, Clone, Copy)]
+pub struct GcProfile {
+    /// Nursery-only collection timings.
+    pub minor: CollectionProfile,
+    /// Full-heap collection timings.
+    pub major: CollectionProfile,
+}
+
+#[cfg(feature = "gc-profile")]
+impl GcProfile {
+    const fn new() -> Self {
+        Self {
+            minor: CollectionProfile::new(),
+            major: CollectionProfile::new(),
+        }
+    }
+}
+
+/// Returns garbage-collection timings accumulated on the current thread.
+#[cfg(feature = "gc-profile")]
+#[must_use]
+pub fn profile() -> GcProfile {
+    GC_PROFILE.with(Cell::get)
+}
+
+/// Clears garbage-collection timings for the current thread.
+#[cfg(feature = "gc-profile")]
+pub fn reset_profile() {
+    GC_PROFILE.with(|profile| profile.set(GcProfile::new()));
+}
+
+#[cfg(feature = "gc-profile")]
+fn record_collection_profile(
+    minor: bool,
+    total: Duration,
+    mark: Duration,
+    finalize: Duration,
+    sweep: Duration,
+) {
+    GC_PROFILE.with(|profile_cell| {
+        let mut profile = profile_cell.get();
+        let collection = if minor {
+            &mut profile.minor
+        } else {
+            &mut profile.major
+        };
+        collection.collections += 1;
+        collection.total += total;
+        collection.mark += mark;
+        collection.finalize += finalize;
+        collection.sweep += sweep;
+        profile_cell.set(profile);
+    });
+}
+
 #[derive(Debug)]
 struct BoaGc {
     config: GcConfig,
     runtime: GcRuntimeData,
-    strongs: Vec<GcErasedPointer>,
-    /// The young subset of `strongs`. Minor collections only walk this index.
+    /// Young strong allocations. Minor collections never need to scan the old index.
     youngs: Vec<GcErasedPointer>,
-    weaks: Vec<EphemeronPointer>,
-    /// The young subset of `weaks`. Old ephemerons are not swept by a minor GC.
+    /// Strong allocations promoted out of the nursery.
+    old_strongs: Vec<GcErasedPointer>,
+    /// Young ephemeron allocations.
     young_weaks: Vec<EphemeronPointer>,
+    /// Ephemerons promoted out of the nursery.
+    old_weaks: Vec<EphemeronPointer>,
     weak_maps: Vec<ErasedWeakMapBoxPointer>,
 }
 
@@ -562,7 +653,6 @@ impl Allocator {
             // Publish the allocation before the collection that `manage_state` may run.
             // Roots are found by walking the heap, so an allocation the collector cannot
             // see is one whose contents it would not keep alive.
-            gc.strongs.push(erased);
             gc.youngs.push(erased);
             gc.runtime.bytes_allocated += element_size;
             gc.runtime.nursery_bytes += element_size;
@@ -588,7 +678,6 @@ impl Allocator {
 
             // Publish before the collection that `manage_state` may run, for the same
             // reason as in `alloc_gc`.
-            gc.weaks.push(erased);
             gc.young_weaks.push(erased);
             gc.runtime.bytes_allocated += element_size;
             gc.runtime.nursery_bytes += element_size;
@@ -665,25 +754,22 @@ struct Unreachables {
 struct Collector;
 
 impl Collector {
-    fn retain_live_remembered(gc: &BoaGc) {
-        let live_strongs: HashSet<_> = gc.strongs.iter().copied().collect();
-        let live_ephemerons: HashSet<_> = gc.weaks.iter().copied().collect();
-
+    fn forget_minor_remembered(
+        dead_strongs: &[GcErasedPointer],
+        promoted_strongs: &[GcErasedPointer],
+        dead_ephemerons: &[EphemeronPointer],
+    ) {
         REMEMBERED_STRONGS.with(|remembered| {
-            remembered.borrow_mut().retain(|pointer| {
-                // Check membership before dereferencing: the minor sweep has
-                // already removed unreachable young allocations from the heap
-                // index and may have freed their storage.
-                live_strongs.contains(pointer)
-                    // SAFETY: only pointers retained by the live heap index are
-                    // dereferenced here.
-                    && unsafe { pointer.as_ref() }.header.is_young()
-            });
+            let mut remembered = remembered.borrow_mut();
+            for pointer in dead_strongs.iter().chain(promoted_strongs) {
+                remembered.remove(pointer);
+            }
         });
         REMEMBERED_EPHEMERONS.with(|remembered| {
-            remembered
-                .borrow_mut()
-                .retain(|pointer| live_ephemerons.contains(pointer));
+            let mut remembered = remembered.borrow_mut();
+            for pointer in dead_ephemerons {
+                remembered.remove(pointer);
+            }
         });
     }
 
@@ -732,8 +818,21 @@ impl Collector {
             return;
         }
 
+        #[cfg(feature = "gc-profile")]
+        let total_started = Instant::now();
+        #[cfg(feature = "gc-profile")]
+        let mut mark_elapsed = Duration::ZERO;
+        #[cfg(feature = "gc-profile")]
+        let mut finalize_elapsed = Duration::ZERO;
+
         gc.runtime.collections += 1;
+        #[cfg(feature = "gc-profile")]
+        let mark_started = Instant::now();
         let pending_ephemerons = Self::mark_minor(&gc.weak_maps);
+        #[cfg(feature = "gc-profile")]
+        {
+            mark_elapsed += mark_started.elapsed();
+        }
 
         let dead_strong: Vec<_> = gc
             .youngs
@@ -761,6 +860,8 @@ impl Collector {
         // Finalizers can resurrect young allocations, so use the same
         // finalize-and-remark shape as a major collection.
         if !dead_strong.is_empty() || !dead_ephemerons.is_empty() {
+            #[cfg(feature = "gc-profile")]
+            let finalize_started = Instant::now();
             for pointer in &dead_strong {
                 // SAFETY: no young allocation is dropped before finalization.
                 let node = unsafe { pointer.as_ref() };
@@ -772,74 +873,88 @@ impl Collector {
                 // SAFETY: no young ephemeron is dropped before finalization.
                 unsafe { pointer.as_ref() }.finalize_and_clear();
             }
+            #[cfg(feature = "gc-profile")]
+            {
+                finalize_elapsed += finalize_started.elapsed();
+            }
 
+            #[cfg(feature = "gc-profile")]
+            let second_mark_started = Instant::now();
             let second_pending = Self::mark_minor(&gc.weak_maps);
+            #[cfg(feature = "gc-profile")]
+            {
+                mark_elapsed += second_mark_started.elapsed();
+            }
+            #[cfg(feature = "gc-profile")]
+            let second_finalize_started = Instant::now();
             for pointer in second_pending {
                 // A newly reachable ephemeron can still have a dead young key.
                 // Its value is cleared conservatively before the next pass.
                 unsafe { pointer.as_ref() }.finalize_and_clear();
             }
+            #[cfg(feature = "gc-profile")]
+            {
+                finalize_elapsed += second_finalize_started.elapsed();
+            }
         }
 
-        let dead_strong_set: HashSet<GcErasedPointer> = gc
-            .youngs
-            .iter()
-            .copied()
-            .filter(|pointer| {
-                // SAFETY: young allocations are still alive before the sweep.
-                unsafe { !pointer.as_ref().header.is_minor_marked() }
-            })
-            .collect();
+        #[cfg(feature = "gc-profile")]
+        let sweep_started = Instant::now();
+        let mut final_dead_strongs = Vec::new();
+        let mut promoted_strongs = Vec::new();
         gc.youngs.retain(|pointer| {
-            // SAFETY: the pointer is valid until the strong heap index removes it.
+            // SAFETY: the pointer remains valid until the nursery sweep below.
             let node = unsafe { pointer.as_ref() };
             if !node.header.is_minor_marked() {
+                final_dead_strongs.push(*pointer);
                 return false;
             }
 
             node.header.minor_unmark();
             if node.header.promote_if_mature() {
                 remember_young_allocation(*pointer);
+                promoted_strongs.push(*pointer);
                 return false;
             }
             true
         });
+        gc.old_strongs.extend(promoted_strongs.iter().copied());
 
-        gc.strongs
-            .retain(|pointer| !dead_strong_set.contains(pointer));
-
-        let dead_ephemeron_set: HashSet<EphemeronPointer> = gc
-            .young_weaks
-            .iter()
-            .copied()
-            .filter(|pointer| {
-                // SAFETY: young ephemerons are still alive before the sweep.
-                unsafe { !pointer.as_ref().header().is_minor_marked() }
-            })
-            .collect();
+        let mut final_dead_ephemerons = Vec::new();
+        let mut promoted_ephemerons = Vec::new();
         gc.young_weaks.retain(|pointer| {
-            // SAFETY: the pointer is valid until the weak heap index removes it.
+            // SAFETY: the pointer remains valid until the nursery sweep below.
             let eph = unsafe { pointer.as_ref() };
             if !eph.header().is_minor_marked() {
+                final_dead_ephemerons.push(*pointer);
                 return false;
             }
 
             eph.header().minor_unmark();
             if eph.header().promote_if_mature() {
                 remember_ephemeron_pointer(*pointer);
+                promoted_ephemerons.push(*pointer);
                 return false;
             }
             true
         });
+        gc.old_weaks.extend(promoted_ephemerons.iter().copied());
 
-        gc.weaks
-            .retain(|pointer| !dead_ephemeron_set.contains(pointer));
+        // Remove stale remembered pointers before their allocations are freed.
+        // Promoted strong children no longer need to be nursery roots. Promoted
+        // ephemerons stay remembered because an old ephemeron can still have a
+        // young key or value that minor collection must inspect.
+        Self::forget_minor_remembered(
+            &final_dead_strongs,
+            &promoted_strongs,
+            &final_dead_ephemerons,
+        );
 
         {
             // Match the full-heap sweep: destructors of GC edges must not run
             // finalizers while the collector is reclaiming storage.
             let _drop_guard = DropGuard::new();
-            for pointer in dead_strong_set {
+            for pointer in final_dead_strongs {
                 // SAFETY: only unmarked young allocations are present here.
                 let node = unsafe { pointer.as_ref() };
                 gc.runtime.bytes_allocated = gc
@@ -852,7 +967,7 @@ impl Collector {
                 unsafe { drop_fn(pointer) };
             }
 
-            for pointer in dead_ephemeron_set {
+            for pointer in final_dead_ephemerons {
                 // SAFETY: only unmarked young ephemerons are present here.
                 let eph = unsafe { pointer.as_ref() };
                 gc.runtime.bytes_allocated = gc
@@ -869,10 +984,18 @@ impl Collector {
         // Its registry is not a heap traversal and can be cleaned after the sweep.
         Self::recalculate_nursery_bytes(gc);
         Self::clear_weak_maps(gc);
-        Self::retain_live_remembered(gc);
 
         gc.youngs.shrink_to(gc.youngs.len() >> 2);
         gc.young_weaks.shrink_to(gc.young_weaks.len() >> 2);
+
+        #[cfg(feature = "gc-profile")]
+        record_collection_profile(
+            true,
+            total_started.elapsed(),
+            mark_elapsed,
+            finalize_elapsed,
+            sweep_started.elapsed(),
+        );
     }
 
     /// Seeds and solves the minor strong/ephemeron fixed point.
@@ -880,6 +1003,11 @@ impl Collector {
         let mut tracer = Tracer::new_minor();
 
         ROOT_REGISTRY.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue_root(pointer);
+            }
+        });
+        TEMPORARY_STRONG_ROOTS.with(|roots| {
             for pointer in roots.borrow().iter().copied() {
                 tracer.enqueue_root(pointer);
             }
@@ -900,7 +1028,36 @@ impl Collector {
                 }
             }
         });
+        REMEMBERED_OLD_PARENTS.with(|remembered| {
+            // Consume the current dirty set before tracing. Tracing rearms each
+            // nested cell's barrier, and a finalizer that mutates a parent later
+            // in this collection can then enqueue it into the fresh set for the
+            // next minor pass.
+            let parents = mem::take(&mut *remembered.borrow_mut());
+            for pointer in parents {
+                // Old allocations are not reclaimed by a minor collection, so
+                // these parent pointers stay valid until the next major sweep.
+                unsafe { tracer.trace_shallow_node(pointer) };
+
+                // Turn the parent's current young edges into direct remembered
+                // roots. They stay there until they die or promote, so the old
+                // parent itself does not have to be rescanned on every minor.
+                for child in tracer.take_shallow_strong() {
+                    remember_young(child);
+                    tracer.enqueue_root(child);
+                }
+                for ephemeron in tracer.take_shallow_ephemerons() {
+                    remember_ephemeron_pointer(ephemeron);
+                    tracer.enqueue_ephemeron(ephemeron);
+                }
+            }
+        });
         EPHEMERON_ROOT_REGISTRY.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue_ephemeron_root(pointer);
+            }
+        });
+        TEMPORARY_EPHEMERON_ROOTS.with(|roots| {
             for pointer in roots.borrow().iter().copied() {
                 tracer.enqueue_ephemeron_root(pointer);
             }
@@ -961,25 +1118,65 @@ impl Collector {
 
     /// Run a collection on the full heap.
     fn collect(gc: &mut BoaGc) {
+        #[cfg(feature = "gc-profile")]
+        let total_started = Instant::now();
+        #[cfg(feature = "gc-profile")]
+        let mut mark_elapsed = Duration::ZERO;
+        #[cfg(feature = "gc-profile")]
+        let mut finalize_elapsed = Duration::ZERO;
+
         gc.runtime.collections += 1;
 
         let mut tracer = Tracer::new();
 
-        let unreachables = Self::mark_heap(&mut tracer, &gc.strongs, &gc.weaks, &gc.weak_maps);
+        #[cfg(feature = "gc-profile")]
+        let mark_started = Instant::now();
+        let unreachables = Self::mark_heap(
+            &mut tracer,
+            &gc.youngs,
+            &gc.old_strongs,
+            &gc.young_weaks,
+            &gc.old_weaks,
+            &gc.weak_maps,
+        );
+        #[cfg(feature = "gc-profile")]
+        {
+            mark_elapsed += mark_started.elapsed();
+        }
 
         assert!(tracer.is_empty(), "The queue should be empty");
 
         // Only finalize if there are any unreachable nodes.
         if !unreachables.strong.is_empty() || !unreachables.weak.is_empty() {
+            #[cfg(feature = "gc-profile")]
+            let finalize_started = Instant::now();
             // Finalize all the unreachable nodes.
             // SAFETY: All passed pointers are valid, since we won't deallocate until `Self::sweep`.
             unsafe { Self::finalize(unreachables) };
+            #[cfg(feature = "gc-profile")]
+            {
+                finalize_elapsed += finalize_started.elapsed();
+            }
 
             // Reuse the tracer's already allocated capacity.
-            let _final_unreachables =
-                Self::mark_heap(&mut tracer, &gc.strongs, &gc.weaks, &gc.weak_maps);
+            #[cfg(feature = "gc-profile")]
+            let second_mark_started = Instant::now();
+            let _final_unreachables = Self::mark_heap(
+                &mut tracer,
+                &gc.youngs,
+                &gc.old_strongs,
+                &gc.young_weaks,
+                &gc.old_weaks,
+                &gc.weak_maps,
+            );
+            #[cfg(feature = "gc-profile")]
+            {
+                mark_elapsed += second_mark_started.elapsed();
+            }
         }
 
+        #[cfg(feature = "gc-profile")]
+        let sweep_started = Instant::now();
         // Remembered entries are hints, not roots for a major collection. Drop
         // stale hints while all heap pointers are still valid, before sweep can
         // free them.
@@ -988,39 +1185,34 @@ impl Collector {
         // SAFETY: The head of our linked list is always valid per the invariants of our GC.
         unsafe {
             Self::sweep(
-                &mut gc.strongs,
-                &mut gc.weaks,
+                &mut gc.youngs,
+                &mut gc.young_weaks,
+                &mut gc.runtime.bytes_allocated,
+            );
+            Self::sweep(
+                &mut gc.old_strongs,
+                &mut gc.old_weaks,
                 &mut gc.runtime.bytes_allocated,
             );
         }
-
-        gc.youngs = gc
-            .strongs
-            .iter()
-            .copied()
-            .filter(|pointer| {
-                // SAFETY: the strong sweep has completed and retained pointers
-                // are valid.
-                unsafe { pointer.as_ref() }.header.is_young()
-            })
-            .collect();
-        gc.young_weaks = gc
-            .weaks
-            .iter()
-            .copied()
-            .filter(|pointer| {
-                // SAFETY: the weak sweep has completed and retained pointers are
-                // valid.
-                unsafe { pointer.as_ref() }.header().is_young()
-            })
-            .collect();
         Self::recalculate_nursery_bytes(gc);
 
         Self::clear_weak_maps(gc);
 
-        gc.strongs.shrink_to(gc.strongs.len() >> 2);
-        gc.weaks.shrink_to(gc.weaks.len() >> 2);
+        gc.youngs.shrink_to(gc.youngs.len() >> 2);
+        gc.old_strongs.shrink_to(gc.old_strongs.len() >> 2);
+        gc.young_weaks.shrink_to(gc.young_weaks.len() >> 2);
+        gc.old_weaks.shrink_to(gc.old_weaks.len() >> 2);
         gc.weak_maps.shrink_to(gc.weak_maps.len() >> 2);
+
+        #[cfg(feature = "gc-profile")]
+        record_collection_profile(
+            false,
+            total_started.elapsed(),
+            mark_elapsed,
+            finalize_elapsed,
+            sweep_started.elapsed(),
+        );
     }
 
     fn retain_major_remembered() {
@@ -1036,13 +1228,18 @@ impl Collector {
                 unsafe { pointer.as_ref() }.header().is_marked()
             });
         });
+        // Every surviving old cell will dirty itself again on its next mutable
+        // borrow. Entries for dead parents must be gone before the major sweep.
+        REMEMBERED_OLD_PARENTS.with(|remembered| remembered.borrow_mut().clear());
     }
 
     /// Walk the heap and mark any nodes deemed reachable
     fn mark_heap(
         tracer: &mut Tracer,
-        strongs: &[GcErasedPointer],
-        weaks: &[EphemeronPointer],
+        youngs: &[GcErasedPointer],
+        old_strongs: &[GcErasedPointer],
+        young_weaks: &[EphemeronPointer],
+        old_weaks: &[EphemeronPointer],
         weak_maps: &[ErasedWeakMapBoxPointer],
     ) -> Unreachables {
         // Walk the list, tracing and marking the nodes
@@ -1055,6 +1252,11 @@ impl Collector {
         // maintained only when an allocation changes between zero and one roots,
         // so the mark phase is proportional to the root set rather than the heap.
         ROOT_REGISTRY.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue_root(pointer);
+            }
+        });
+        TEMPORARY_STRONG_ROOTS.with(|roots| {
             for pointer in roots.borrow().iter().copied() {
                 tracer.enqueue_root(pointer);
             }
@@ -1073,11 +1275,34 @@ impl Collector {
                 tracer.enqueue_ephemeron_root(pointer);
             }
         });
+        TEMPORARY_EPHEMERON_ROOTS.with(|roots| {
+            for pointer in roots.borrow().iter().copied() {
+                tracer.enqueue_ephemeron_root(pointer);
+            }
+        });
         // SAFETY: registered roots point to live collector allocations.
         unsafe { tracer.trace_until_empty() };
 
+        // A finalizer between the two major mark passes can mutate an old,
+        // already-marked parent. Enqueuing that parent would be skipped by the
+        // normal marked-node fast path, so retrace it shallowly and mark the
+        // new edges directly. A dirty but unreachable parent is deliberately
+        // ignored: remembered entries are hints, not major-collection roots.
+        REMEMBERED_OLD_PARENTS.with(|remembered| {
+            let parents = mem::take(&mut *remembered.borrow_mut());
+            for pointer in parents {
+                // SAFETY: major sweep has not started, so remembered old
+                // pointers are still valid. Only reachable parents are traced.
+                if unsafe { pointer.as_ref() }.is_marked() {
+                    unsafe { tracer.trace_shallow_node(pointer) };
+                }
+            }
+        });
+        // SAFETY: shallow tracing above emitted edges from live allocations.
+        unsafe { tracer.trace_until_empty() };
+
         // Get the naive list of possibly dead nodes.
-        for node in strongs {
+        for node in youngs.iter().chain(old_strongs) {
             // SAFETY: node must be valid as this phase cannot drop any node.
             if unsafe { !node.as_ref().is_marked() } {
                 strong_dead.push(*node);
@@ -1085,7 +1310,7 @@ impl Collector {
         }
 
         // 0.1. Early return if there are no ephemerons in the GC
-        if weaks.is_empty() {
+        if young_weaks.is_empty() && old_weaks.is_empty() {
             strong_dead.retain_mut(|node| {
                 // SAFETY: node must be valid as this phase cannot drop any node.
                 unsafe { !node.as_ref().is_marked() }
@@ -1101,7 +1326,7 @@ impl Collector {
         //
         // 1. Mark explicitly registered ephemeron roots, then get the naive list
         // of ephemerons that are supposedly dead or whose key is dead.
-        for eph in weaks {
+        for eph in young_weaks.iter().chain(old_weaks) {
             // SAFETY: node must be valid as this phase cannot drop any node.
             let eph_ref = unsafe { eph.as_ref() };
             // SAFETY: the garbage collector ensures `eph_ref` always points to valid data.
@@ -1265,7 +1490,10 @@ impl Collector {
         // Not initializing a dropguard since this should only be invoked when BOA_GC is being dropped.
         let _guard = DropGuard::new();
 
-        for node in mem::take(&mut gc.strongs) {
+        for node in mem::take(&mut gc.youngs)
+            .into_iter()
+            .chain(mem::take(&mut gc.old_strongs))
+        {
             // SAFETY:
             // The `Allocator` must always ensure its start node is a valid, non-null pointer that
             // was allocated by `Box::from_raw(Box::new(..))`.
@@ -1277,7 +1505,10 @@ impl Collector {
             }
         }
 
-        for node in mem::take(&mut gc.weaks) {
+        for node in mem::take(&mut gc.young_weaks)
+            .into_iter()
+            .chain(mem::take(&mut gc.old_weaks))
+        {
             // SAFETY:
             // The `Allocator` must always ensure its start node is a valid, non-null pointer that
             // was allocated by `Box::from_raw(Box::new(..))`.

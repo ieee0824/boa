@@ -11,6 +11,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [features]
+# Collect per-phase minor and major GC timings. Disabled by default so normal
+# builds do not read the clock on collection paths.
+gc-profile = []
 # Enable default implementations of trace and finalize for the thin-vec crate
 thin-vec = ["dep:thin-vec"]
 # Enable default implementations of trace and finalize for some `ICU4X` types
