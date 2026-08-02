@@ -2518,6 +2518,7 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        let _o_root = o.clone().root();
 
         // 2. Let len be ? LengthOfArrayLike(O).
         let length = o.length_of_array_like(context)?;
@@ -2544,6 +2545,7 @@ impl Array {
             // c. If kPresent is true, then
             // c.i. Let kValue be ? Get(O, Pk).
             if let Some(element) = o.try_get(idx, context)? {
+                let _element_root = element.as_object().map(JsObject::root);
                 let args = [element.clone(), JsValue::new(idx), JsValue::new(o.clone())];
 
                 // ii. Let selected be ! ToBoolean(? Call(callbackfn, thisArg, « kValue, 𝔽(k), O »)).
