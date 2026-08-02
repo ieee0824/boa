@@ -467,6 +467,7 @@ impl ImportCall {
             context,
         )
         .expect("operation cannot fail for the %Promise% intrinsic");
+        let capability_roots = cap.root_handles();
         let promise = cap.promise().clone();
 
         // 6. Let specifierString be Completion(ToString(specifier)).
@@ -480,6 +481,7 @@ impl ImportCall {
             Ok(specifier) => {
                 let job = NativeAsyncJob::with_realm(
                     async move |context| {
+                        let _capability_roots = capability_roots;
                         load_dyn_import(referrer, specifier, cap, context).await;
                         Ok(JsValue::undefined())
                     },

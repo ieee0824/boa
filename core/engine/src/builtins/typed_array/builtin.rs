@@ -205,6 +205,7 @@ impl BuiltinTypedArray {
                     .into());
             }
         };
+        let _constructor_root = constructor.clone().root();
 
         let mapping = match args.get(1).map(JsValue::variant) {
             // 3. If mapfn is undefined, let mapping be false.
@@ -219,6 +220,7 @@ impl BuiltinTypedArray {
                     .into());
             }
         };
+        let _mapping_root = mapping.clone().map(JsObject::root);
 
         // 5. Let usingIterator be ? GetMethod(source, @@iterator).
         let source = args.get_or_undefined(0);
@@ -381,6 +383,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (o, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _o_root = o.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = o.borrow().data().array_length(buf_len) as i64;
@@ -513,6 +516,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -640,6 +644,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Perform ? ValidateTypedArray(O, seq-cst).
         let (ta, _) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Return CreateArrayIterator(O, key+value).
         Ok(ArrayIterator::create_array_iterator(
@@ -663,6 +668,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -720,6 +726,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -800,6 +807,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -880,6 +888,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -916,6 +925,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -952,6 +962,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -988,6 +999,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1024,6 +1036,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1073,6 +1086,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1137,6 +1151,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1204,6 +1219,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1253,6 +1269,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, _) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Return CreateArrayIterator(O, key).
         Ok(ArrayIterator::create_array_iterator(
@@ -1276,6 +1293,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1372,6 +1390,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1433,6 +1452,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1508,6 +1528,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1582,6 +1603,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1631,6 +1653,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -1681,6 +1704,7 @@ impl BuiltinTypedArray {
                 JsNativeError::typ()
                     .with_message("TypedArray.set must be called on typed array object")
             })?;
+        let _target_root = target.clone().root();
 
         // 4. Let targetOffset be ? ToIntegerOrInfinity(offset).
         let target_offset = args.get_or_undefined(1).to_integer_or_infinity(context)?;
@@ -1707,6 +1731,7 @@ impl BuiltinTypedArray {
             .as_object()
             .and_then(|o| o.clone().downcast::<TypedArray>().ok())
         {
+            let _source_root = source.clone().root();
             // a. Perform ? SetTypedArrayFromTypedArray(target, targetOffset, source).
             Self::set_typed_array_from_typed_array(&target, &target_offset, &source, context)?;
         }
@@ -1970,6 +1995,7 @@ impl BuiltinTypedArray {
 
         // 4. Let src be ? ToObject(source).
         let src = source.to_object(context)?;
+        let _src_root = src.clone().root();
 
         // 5. Let srcLength be ? LengthOfArrayLike(src).
         let src_length = src.length_of_array_like(context)?;
@@ -2026,6 +2052,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (src, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _src_root = src.clone().root();
 
         let src_borrow = src.borrow();
 
@@ -2213,6 +2240,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -2280,6 +2308,7 @@ impl BuiltinTypedArray {
         // 2. Let obj be the this value.
         // 3. Let taRecord be ? ValidateTypedArray(obj, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 4. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -2332,6 +2361,7 @@ impl BuiltinTypedArray {
         // 2. Let O be the this value.
         // 3. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 4. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -2386,6 +2416,7 @@ impl BuiltinTypedArray {
             .ok_or_else(|| {
                 JsNativeError::typ().with_message("Value is not a typed array object")
             })?;
+        let _src_root = src.clone().root();
 
         let src_borrow = src.borrow();
 
@@ -2484,6 +2515,7 @@ impl BuiltinTypedArray {
         let array = this.as_object().ok_or_else(|| {
             JsNativeError::typ().with_message("Value is not a typed array object")
         })?;
+        let _array_root = array.clone().root();
 
         let (len, is_fixed_len) = {
             let o = array.downcast_ref::<TypedArray>().ok_or_else(|| {
@@ -2556,6 +2588,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Perform ? ValidateTypedArray(O, seq-cst).
         let (ta, _) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Return CreateArrayIterator(O, value).
         Ok(ArrayIterator::create_array_iterator(
@@ -2576,6 +2609,7 @@ impl BuiltinTypedArray {
         // 1. Let O be the this value.
         // 2. Let taRecord be ? ValidateTypedArray(O, seq-cst).
         let (ta, buf_len) = TypedArray::validate(this, Ordering::SeqCst)?;
+        let _ta_root = ta.clone().root();
 
         // 3. Let len be TypedArrayLength(taRecord).
         let len = ta.borrow().data().array_length(buf_len);
@@ -2677,11 +2711,14 @@ impl BuiltinTypedArray {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsObject<TypedArray>> {
+        let _exemplar_root = exemplar.clone().root();
+
         // 1. Let defaultConstructor be the intrinsic object listed in column one of Table 73 for exemplar.[[TypedArrayName]].
         let default_constructor = kind.standard_constructor();
 
         // 2. Let constructor be ? SpeciesConstructor(exemplar, defaultConstructor).
         let constructor = exemplar.species_constructor(default_constructor, context)?;
+        let _constructor_root = constructor.clone().root();
 
         // 3. Let result be ? TypedArrayCreate(constructor, argumentList).
         let result = Self::create(&constructor, args, context)?;
@@ -2843,6 +2880,10 @@ impl BuiltinTypedArray {
         // 8. Else,
         // a. Perform ? AllocateTypedArrayBuffer(obj, length).
         let indexed = Self::allocate_buffer::<T>(length, context)?;
+        let _buffer_root = {
+            let _no_gc = NoGcScope::new();
+            Rooted::new(indexed.viewed_array_buffer().clone())
+        };
 
         // 2. Let obj be ! IntegerIndexedObjectCreate(proto).
         let obj =
@@ -2985,6 +3026,10 @@ impl BuiltinTypedArray {
             }
 
             data_obj
+        };
+        let _buffer_root = {
+            let _no_gc = NoGcScope::new();
+            Rooted::new(BufferObject::Buffer(new_buffer.clone()))
         };
 
         // 13. Set O.[[ViewedArrayBuffer]] to data.

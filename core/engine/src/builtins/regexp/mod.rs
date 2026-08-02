@@ -1084,7 +1084,9 @@ impl RegExp {
         let (groups, group_names) = if !named_groups.clone().is_empty() {
             // a. Let groups be OrdinaryObjectCreate(null).
             let groups = JsObject::with_null_proto();
+            let _groups_root = groups.clone().root();
             let group_names = JsObject::with_null_proto();
+            let _group_names_root = group_names.clone().root();
 
             // e. If the ith capture of R was defined with a GroupName, then
             // i. Let s be the CapturingGroupName of that GroupName.
@@ -1421,6 +1423,7 @@ impl RegExp {
                 "RegExp.prototype[Symbol.replace] method called on incompatible value",
             )
         })?;
+        let _rx_root = rx.clone().root();
 
         // 3. Let S be ? ToString(string).
         let s = args.get_or_undefined(0).to_string(context)?;
@@ -1605,6 +1608,9 @@ impl RegExp {
                         // 1. Set namedCaptures to ? ToObject(namedCaptures).
                         named_captures = named_captures.to_object(context)?.into();
                     }
+                    let _named_captures_root = named_captures
+                        .as_object()
+                        .map(|object| object.clone().root());
 
                     // ii. Let replacement be ? GetSubstitution(matched, S, position, captures, namedCaptures, replaceValue).
                     string::get_substitution(

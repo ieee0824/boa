@@ -721,6 +721,10 @@ impl Promise {
             remaining_elements_count: Rc<Cell<i32>>,
         }
 
+        let _result_capability_roots = result_capability.root_handles();
+        let _constructor_root = constructor.clone().root();
+        let _promise_resolve_root = promise_resolve.clone().root();
+
         // 1. Let values be a new empty List.
         let values = Rooted::new(GcRefCell::new(Vec::new()));
 
@@ -738,6 +742,7 @@ impl Promise {
             // d. Let nextPromise be ? Call(promiseResolve, constructor, « next »).
             let next_promise =
                 promise_resolve.call(&constructor.clone().into(), &[next], context)?;
+            let _next_promise_root = next_promise.as_object().map(JsObject::root);
 
             // e. Let steps be the algorithm steps defined in Promise.all Resolve Element Functions.
             // f. Let length be the number of non-optional parameters of the function definition in Promise.all Resolve Element Functions.
@@ -808,6 +813,7 @@ impl Promise {
             .length(1)
             .constructor(false)
             .build();
+            let _on_fulfilled_root = on_fulfilled.clone();
 
             // m. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
             remaining_elements_count.set(remaining_elements_count.get() + 1);
@@ -868,6 +874,7 @@ impl Promise {
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(&c, context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let promiseResolve be Completion(GetPromiseResolve(C)).
         let promise_resolve = Self::get_promise_resolve(&c, context);
@@ -875,6 +882,7 @@ impl Promise {
         // 4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
         let promise_resolve =
             if_abrupt_reject_promise!(promise_resolve, promise_capability, context);
+        let _promise_resolve_root = promise_resolve.clone().root();
 
         // 5. Let iteratorRecord be Completion(GetIterator(iterable, sync)).
         let iterator_record = args
@@ -936,6 +944,10 @@ impl Promise {
             remaining_elements: Rc<Cell<i32>>,
         }
 
+        let _result_capability_roots = result_capability.root_handles();
+        let _constructor_root = constructor.clone().root();
+        let _promise_resolve_root = promise_resolve.clone().root();
+
         // 1. Let values be a new empty List.
         let values = Rooted::new(GcRefCell::new(Vec::new()));
 
@@ -953,6 +965,7 @@ impl Promise {
             // d. Let nextPromise be ? Call(promiseResolve, constructor, « next »).
             let next_promise =
                 promise_resolve.call(&constructor.clone().into(), &[next], context)?;
+            let _next_promise_root = next_promise.as_object().map(JsObject::root);
 
             // e. Let stepsFulfilled be the algorithm steps defined in Promise.allSettled Resolve Element Functions.
             // f. Let lengthFulfilled be the number of non-optional parameters of the function definition in Promise.allSettled Resolve Element Functions.
@@ -987,6 +1000,7 @@ impl Promise {
 
                         // 9. Let obj be OrdinaryObjectCreate(%Object.prototype%).
                         let obj = JsObject::with_object_proto(context.intrinsics());
+                        let _obj_root = obj.clone().root();
 
                         // 10. Perform ! CreateDataPropertyOrThrow(obj, "status", "fulfilled").
                         obj.create_data_property_or_throw(
@@ -1044,6 +1058,7 @@ impl Promise {
             .length(1)
             .constructor(false)
             .build();
+            let _on_fulfilled_root = on_fulfilled.clone();
 
             // n. Let stepsRejected be the algorithm steps defined in Promise.allSettled Reject Element Functions.
             // o. Let lengthRejected be the number of non-optional parameters of the function definition in Promise.allSettled Reject Element Functions.
@@ -1077,6 +1092,7 @@ impl Promise {
 
                         // 9. Let obj be OrdinaryObjectCreate(%Object.prototype%).
                         let obj = JsObject::with_object_proto(context.intrinsics());
+                        let _obj_root = obj.clone().root();
 
                         // 10. Perform ! CreateDataPropertyOrThrow(obj, "status", "rejected").
                         obj.create_data_property_or_throw(
@@ -1134,6 +1150,7 @@ impl Promise {
             .length(1)
             .constructor(false)
             .build();
+            let _on_rejected_root = on_rejected.clone();
 
             // v. Set remainingElementsCount.[[Value]] to remainingElementsCount.[[Value]] + 1.
             remaining_elements_count.set(remaining_elements_count.get() + 1);
@@ -1191,6 +1208,7 @@ impl Promise {
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(&c, context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let promiseResolve be Completion(GetPromiseResolve(C)).
         let promise_resolve = Self::get_promise_resolve(&c, context);
@@ -1198,6 +1216,7 @@ impl Promise {
         // 4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
         let promise_resolve =
             if_abrupt_reject_promise!(promise_resolve, promise_capability, context);
+        let _promise_resolve_root = promise_resolve.clone().root();
 
         // 5. Let iteratorRecord be Completion(GetIterator(iterable, sync)).
         let iterator_record = args
@@ -1431,6 +1450,7 @@ impl Promise {
 
         // 2. Let promiseCapability be ? NewPromiseCapability(C).
         let promise_capability = PromiseCapability::new(&c, context)?;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let promiseResolve be Completion(GetPromiseResolve(C)).
         let promise_resolve = Self::get_promise_resolve(&c, context);
@@ -1438,6 +1458,7 @@ impl Promise {
         // 4. IfAbruptRejectPromise(promiseResolve, promiseCapability).
         let promise_resolve =
             if_abrupt_reject_promise!(promise_resolve, promise_capability, context);
+        let _promise_resolve_root = promise_resolve.clone().root();
 
         // 5. Let iteratorRecord be Completion(GetIterator(iterable, sync)).
         let iterator_record = iterable.get_iterator(IteratorHint::Sync, context);
@@ -1491,6 +1512,9 @@ impl Promise {
         promise_resolve: &JsObject,
         context: &mut Context,
     ) -> JsResult<JsObject> {
+        let _result_capability_roots = result_capability.root_handles();
+        let _constructor_root = constructor.clone().root();
+        let _promise_resolve_root = promise_resolve.clone().root();
         let constructor = constructor.clone().into();
 
         // 1. Repeat,
@@ -1498,6 +1522,7 @@ impl Promise {
         while let Some(next) = iterator_record.step_value(context)? {
             // c. Let nextPromise be ? Call(promiseResolve, constructor, « next »).
             let next_promise = promise_resolve.call(&constructor, &[next], context)?;
+            let _next_promise_root = next_promise.as_object().map(JsObject::root);
             // d. Perform ? Invoke(nextPromise, "then", « resultCapability.[[Resolve]], resultCapability.[[Reject]] »).
             next_promise.invoke(
                 js_string!("then"),

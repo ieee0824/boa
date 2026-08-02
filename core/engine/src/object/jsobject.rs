@@ -617,6 +617,9 @@ Cannot both specify accessors and a value or writable attribute",
     where
         K: Into<PropertyKey>,
     {
+        let _target_root = self.clone().root();
+        let _source_root = source.as_object().map(JsObject::root);
+
         let context = &mut InternalMethodPropertyContext::new(context);
 
         // 1. Assert: Type(target) is Object.
@@ -630,6 +633,7 @@ Cannot both specify accessors and a value or writable attribute",
         let from = source
             .to_object(context)
             .expect("function ToObject should never complete abruptly here");
+        let _from_root = from.clone().root();
 
         // 5. Let keys be ? from.[[OwnPropertyKeys]]().
         // 6. For each element nextKey of keys, do
@@ -659,6 +663,7 @@ Cannot both specify accessors and a value or writable attribute",
                 {
                     // 1. Let propValue be ? Get(from, nextKey).
                     let prop_value = from.__get__(&key, from.clone().into(), context)?;
+                    let _prop_value_root = prop_value.as_object().map(JsObject::root);
 
                     // 2. Perform ! CreateDataPropertyOrThrow(target, nextKey, propValue).
                     self.create_data_property_or_throw(key, prop_value, context)
