@@ -49,10 +49,8 @@ impl InlineCache {
     }
 
     pub(crate) fn set(&self, shape: &ShapeEdge, slot: Slot) {
-        let reused_shape = {
-            // SAFETY: retargeting an existing ephemeron does not allocate GC storage.
-            unsafe { self.shape.borrow_mut_no_gc() }.retarget(shape)
-        };
+        // SAFETY: retargeting an existing ephemeron does not allocate GC storage.
+        let reused_shape = { unsafe { self.shape.borrow_mut_no_gc() }.retarget(shape) };
         if !reused_shape {
             // Creating the first weak handle allocates its ephemeron, so do that
             // before taking the no-GC mutable borrow used for assignment.

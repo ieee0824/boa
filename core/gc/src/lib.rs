@@ -1034,19 +1034,20 @@ impl Collector {
             // in this collection can then enqueue it into the fresh set for the
             // next minor pass.
             let parents = mem::take(&mut *remembered.borrow_mut());
+            let mut parent_tracer = Tracer::new_minor();
             for pointer in parents {
                 // Old allocations are not reclaimed by a minor collection, so
                 // these parent pointers stay valid until the next major sweep.
-                unsafe { tracer.trace_shallow_node(pointer) };
+                unsafe { parent_tracer.trace_shallow_node(pointer) };
 
                 // Turn the parent's current young edges into direct remembered
                 // roots. They stay there until they die or promote, so the old
                 // parent itself does not have to be rescanned on every minor.
-                for child in tracer.take_shallow_strong() {
+                for child in parent_tracer.take_shallow_strong() {
                     remember_young(child);
                     tracer.enqueue_root(child);
                 }
-                for ephemeron in tracer.take_shallow_ephemerons() {
+                for ephemeron in parent_tracer.take_shallow_ephemerons() {
                     remember_ephemeron_pointer(ephemeron);
                     tracer.enqueue_ephemeron(ephemeron);
                 }

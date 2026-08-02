@@ -165,6 +165,29 @@ fn mutable_cell_write_remembers_old_to_young_edge() {
     });
 }
 
+#[test]
+fn dirty_parent_scan_preserves_previously_enqueued_roots() {
+    run_test(|| {
+        let parent = Rooted::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&parent));
+
+        let independent_root = Rooted::new(7_u32);
+        *parent.child.borrow_mut() = Some(GcEdge::new(42));
+        force_minor_collect();
+
+        Harness::assert_strong_allocations(3);
+        assert_eq!(*independent_root, 7);
+        assert_eq!(
+            parent.child.borrow().as_ref().map(|value| **value),
+            Some(42)
+        );
+    });
+}
+
 #[derive(Debug, Finalize)]
 struct CountingOldHolder {
     traces: Arc<AtomicUsize>,

@@ -54,6 +54,8 @@ impl Harness {
 
             assert!(gc.youngs.is_empty());
             assert!(gc.old_strongs.is_empty());
+            assert!(gc.young_weaks.is_empty());
+            assert!(gc.old_weaks.is_empty());
             assert_eq!(gc.runtime.bytes_allocated, 0);
         });
     }
