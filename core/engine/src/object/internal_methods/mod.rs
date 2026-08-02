@@ -1046,9 +1046,18 @@ pub(crate) fn validate_and_apply_property_descriptor(
                     desc.into_accessor_defaulted()
                 };
             let _property_roots = (
-                property.value().and_then(JsValue::as_object).map(JsObject::root),
-                property.get().and_then(JsValue::as_object).map(JsObject::root),
-                property.set().and_then(JsValue::as_object).map(JsObject::root),
+                property
+                    .value()
+                    .and_then(JsValue::as_object)
+                    .map(JsObject::root),
+                property
+                    .get()
+                    .and_then(JsValue::as_object)
+                    .map(JsObject::root),
+                property
+                    .set()
+                    .and_then(JsValue::as_object)
+                    .map(JsObject::root),
             );
 
             // Planned under a shared borrow so the shape allocation happens outside the
@@ -1156,9 +1165,18 @@ pub(crate) fn validate_and_apply_property_descriptor(
         // property named P of object O to the value of the field.
         current.fill_with(desc);
         let _property_roots = (
-            current.value().and_then(JsValue::as_object).map(JsObject::root),
-            current.get().and_then(JsValue::as_object).map(JsObject::root),
-            current.set().and_then(JsValue::as_object).map(JsObject::root),
+            current
+                .value()
+                .and_then(JsValue::as_object)
+                .map(JsObject::root),
+            current
+                .get()
+                .and_then(JsValue::as_object)
+                .map(JsObject::root),
+            current
+                .set()
+                .and_then(JsValue::as_object)
+                .map(JsObject::root),
         );
         // Planned under a shared borrow so the shape allocation happens outside the
         // mutable borrow below. See `PropertyMap::plan_insert`.
