@@ -1021,6 +1021,9 @@ pub(crate) fn validate_and_apply_property_descriptor(
         // b. Assert: extensible is true.
 
         if let Some((obj, key)) = obj_and_key {
+            // Keep the receiver alive while planning the shared-shape transition. The
+            // transition allocates and may collect before the mutable property borrow.
+            let _obj_root = obj.clone().root();
             let property =
                 // c. If IsGenericDescriptor(Desc) is true or IsDataDescriptor(Desc) is true, then
                 if desc.is_generic_descriptor() || desc.is_data_descriptor() {
@@ -1141,6 +1144,9 @@ pub(crate) fn validate_and_apply_property_descriptor(
 
     // 9. If O is not undefined, then
     if let Some((obj, key)) = obj_and_key {
+        // Keep the receiver alive while planning the shared-shape transition. The
+        // transition allocates and may collect before the mutable property borrow.
+        let _obj_root = obj.clone().root();
         // a. For each field of Desc that is present, set the corresponding attribute of the
         // property named P of object O to the value of the field.
         current.fill_with(desc);
