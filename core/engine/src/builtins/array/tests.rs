@@ -554,6 +554,23 @@ fn filter() {
 }
 
 #[test]
+fn filter_roots_result_during_callback_allocations() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::assert(indoc! {r#"
+            const input = Array.from({ length: 32 }, (_, index) => index);
+            const result = input.filter(() => {
+                // Force the callback to allocate while `filter` retains its
+                // destination array in a native local.
+                Array.from({ length: 4096 }, () => ({}));
+                return true;
+            });
+            arrayEquals(result, input)
+        "#}),
+    ]);
+}
+
+#[test]
 fn filter_species_callback_can_collect() {
     run_test_actions([
         TestAction::inspect_context(|ctx| {
