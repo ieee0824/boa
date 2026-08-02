@@ -25,7 +25,8 @@ use crate::{
         CallFrame, CallFrameFlags, CompletionRecord, GeneratorResumeKind, Stack, SuspendedCallFrame,
     },
 };
-use boa_gc::{Finalize, Trace, custom_trace};
+use boa_gc::{Finalize, RootProvider, Trace, custom_trace};
+use std::{mem::ManuallyDrop, ptr::NonNull};
 
 use super::{BuiltInBuilder, IntrinsicObject};
 
@@ -64,11 +65,20 @@ pub(crate) struct GeneratorContext {
     pub(crate) call_frame: Option<SuspendedCallFrame>,
 }
 
+#[derive(Debug, Finalize)]
 pub(crate) struct PendingAsyncResume {
     pub(crate) context: GeneratorContext,
     pub(crate) value: Option<JsValue>,
     pub(crate) kind: GeneratorResumeKind,
     pub(crate) async_generator: Option<JsObject>,
+}
+
+unsafe impl Trace for PendingAsyncResume {
+    custom_trace!(this, mark, {
+        mark(&this.context);
+        mark(&this.value);
+        mark(&this.async_generator);
+    });
 }
 
 impl GeneratorContext {
@@ -97,64 +107,93 @@ impl GeneratorContext {
 
     /// Resumes execution with `GeneratorContext` as the current execution context.
     pub(crate) fn resume(
-        &mut self,
+        self,
         value: Option<JsValue>,
         resume_kind: GeneratorResumeKind,
         context: &mut Context,
-    ) -> CompletionRecord {
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
-        let frame = self
-            .call_frame
-            .take()
-            .expect("should have a call frame")
-            .into_rooted();
-        let rp = frame.rp;
-        context.vm.push_frame(frame);
+    ) -> (Self, CompletionRecord) {
+        let this = ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped after its fields are moved out. Both
+        // fields are initialized before the move and are dropped by their new owners.
+        let stack = unsafe { std::ptr::read(&raw const this.stack) };
+        // SAFETY: see the safety note above.
+        let call_frame = unsafe { std::ptr::read(&raw const this.call_frame) };
 
-        let frame = context.vm.frame_mut();
-        frame.rp = rp;
-        frame.set_exit_early(true);
+        // The generator context is temporarily removed from the generator object
+        // while it executes. Keep the caller's detached stack visible to the collector
+        // during nested generator resumes. The box also keeps the provider's address
+        // stable across the async variant below.
+        let mut caller_stack = Box::new(stack);
+        std::mem::swap(&mut *context.vm.stack, &mut *caller_stack);
 
-        if let Some(value) = value {
-            context.vm.stack.push(value);
-        }
-        context.vm.stack.push(resume_kind);
+        // SAFETY: `caller_stack` is heap allocated and remains at this address until
+        // the guard is dropped. It is not accessed mutably while the provider is live;
+        // the VM owns and traces the other stack during execution.
+        let result = {
+            let _context_roots = unsafe { RootProvider::register(NonNull::from(&*caller_stack)) };
+            let frame = call_frame.expect("should have a call frame").into_rooted();
+            let rp = frame.rp;
+            context.vm.push_frame(frame);
 
-        let result = context.run();
+            let frame = context.vm.frame_mut();
+            frame.rp = rp;
+            frame.set_exit_early(true);
 
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
-        self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
-        assert!(self.call_frame.is_some());
-        result
+            if let Some(value) = value {
+                context.vm.stack.push(value);
+            }
+            context.vm.stack.push(resume_kind);
+
+            context.run()
+        };
+
+        std::mem::swap(&mut *context.vm.stack, &mut *caller_stack);
+        let stack = *caller_stack;
+        let call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
+        assert!(call_frame.is_some());
+        (Self { stack, call_frame }, result)
     }
 
     pub(crate) async fn resume_async(
-        &mut self,
+        self,
         value: Option<JsValue>,
         resume_kind: GeneratorResumeKind,
         context: &mut Context,
-    ) -> CompletionRecord {
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
-        let frame = self
-            .call_frame
-            .take()
-            .expect("should have a call frame")
-            .into_rooted();
-        let rp = frame.rp;
-        context.vm.push_frame(frame);
-        let frame = context.vm.frame_mut();
-        frame.rp = rp;
-        frame.set_exit_early(true);
-        if let Some(value) = value {
-            context.vm.stack.push(value);
-        }
-        context.vm.stack.push(resume_kind);
+    ) -> (Self, CompletionRecord) {
+        let this = ManuallyDrop::new(self);
+        // SAFETY: `this` is never dropped after its fields are moved out. Both
+        // fields are initialized before the move and are dropped by their new owners.
+        let stack = unsafe { std::ptr::read(&raw const this.stack) };
+        // SAFETY: see the safety note above.
+        let call_frame = unsafe { std::ptr::read(&raw const this.call_frame) };
+        let mut caller_stack = Box::new(stack);
+        std::mem::swap(&mut *context.vm.stack, &mut *caller_stack);
 
-        let result = context.run_async_with_budget(256).await;
-        std::mem::swap(&mut context.vm.stack, &mut self.stack);
-        self.call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
-        assert!(self.call_frame.is_some());
-        result
+        // Keep the provider alive across the await: async execution can allocate
+        // while the generator context is detached from its owner.
+        // SAFETY: `caller_stack` is heap allocated and remains at this address until
+        // the guard is dropped. It is not accessed mutably while the provider is live;
+        // the VM owns and traces the other stack during execution.
+        let result = {
+            let _context_roots = unsafe { RootProvider::register(NonNull::from(&*caller_stack)) };
+            let frame = call_frame.expect("should have a call frame").into_rooted();
+            let rp = frame.rp;
+            context.vm.push_frame(frame);
+            let frame = context.vm.frame_mut();
+            frame.rp = rp;
+            frame.set_exit_early(true);
+            if let Some(value) = value {
+                context.vm.stack.push(value);
+            }
+            context.vm.stack.push(resume_kind);
+
+            context.run_async_with_budget(256).await
+        };
+        std::mem::swap(&mut *context.vm.stack, &mut *caller_stack);
+        let stack = *caller_stack;
+        let call_frame = context.vm.pop_frame().map(CallFrame::into_edge);
+        assert!(call_frame.is_some());
+        (Self { stack, call_frame }, result)
     }
 
     /// Returns the async generator object, if the function that this [`GeneratorContext`] is from an async generator, [`None`] otherwise.
@@ -303,7 +342,7 @@ impl Generator {
         // 5. Let methodContext be the running execution context.
         // 6. Suspend methodContext.
         // 7. Set generator.[[GeneratorState]] to executing.
-        let (mut generator_context, first_execution) =
+        let (generator_context, first_execution) =
             match std::mem::replace(&mut r#gen.state, GeneratorState::Executing) {
                 GeneratorState::Executing => {
                     return Err(JsNativeError::typ()
@@ -326,7 +365,7 @@ impl Generator {
 
         drop(r#gen);
 
-        let record = generator_context.resume(
+        let (generator_context, record) = generator_context.resume(
             (!first_execution).then_some(value),
             GeneratorResumeKind::Normal,
             context,
@@ -384,35 +423,35 @@ impl Generator {
         // 6. Let methodContext be the running execution context.
         // 7. Suspend methodContext.
         // 8. Set generator.[[GeneratorState]] to executing.
-        let mut generator_context =
-            match std::mem::replace(&mut r#gen.state, GeneratorState::Executing) {
-                GeneratorState::Executing => {
-                    return Err(JsNativeError::typ()
-                        .with_message("Generator should not be executing")
-                        .into());
+        let generator_context = match std::mem::replace(&mut r#gen.state, GeneratorState::Executing)
+        {
+            GeneratorState::Executing => {
+                return Err(JsNativeError::typ()
+                    .with_message("Generator should not be executing")
+                    .into());
+            }
+            // 2. If state is suspendedStart, then
+            // 3. If state is completed, then
+            GeneratorState::SuspendedStart { .. } | GeneratorState::Completed => {
+                // a. Set generator.[[GeneratorState]] to completed.
+                r#gen.state = GeneratorState::Completed;
+
+                // b. Once a generator enters the completed state it never leaves it and its
+                // associated execution context is never resumed. Any execution state associated
+                // with generator can be discarded at this point.
+
+                // a. If abruptCompletion.[[Type]] is return, then
+                if let Ok(value) = abrupt_completion {
+                    // i. Return CreateIterResultObject(abruptCompletion.[[Value]], true).
+                    let value = create_iter_result_object(value, true, context);
+                    return Ok(value);
                 }
-                // 2. If state is suspendedStart, then
-                // 3. If state is completed, then
-                GeneratorState::SuspendedStart { .. } | GeneratorState::Completed => {
-                    // a. Set generator.[[GeneratorState]] to completed.
-                    r#gen.state = GeneratorState::Completed;
 
-                    // b. Once a generator enters the completed state it never leaves it and its
-                    // associated execution context is never resumed. Any execution state associated
-                    // with generator can be discarded at this point.
-
-                    // a. If abruptCompletion.[[Type]] is return, then
-                    if let Ok(value) = abrupt_completion {
-                        // i. Return CreateIterResultObject(abruptCompletion.[[Value]], true).
-                        let value = create_iter_result_object(value, true, context);
-                        return Ok(value);
-                    }
-
-                    // b. Return Completion(abruptCompletion).
-                    return abrupt_completion;
-                }
-                GeneratorState::SuspendedYield { context } => context,
-            };
+                // b. Return Completion(abruptCompletion).
+                return abrupt_completion;
+            }
+            GeneratorState::SuspendedYield { context } => context,
+        };
 
         // 9. Push genContext onto the execution context stack; genContext is now the running execution context.
         // 10. Resume the suspended evaluation of genContext using abruptCompletion as the result of the operation that suspended it. Let result be the completion record returned by the resumed computation.
@@ -425,7 +464,8 @@ impl Generator {
             Err(err) => (err.to_opaque(context), GeneratorResumeKind::Throw),
         };
 
-        let record = generator_context.resume(Some(value), resume_kind, context);
+        let (generator_context, record) =
+            generator_context.resume(Some(value), resume_kind, context);
 
         let mut r#gen = generator_obj.downcast_mut::<Self>().ok_or_else(|| {
             JsNativeError::typ().with_message("generator resumed on non generator object")

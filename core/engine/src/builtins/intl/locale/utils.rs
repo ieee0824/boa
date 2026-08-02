@@ -119,6 +119,9 @@ pub(crate) fn canonicalize_locale_list(
         // a. Let O be ? ToObject(locales).
         locales.to_object(context)?
     };
+    // `o` is read across calls that may allocate and collect. Keep the temporary
+    // array/object alive while canonicalizing each locale entry.
+    let _o_root = o.clone().root();
 
     // 5. Let len be ? ToLength(? Get(O, "length")).
     let len = o.length_of_array_like(context)?;

@@ -32,6 +32,38 @@ impl<T: Trace + ?Sized> Rooted<T> {
         &self.inner
     }
 
+    /// Returns whether this allocation contains a value of type `U`.
+    #[must_use]
+    pub fn is<U: Trace + 'static>(this: &Self) -> bool {
+        Gc::is::<U>(&this.inner)
+    }
+
+    /// Returns whether two roots point to the same allocation.
+    #[must_use]
+    pub fn ptr_eq<U: Trace + ?Sized>(this: &Self, other: &Rooted<U>) -> bool {
+        Gc::ptr_eq(&this.inner, &other.inner)
+    }
+
+    /// Reinterprets a root as another allocation type.
+    ///
+    /// # Safety
+    /// The caller must ensure the cast is valid.
+    #[must_use]
+    pub unsafe fn cast_unchecked<U: Trace + 'static>(this: Self) -> Rooted<U> {
+        // SAFETY: Forwarded from this function's contract.
+        unsafe { GcEdge::cast_unchecked::<U>(this.into_edge()) }.root()
+    }
+
+    /// Downcasts this root when its allocation contains `U`.
+    #[must_use]
+    pub fn downcast<U: Trace + 'static>(this: Self) -> Option<Rooted<U>> {
+        if !Self::is::<U>(&this) {
+            return None;
+        }
+        // SAFETY: The allocation type was checked above.
+        Some(unsafe { Self::cast_unchecked::<U>(this) })
+    }
+
     /// Converts this external root into an unregistered heap edge.
     #[must_use]
     pub fn into_edge(self) -> GcEdge<T> {

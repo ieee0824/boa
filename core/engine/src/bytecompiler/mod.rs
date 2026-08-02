@@ -478,6 +478,12 @@ pub struct ByteCompiler<'ctx> {
 
     pub(crate) constants: ThinVec<Constant>,
 
+    /// Native roots for function constants while this compiler is still building
+    /// the containing code block. The constant table stores heap edges because it
+    /// becomes traced data, but compilation itself can allocate after a nested
+    /// function is added and before the containing `CodeBlock` is published.
+    function_roots: Vec<Rooted<CodeBlock>>,
+
     /// Locators for all bindings in the codeblock.
     pub(crate) bindings: Vec<BindingLocator>,
 
@@ -585,6 +591,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             bytecode: ByteCodeEmitter::new(),
             source_map_builder: SourceMapBuilder::default(),
             constants: ThinVec::default(),
+            function_roots: Vec::default(),
             bindings: Vec::default(),
             local_binding_registers: FxHashMap::default(),
             this_mode: ThisMode::Global,
@@ -742,8 +749,13 @@ impl<'ctx> ByteCompiler<'ctx> {
     #[must_use]
     pub(crate) fn push_function_to_constants(&mut self, function: Rooted<CodeBlock>) -> u32 {
         let index = self.constants.len() as u32;
+        self.function_roots.push(function);
+        let function = self
+            .function_roots
+            .last()
+            .expect("the function root was just stored");
         self.constants
-            .push(Constant::Function(function.into_edge()));
+            .push(Constant::Function(function.as_gc().clone().into()));
         index
     }
 

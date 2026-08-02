@@ -2,7 +2,7 @@
 
 use std::{fmt, future::Future, pin::Pin, task};
 
-use boa_gc::{Finalize, Gc, GcRefCell, Trace};
+use boa_gc::{Finalize, GcRefCell, Rooted, Trace};
 
 use crate::{JsObject, JsResult, JsValue};
 
@@ -12,11 +12,12 @@ use crate::{JsObject, JsResult, JsValue};
 /// asynchronous script evaluation that created it. The completion is accepted exactly once.
 #[derive(Clone, Trace, Finalize)]
 pub struct NativeCallSuspension {
-    inner: Gc<GcRefCell<Inner>>,
+    #[unsafe_ignore_trace]
+    inner: Rooted<GcRefCell<Inner>>,
 }
 
 struct NativeCallWait {
-    inner: Gc<GcRefCell<Inner>>,
+    inner: Rooted<GcRefCell<Inner>>,
 }
 
 impl fmt::Debug for NativeCallSuspension {
@@ -51,7 +52,7 @@ impl std::error::Error for NativeCallAlreadyResumed {}
 impl NativeCallSuspension {
     pub(crate) fn new(origin: JsObject, placeholder: JsObject) -> Self {
         Self {
-            inner: Gc::new(GcRefCell::new(Inner {
+            inner: Rooted::new(GcRefCell::new(Inner {
                 origin: Some(origin),
                 placeholder: Some(placeholder),
                 result: None,

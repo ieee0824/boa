@@ -1265,6 +1265,7 @@ impl JsNativeError {
             prototype,
             Error::with_shadow_entry(tag, position.0.clone()),
         );
+        let _o_root = o.clone().root();
 
         o.create_non_enumerable_data_property_or_throw(
             js_string!("message"),

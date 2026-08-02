@@ -19,7 +19,7 @@ use crate::{
     error::JsNativeError,
     js_string,
     object::{
-        CONSTRUCTOR, IndexedProperties, JsData, JsObject,
+        CONSTRUCTOR, IndexedProperties, JsData, JsObject, RootedJsObject,
         internal_methods::{
             InternalMethodPropertyContext, InternalObjectMethods, ORDINARY_INTERNAL_METHODS,
             get_prototype_from_constructor, ordinary_define_own_property,
@@ -403,6 +403,13 @@ impl Array {
         // 5. Return array.
         // NOTE: This deviates from the spec, but it should have the same behaviour.
         let elements: ThinVec<_> = elements.into_iter().collect();
+        // The input list is native storage. Keep object values rooted while the
+        // destination array allocation publishes the list into the GC heap.
+        let _element_roots: Vec<RootedJsObject> = elements
+            .iter()
+            .filter_map(JsValue::as_object)
+            .map(JsObject::root)
+            .collect();
         let length = elements.len();
 
         context
@@ -574,6 +581,7 @@ impl Array {
                 Some(constructor) => constructor.construct(&[len.into()], None, context)?,
                 _ => Self::array_create(len, None, context)?,
             };
+            let _a_root = a.clone().root();
 
             // 11. Let k be 0.
             // 12. Repeat, while k < len,
@@ -614,6 +622,7 @@ impl Array {
             Some(constructor) => constructor.construct(&[], None, context)?,
             _ => Self::array_create(0, None, context)?,
         };
+        let _a_root = a.clone().root();
 
         // c. Let iteratorRecord be ? GetIteratorFromMethod(items, usingIterator).
         let mut iterator_record = items.get_iterator_from_method(&using_iterator, context)?;
@@ -710,6 +719,7 @@ impl Array {
             Some(constructor) => constructor.construct(&[len.into()], None, context)?,
             _ => Self::array_create(len as u64, None, context)?,
         };
+        let _a_root = a.clone().root();
 
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
@@ -948,6 +958,7 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        let _o_root = o.clone().root();
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
         // 3. If IsCallable(callbackfn) is false, throw a TypeError exception.
@@ -1410,6 +1421,7 @@ impl Array {
 
         // 4. Let A be ? ArraySpeciesCreate(O, len).
         let a = Self::array_species_create(&o, len, context)?;
+        let _a_root = a.clone().root();
 
         let this_arg = args.get_or_undefined(1);
 
@@ -1780,6 +1792,7 @@ impl Array {
 
         // 5. Let A be ArraySpeciesCreate(O, 0)
         let a = Self::array_species_create(&o, 0, context)?;
+        let _a_root = a.clone().root();
 
         // 6. Perform ? FlattenIntoArray(A, O, sourceLen, 0, depthNum)
         Self::flatten_into_array(
@@ -1827,6 +1840,7 @@ impl Array {
 
         // 4. Let A be ? ArraySpeciesCreate(O, 0).
         let a = Self::array_species_create(&o, 0, context)?;
+        let _a_root = a.clone().root();
 
         // 5. Perform ? FlattenIntoArray(A, O, sourceLen, 0, 1, mapperFunction, thisArg).
         Self::flatten_into_array(

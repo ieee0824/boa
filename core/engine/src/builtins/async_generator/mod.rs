@@ -127,6 +127,7 @@ impl AsyncGenerator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let result be Completion(AsyncGeneratorValidate(generator, empty)).
         // 4. IfAbruptRejectPromise(result, promiseCapability).
@@ -199,6 +200,7 @@ impl AsyncGenerator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let result be Completion(AsyncGeneratorValidate(generator, empty)).
         // 4. IfAbruptRejectPromise(result, promiseCapability).
@@ -265,6 +267,7 @@ impl AsyncGenerator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 3. Let result be Completion(AsyncGeneratorValidate(generator, empty)).
         // 4. IfAbruptRejectPromise(result, promiseCapability).
@@ -384,6 +387,7 @@ impl AsyncGenerator {
 
         // 4. Let promiseCapability be next.[[Capability]].
         let promise_capability = &next.capability;
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 5. Let value be completion.[[Value]].
         match completion {
@@ -450,7 +454,7 @@ impl AsyncGenerator {
         ));
 
         // 2. Let genContext be generator.[[AsyncGeneratorContext]].
-        let mut generator_context = generator
+        let generator_context = generator
             .borrow_mut()
             .data_mut()
             .context
@@ -469,7 +473,8 @@ impl AsyncGenerator {
         // 3. Let callerContext be the running execution context.
         // 4. Suspend callerContext.
         // 6. Push genContext onto the execution context stack; genContext is now the running execution context.
-        let result = generator_context.resume(Some(value), resume_kind, context);
+        let (generator_context, result) =
+            generator_context.resume(Some(value), resume_kind, context);
 
         // 7. Resume the suspended evaluation of genContext using completion as the result of the operation that suspended it. Let result be the Completion Record returned by the resumed computation.
         generator.borrow_mut().data_mut().context = Some(generator_context);
@@ -528,6 +533,7 @@ impl AsyncGenerator {
                 return;
             }
         };
+        let _promise_root = promise.clone().root();
 
         // 9. Assert: promiseCompletion is a normal completion.
         // 10. Let promise be promiseCompletion.[[Value]].

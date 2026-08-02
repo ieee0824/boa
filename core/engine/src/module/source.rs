@@ -952,6 +952,7 @@ impl SourceTextModule {
             context,
         )
         .expect("capability creation must always succeed when using the `%Promise%` intrinsic");
+        let _capability_roots = capability.root_handles();
 
         // 8. Let result be Completion(InnerModuleEvaluation(module, stack, 0)).
         let ModuleKind::SourceText(module_src) = module.kind() else {
@@ -1324,6 +1325,7 @@ impl SourceTextModule {
             context,
         )
         .expect("cannot fail for the %Promise% intrinsic");
+        let capability_roots = capability.root_handles();
 
         // 4. Let fulfilledClosure be a new Abstract Closure with no parameters that captures module and performs the following steps when called:
         // 5. Let onFulfilled be CreateBuiltinFunction(fulfilledClosure, 0, "", « »).
@@ -1375,6 +1377,7 @@ impl SourceTextModule {
         let realm = context.realm().clone();
         context.enqueue_job(
             NativeAsyncJob::new_exclusive(async move |context| {
+                let _capability_roots = capability_roots;
                 let mut context = context.take();
                 let old_realm = context.enter_realm(realm);
                 let module = module.to_rooted();
@@ -1759,7 +1762,7 @@ impl SourceTextModule {
         for (index, locator) in functions {
             let code = codeblock.constant_function(index as usize);
 
-            let function = create_function_object_fast(code, context);
+            let function = create_function_object_fast(&code, context);
 
             context.vm.environments.put_lexical_value(
                 locator.scope(),

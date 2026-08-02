@@ -108,6 +108,7 @@ impl AsyncFromSyncIterator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 5. If value is present, then
         //     a. Let result be Completion(IteratorNext(syncIteratorRecord, value)).
@@ -147,6 +148,7 @@ impl AsyncFromSyncIterator {
             .clone();
         // 5. Let syncIterator be syncIteratorRecord.[[Iterator]].
         let sync_iterator = sync_iterator_record.iterator().clone();
+        let _sync_iterator_root = sync_iterator.clone().root();
 
         // 3. Let promiseCapability be ! NewPromiseCapability(%Promise%).
         let promise_capability = PromiseCapability::new(
@@ -154,6 +156,7 @@ impl AsyncFromSyncIterator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 6. Let return be Completion(GetMethod(syncIterator, "return")).
         let r#return = sync_iterator.get_method(js_string!("return"), context);
@@ -229,6 +232,7 @@ impl AsyncFromSyncIterator {
             .clone();
         // 5. Let syncIterator be syncIteratorRecord.[[Iterator]].
         let sync_iterator = sync_iterator_record.iterator().clone();
+        let _sync_iterator_root = sync_iterator.clone().root();
 
         // 3. Let promiseCapability be ! NewPromiseCapability(%Promise%).
         let promise_capability = PromiseCapability::new(
@@ -236,6 +240,7 @@ impl AsyncFromSyncIterator {
             context,
         )
         .expect("cannot fail with promise constructor");
+        let _promise_capability_roots = promise_capability.root_handles();
 
         // 6. Let throw be Completion(GetMethod(syncIterator, "throw")).
         let throw = sync_iterator.get_method(js_string!("throw"), context);
@@ -352,6 +357,7 @@ impl AsyncFromSyncIterator {
 
         // 8. IfAbruptRejectPromise(valueWrapper, promiseCapability).
         let value_wrapper = if_abrupt_reject_promise!(value_wrapper, promise_capability, context);
+        let _value_wrapper_root = value_wrapper.clone().root();
 
         // 9. Let unwrap be a new Abstract Closure with parameters (value)
         // that captures done and performs the following steps when called:

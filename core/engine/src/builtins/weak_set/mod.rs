@@ -85,11 +85,14 @@ impl BuiltInConstructor for WeakSet {
         // 3. Set set.[[WeakSetData]] to a new empty List.
         let prototype =
             get_prototype_from_constructor(new_target, StandardConstructors::weak_set, context)?;
+        let set_data = NativeWeakSet::new();
+        let _set_data_root = set_data.root();
         let weak_set = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
-            NativeWeakSet::new(),
+            set_data,
         );
+        let _weak_set_root = weak_set.clone().root();
 
         // 4. If iterable is either undefined or null, return set.
         let iterable = args.get_or_undefined(0);

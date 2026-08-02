@@ -130,7 +130,14 @@ impl MapIterator {
                 }
             };
             if let Some((key, value)) = e {
-                let item = match item_kind {
+                // Put the map back and release the iterator's borrow before building the
+                // result. Allocating can collect, and the collector cannot trace through
+                // a cell that is being written to, so this iterator's own fields — the
+                // map among them — would be invisible to it.
+                map_iterator.iterated_map = Some(obj);
+                drop(map_iterator);
+
+                return match item_kind {
                     PropertyNameKind::Key => Ok(create_iter_result_object(key, false, context)),
                     PropertyNameKind::Value => Ok(create_iter_result_object(value, false, context)),
                     PropertyNameKind::KeyAndValue => {
@@ -138,11 +145,10 @@ impl MapIterator {
                         Ok(create_iter_result_object(result.into(), false, context))
                     }
                 };
-                map_iterator.iterated_map = Some(obj);
-                return item;
             }
         }
 
+        drop(map_iterator);
         Ok(create_iter_result_object(
             JsValue::undefined(),
             true,

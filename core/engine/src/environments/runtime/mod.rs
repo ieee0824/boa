@@ -3,7 +3,7 @@ use crate::{
     object::{JsObject, PrivateName},
 };
 use boa_ast::scope::{BindingLocator, BindingLocatorScope, Scope};
-use boa_gc::{Finalize, GcEdge, Rooted, Trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, Tracer};
 
 mod declarative;
 mod private;
@@ -60,6 +60,17 @@ impl Environment {
 }
 
 impl EnvironmentStack {
+    /// Traces the unrooted object environments held by the native VM stack.
+    pub(crate) unsafe fn trace_native_roots(&self, tracer: &mut Tracer) {
+        for environment in &self.stack {
+            if let Environment::Object(object) = environment {
+                // SAFETY: The native environment stack remains live while the VM
+                // root provider is being traced.
+                unsafe { object.trace(tracer) };
+            }
+        }
+    }
+
     /// Create a new environment stack.
     pub(crate) fn new(global: Rooted<DeclarativeEnvironment>) -> Self {
         assert!(matches!(

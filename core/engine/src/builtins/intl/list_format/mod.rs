@@ -17,7 +17,7 @@ use crate::{
     },
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     js_string,
-    object::{JsObject, internal_methods::get_prototype_from_constructor},
+    object::{JsObject, RootedJsObject, internal_methods::get_prototype_from_constructor},
     property::Attribute,
     realm::Realm,
     string::StaticJsStrings,
@@ -374,6 +374,7 @@ impl ListFormat {
         // 2. Let result be ! ArrayCreate(0).
         let result = Array::array_create(0, None, context)
             .expect("creating an empty array with default proto must not fail");
+        let _result_root: RootedJsObject = result.clone().root();
 
         // 3. Let n be 0.
         // 4. For each Record { [[Type]], [[Value]] } part in parts, do
@@ -384,6 +385,7 @@ impl ListFormat {
                 .templates()
                 .ordinary_object()
                 .create(OrdinaryObject, vec![]);
+            let _o_root: RootedJsObject = o.clone().root();
 
             // b. Perform ! CreateDataPropertyOrThrow(O, "type", part.[[Type]]).
             o.create_data_property_or_throw(js_string!("type"), js_string!(part.typ()), context)

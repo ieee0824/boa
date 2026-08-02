@@ -213,13 +213,17 @@ impl JsData for OrdinaryFunction {
 
 impl OrdinaryFunction {
     pub(crate) fn new(
-        code: Rooted<CodeBlock>,
+        code: &Rooted<CodeBlock>,
         environments: &EnvironmentStack,
         script_or_module: Option<ActiveRunnable>,
         realm: &Realm,
     ) -> Self {
         Self {
-            code: code.into_edge(),
+            // Keep the caller's rooted handle alive while the containing object is
+            // assembled. Building its shape can allocate before the new object has
+            // been published to the heap, so consuming the only root here would let
+            // the code block be reclaimed in that window.
+            code: code.as_gc().clone().into(),
             environments: environments.to_edges(),
             home_object: None,
             script_or_module: script_or_module.map(|runnable| runnable.to_edge()),
@@ -680,7 +684,7 @@ impl BuiltInFunctionObject {
             );
 
         let environments = context.vm.environments.pop_to_global();
-        let function_object = crate::vm::create_function_object(code, prototype, context);
+        let function_object = crate::vm::create_function_object(&code, prototype, context);
         context.vm.environments.extend(environments);
 
         Ok(function_object)
@@ -1113,7 +1117,9 @@ fn function_construct(
     let env_fp = environments.len() as u32;
 
     let new_target = context.vm.stack.pop();
+    let _new_target_root = new_target.as_object().map(JsObject::root);
 
+    let mut _this_root = None;
     let this = if code.is_derived_constructor() {
         None
     } else {
@@ -1123,11 +1129,13 @@ fn function_construct(
         // see <https://tc39.es/ecma262/#sec-getprototypefromconstructor>
         let prototype =
             get_prototype_from_constructor(&new_target, StandardConstructors::object, context)?;
+        let _prototype_root = prototype.clone().root();
         let this = JsObject::from_proto_and_data_with_shared_shape(
             context.root_shape(),
             prototype,
             OrdinaryObject,
         );
+        _this_root = Some(this.clone().root());
 
         this.initialize_instance_elements(this_function_object, context)?;
 

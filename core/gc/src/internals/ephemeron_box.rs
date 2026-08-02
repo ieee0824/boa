@@ -74,14 +74,6 @@ impl<K: Trace + ?Sized, V: Trace> EphemeronBox<K, V> {
         unsafe { self.key_ptr().map(|data| data.as_ref()) }
     }
 
-    /// Marks this `EphemeronBox` as live.
-    ///
-    /// This doesn't mark the inner value of the ephemeron. [`ErasedEphemeronBox::trace`]
-    /// does this, and it's called by the garbage collector on demand.
-    pub(crate) unsafe fn mark(&self) {
-        self.header.mark();
-    }
-
     /// Sets the inner data of the `EphemeronBox` to the specified key and value.
     ///
     /// # Safety
@@ -97,21 +89,6 @@ impl<K: Trace + ?Sized, V: Trace> EphemeronBox<K, V> {
             });
         }
     }
-
-    #[inline]
-    pub(crate) fn inc_ref_count(&self) {
-        self.header.inc_ref_count();
-    }
-
-    #[inline]
-    pub(crate) fn dec_ref_count(&self) {
-        self.header.dec_ref_count();
-    }
-
-    #[inline]
-    pub(crate) fn inc_non_root_count(&self) {
-        self.header.inc_non_root_count();
-    }
 }
 
 pub(crate) trait ErasedEphemeronBox {
@@ -124,7 +101,10 @@ pub(crate) trait ErasedEphemeronBox {
     /// "successfully traced".
     unsafe fn trace(&self, tracer: &mut Tracer) -> bool;
 
-    fn trace_non_roots(&self);
+    /// Traces the value for a minor collection when the key is known to be live.
+    /// Old keys are treated conservatively because their liveness is not decided
+    /// by a minor collection.
+    unsafe fn minor_trace(&self, tracer: &mut Tracer) -> bool;
 
     /// Runs the finalization logic of the `EphemeronBox`'s held value, if the key is still live,
     /// and clears its contents.
@@ -163,14 +143,25 @@ impl<K: Trace + ?Sized, V: Trace> ErasedEphemeronBox for EphemeronBox<K, V> {
         is_key_marked
     }
 
-    fn trace_non_roots(&self) {
-        // SAFETY: Tracing always executes before collecting, meaning this cannot cause
-        // use after free.
-        unsafe {
-            if let Some(value) = self.value() {
-                value.trace_non_roots();
-            }
+    unsafe fn minor_trace(&self, tracer: &mut Tracer) -> bool {
+        // SAFETY: the garbage collector owns the ephemeron while it is being
+        // inspected, so its data cannot be mutated concurrently.
+        let data = unsafe { &*self.data.get() };
+        let Some(data) = data.as_ref() else {
+            return true;
+        };
+
+        // A minor collection does not determine whether an old key is dead.
+        // Keeping its value alive is conservative and preserves ephemeron
+        // semantics until the next major collection.
+        let key = unsafe { data.key.as_ref() };
+        let key_is_live = key.header.is_old() || key.header.is_minor_marked();
+        if key_is_live {
+            // SAFETY: `data.value` is immutable during collection and has a
+            // valid Trace implementation.
+            unsafe { data.value.trace(tracer) };
         }
+        key_is_live
     }
 
     fn finalize_and_clear(&self) {

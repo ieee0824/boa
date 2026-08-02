@@ -17,16 +17,6 @@ pub(crate) const fn vtable_of<T: Trace + 'static>() -> &'static VTable {
             }
         }
 
-        unsafe fn trace_non_roots_fn(this: GcErasedPointer) {
-            // SAFETY: The caller must ensure that the passed erased pointer is `GcBox<Self>`.
-            let value = unsafe { this.cast::<GcBox<Self>>().as_ref().value() };
-
-            // SAFETY: The implementor must ensure that `trace_non_roots` is correctly implemented.
-            unsafe {
-                Self::trace_non_roots(value);
-            }
-        }
-
         unsafe fn run_finalizer_fn(this: GcErasedPointer) {
             // SAFETY: The caller must ensure that the passed erased pointer is `GcBox<Self>`.
             let value = unsafe { this.cast::<GcBox<Self>>().as_ref().value() };
@@ -53,7 +43,6 @@ pub(crate) const fn vtable_of<T: Trace + 'static>() -> &'static VTable {
     impl<T: Trace + 'static> HasVTable for T {
         const VTABLE: &'static VTable = &VTable {
             trace_fn: T::trace_fn,
-            trace_non_roots_fn: T::trace_non_roots_fn,
             run_finalizer_fn: T::run_finalizer_fn,
             drop_fn: T::drop_fn,
             type_id_fn: T::type_id_fn,
@@ -65,15 +54,12 @@ pub(crate) const fn vtable_of<T: Trace + 'static>() -> &'static VTable {
 }
 
 pub(crate) type TraceFn = unsafe fn(this: GcErasedPointer, tracer: &mut Tracer);
-pub(crate) type TraceNonRootsFn = unsafe fn(this: GcErasedPointer);
 pub(crate) type RunFinalizerFn = unsafe fn(this: GcErasedPointer);
 pub(crate) type DropFn = unsafe fn(this: GcErasedPointer);
 pub(crate) type TypeIdFn = fn() -> TypeId;
-
 #[derive(Debug)]
 pub(crate) struct VTable {
     trace_fn: TraceFn,
-    trace_non_roots_fn: TraceNonRootsFn,
     run_finalizer_fn: RunFinalizerFn,
     drop_fn: DropFn,
     type_id_fn: TypeIdFn,
@@ -83,10 +69,6 @@ pub(crate) struct VTable {
 impl VTable {
     pub(crate) fn trace_fn(&self) -> TraceFn {
         self.trace_fn
-    }
-
-    pub(crate) fn trace_non_roots_fn(&self) -> TraceNonRootsFn {
-        self.trace_non_roots_fn
     }
 
     pub(crate) fn run_finalizer_fn(&self) -> RunFinalizerFn {

@@ -164,6 +164,7 @@ where
 {
     fn try_into_js(&self, context: &mut Context) -> JsResult<JsValue> {
         let arr = crate::object::JsArray::new(context);
+        let _arr_root = crate::JsObject::from(arr.clone()).root();
         for value in self {
             let value = value.try_into_js(context)?;
             arr.push(value, context)?;
@@ -178,6 +179,7 @@ macro_rules! impl_try_into_js_for_tuples {
             fn try_into_js(&self, context: &mut Context) -> JsResult<JsValue> {
                 let ($($names,)+) = self;
                 let arr = crate::object::JsArray::new(context);
+                let _arr_root = crate::JsObject::from(arr.clone()).root();
                 $(arr.push($names.try_into_js(context)?, context)?;)+
                 Ok(arr.into())
             }
@@ -209,6 +211,7 @@ where
 {
     fn try_into_js(&self, context: &mut Context) -> JsResult<JsValue> {
         let set = crate::object::JsSet::new(context);
+        let _set_root = crate::JsObject::from(set.clone()).root();
         for value in self {
             let value = value.try_into_js(context)?;
             set.add(value, context)?;
@@ -224,6 +227,7 @@ where
 {
     fn try_into_js(&self, context: &mut Context) -> JsResult<JsValue> {
         let map = crate::object::JsMap::new(context);
+        let _map_root = crate::JsObject::from(map.clone()).root();
         for (key, value) in self {
             let key = key.try_into_js(context)?;
             let value = value.try_into_js(context)?;

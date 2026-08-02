@@ -22,7 +22,7 @@ use crate::{
     property::{PropertyDescriptor, PropertyKey},
     value::PreferredType,
 };
-use boa_gc::{self, Finalize, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace};
+use boa_gc::{self, Finalize, GcEdge, GcRef, GcRefCell, GcRefMut, Rooted, Trace, Tracer};
 use core::ptr::fn_addr_eq;
 use std::collections::HashSet;
 use std::{
@@ -31,6 +31,7 @@ use std::{
     error::Error,
     fmt::{self, Debug, Display},
     hash::Hash,
+    ops::Deref,
     result::Result as StdResult,
 };
 use thin_vec::ThinVec;
@@ -71,6 +72,49 @@ impl<T: NativeObject> Clone for JsObject<T> {
             inner: self.inner.clone(),
         }
     }
+}
+
+/// A heap-external, explicitly registered JavaScript object handle.
+pub(crate) struct RootedJsObject<T: NativeObject = ErasedObjectData> {
+    inner: Rooted<VTableObject<T>>,
+    edge: JsObject<T>,
+}
+
+impl<T: NativeObject> Clone for RootedJsObject<T> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            edge: self.edge.clone(),
+        }
+    }
+}
+
+impl<T: NativeObject> Debug for RootedJsObject<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RootedJsObject")
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: NativeObject> Deref for RootedJsObject<T> {
+    type Target = JsObject<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.edge
+    }
+}
+
+impl<T: NativeObject> Finalize for RootedJsObject<T> {}
+
+// SAFETY: The root registration keeps the allocation alive. Tracing the edge as
+// well makes this wrapper safe to embed in a traced native record.
+unsafe impl<T: NativeObject> Trace for RootedJsObject<T> {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        unsafe { self.edge.trace(tracer) };
+    }
+
+    fn run_finalizer(&self) {}
 }
 
 /// An `Object` that has an additional `vtable` with its internal methods.
@@ -573,6 +617,9 @@ Cannot both specify accessors and a value or writable attribute",
     where
         K: Into<PropertyKey>,
     {
+        let _target_root = self.clone().root();
+        let _source_root = source.as_object().map(JsObject::root);
+
         let context = &mut InternalMethodPropertyContext::new(context);
 
         // 1. Assert: Type(target) is Object.
@@ -586,6 +633,7 @@ Cannot both specify accessors and a value or writable attribute",
         let from = source
             .to_object(context)
             .expect("function ToObject should never complete abruptly here");
+        let _from_root = from.clone().root();
 
         // 5. Let keys be ? from.[[OwnPropertyKeys]]().
         // 6. For each element nextKey of keys, do
@@ -615,6 +663,7 @@ Cannot both specify accessors and a value or writable attribute",
                 {
                     // 1. Let propValue be ? Get(from, nextKey).
                     let prop_value = from.__get__(&key, from.clone().into(), context)?;
+                    let _prop_value_root = prop_value.as_object().map(JsObject::root);
 
                     // 2. Perform ! CreateDataPropertyOrThrow(target, nextKey, propValue).
                     self.create_data_property_or_throw(key, prop_value, context)
@@ -870,6 +919,22 @@ impl<T: NativeObject> JsObject<T> {
         let inner = unsafe { GcEdge::cast_unchecked::<ErasedVTableObject>(self.inner) };
 
         JsObject { inner }
+    }
+
+    /// Promotes this heap edge to an explicitly registered external handle.
+    pub(crate) fn root(self) -> RootedJsObject<T> {
+        let inner = self.inner.root();
+        let edge = JsObject {
+            inner: GcEdge::from(inner.as_gc().clone()),
+        };
+        RootedJsObject { inner, edge }
+    }
+}
+
+impl<T: NativeObject> RootedJsObject<T> {
+    /// Clones this root as a heap edge while keeping the root registered.
+    pub(crate) fn to_edge(&self) -> JsObject<T> {
+        self.edge.clone()
     }
 }
 

@@ -149,6 +149,7 @@ impl BuiltInConstructor for Map {
             prototype,
             <OrderedMap<JsValue>>::new(),
         );
+        let _map_root = map.clone().root();
 
         // 4. If iterable is either undefined or null, return map.
         let iterable = match args.get_or_undefined(0) {

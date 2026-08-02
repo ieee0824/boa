@@ -127,23 +127,24 @@ impl ForInIterator {
                 {
                     iterator.visited_keys.insert(r.clone());
                     if desc.expect_enumerable() {
+                        // Released before building the result. Allocating can collect,
+                        // and the collector cannot trace through a cell that is being
+                        // written to, so this iterator's own fields would be invisible
+                        // to it.
+                        drop(iterator);
                         return Ok(create_iter_result_object(JsValue::new(r), false, context));
                     }
                 }
             }
-            let proto = object.prototype().clone();
-            match proto {
-                Some(o) => {
-                    object = o;
-                }
-                _ => {
-                    return Ok(create_iter_result_object(
-                        JsValue::undefined(),
-                        true,
-                        context,
-                    ));
-                }
-            }
+            let Some(proto) = object.prototype().clone() else {
+                drop(iterator);
+                return Ok(create_iter_result_object(
+                    JsValue::undefined(),
+                    true,
+                    context,
+                ));
+            };
+            object = proto;
             iterator.object = JsValue::new(object.clone());
             iterator.object_was_visited = false;
         }

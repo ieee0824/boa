@@ -1060,7 +1060,7 @@ impl Display for CodeBlock {
 ///
 /// This is slower than direct object template construction that is done in [`create_function_object_fast`].
 pub(crate) fn create_function_object(
-    code: Rooted<CodeBlock>,
+    code: &Rooted<CodeBlock>,
     prototype: JsObject,
     context: &mut Context,
 ) -> JsObject {
@@ -1132,7 +1132,7 @@ pub(crate) fn create_function_object(
 /// because it constructs the function from a pre-initialized object template,
 /// with all the properties and prototype set.
 pub(crate) fn create_function_object_fast(
-    code: Rooted<CodeBlock>,
+    code: &Rooted<CodeBlock>,
     context: &mut Context,
 ) -> JsObject {
     let name: JsValue = code.name().clone().into();

@@ -226,6 +226,7 @@ impl BuiltInConstructor for Set {
             prototype,
             OrderedSet::default(),
         );
+        let _set_root = set.clone().root();
 
         // 4. If iterable is either undefined or null, return set.
         let iterable = args.get_or_undefined(0);
@@ -279,6 +280,7 @@ impl Set {
     {
         // Create empty Set
         let set = Self::set_create(None, context);
+        let _set_root = set.clone().root();
         // For each element e of elements, do
         for elem in elements {
             Self::add(&set.clone().into(), &[elem], context)
@@ -891,6 +893,7 @@ impl Set {
                 )
                 .into());
         };
+        let _result_set_root = result_set.as_object().map(JsObject::root);
 
         // 6. Let next be not-started.
         // 7. Repeat, while next is not done,
@@ -976,6 +979,7 @@ impl Set {
                 .with_message("Method Set.prototype.union called on incompatible receiver")
                 .into());
         };
+        let _result_set_root = result_set.as_object().map(JsObject::root);
 
         // 6. Let next be not-started.
         // 7. Repeat, while next is not done,

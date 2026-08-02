@@ -2,8 +2,8 @@ use crate::vm::call_frame::CallFrameLocation;
 use crate::vm::source_info::SourcePath;
 use crate::vm::{CallFrame, CompletionRecord, NativeCallBoundary, NativeCallBoundaryTarget};
 use crate::{
-    Context, JsNativeError, JsNativeErrorKind, JsResult, JsString, JsValue, Module, NativeFunction,
-    Script, TestAction,
+    Context, JsNativeError, JsNativeErrorKind, JsObject, JsResult, JsString, JsValue, Module,
+    NativeFunction, Script, TestAction,
     context::HostHooks,
     job::{
         AsyncContext, BoxedFuture, Job, JobCallback, JobExecutor, JobExecutorFuture,
@@ -17,7 +17,7 @@ use crate::{
     run_test_actions, run_test_actions_with,
 };
 use boa_ast::Position;
-use boa_gc::{Gc, GcRefCell};
+use boa_gc::{Gc, GcRefCell, Rooted};
 use boa_macros::js_str;
 use boa_parser::Source;
 use futures_lite::future;
@@ -75,7 +75,9 @@ impl ModuleLoader for InMemoryModuleLoader {
 fn async_evaluation_resumes_a_native_call_exactly_once() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     let after = Gc::new(GcRefCell::new(false));
+    let _after_root = Rooted::from_gc(after.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -117,6 +119,7 @@ fn async_evaluation_resumes_a_native_call_exactly_once() {
 fn async_object_call_propagates_native_suspension() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -150,6 +153,7 @@ fn async_object_call_propagates_native_suspension() {
 fn native_continuation_resumes_synchronous_javascript_callback() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -240,6 +244,7 @@ fn native_continuation_keeps_synchronous_native_api_compatible() {
 fn direct_object_calls_complete_native_javascript_continuations() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -463,7 +468,9 @@ fn native_continuation_resumes_a_suspending_native_callback() {
 fn native_continuation_captures_remain_rooted_while_suspended() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     let resumed = Gc::new(GcRefCell::new(false));
+    let _resumed_root = Rooted::from_gc(resumed.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -683,8 +690,11 @@ fn nested_continuation_completion_restores_the_outer_active_guard() {
 fn nested_continuation_suspension_is_awaited_before_the_next_opcode() {
     let mut context = Context::default();
     let first_slot = Gc::new(GcRefCell::new(None));
+    let _first_slot_root = Rooted::from_gc(first_slot.clone());
     let second_slot = Gc::new(GcRefCell::new(None));
+    let _second_slot_root = Rooted::from_gc(second_slot.clone());
     let suspension_instruction = Gc::new(GcRefCell::new(None));
+    let _suspension_instruction_root = Rooted::from_gc(suspension_instruction.clone());
     let instruction_count = context.vm.instruction_count.clone();
     context
         .register_global_callable(
@@ -832,6 +842,7 @@ fn native_continuation_receives_throw_after_finally() {
 fn dropping_native_continuation_cancels_suspension_and_boundary() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -937,6 +948,7 @@ fn non_catchable_error_unwinds_native_continuation_boundary() {
 fn async_jobs_propagate_suspension_from_nested_promise_reaction() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -968,6 +980,7 @@ fn async_jobs_propagate_suspension_from_nested_promise_reaction() {
 fn direct_job_executor_run_jobs_async_enables_async_suspension() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -1085,8 +1098,9 @@ fn synchronous_jobs_reject_native_suspension_in_promise_callbacks() {
     ] {
         let mut context = Context::default();
         let slot = Gc::new(GcRefCell::new(None));
+        let _slot_root = Rooted::from_gc(slot.clone());
         context
-            .register_global_callable(js_string!("suspend"), 0, suspending_function(slot))
+            .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
             .unwrap();
         context.eval(Source::from_bytes(script)).unwrap();
 
@@ -1104,6 +1118,7 @@ fn synchronous_jobs_reject_native_suspension_in_promise_callbacks() {
 
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -1508,6 +1523,7 @@ fn native_accessor_suspension_replaces_its_result_register() {
 fn function_prototype_call_preserves_native_call_suspension() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
         .unwrap();
@@ -1533,6 +1549,7 @@ fn function_prototype_call_preserves_native_call_suspension() {
 fn reentrant_native_call_restores_the_outer_suspension_origin() {
     let mut context = Context::default();
     let slot = Gc::new(GcRefCell::new(None));
+    let _slot_root = Rooted::from_gc(slot.clone());
     context
         .register_global_builtin_callable(
             js_string!("innerNative"),
@@ -1656,6 +1673,7 @@ fn suspended_native_call_roots_its_resumed_object_until_evaluation_continues() {
     let resumed_object = ObjectInitializer::new(&mut context)
         .property(js_string!("answer"), 42, Attribute::all())
         .build();
+    let _resumed_object_root = resumed_object.clone().root();
     let script = Script::parse(Source::from_bytes("suspend().answer"), None, &mut context).unwrap();
     let mut evaluation = Box::pin(script.evaluate_async(&mut context));
 
@@ -2349,6 +2367,7 @@ fn cross_context_funtion_call() {
     assert!(result.is_ok());
     let result = result.unwrap();
     assert!(result.is_callable());
+    let _result_root = result.as_object().map(JsObject::root);
 
     let context2 = &mut Context::default();
 

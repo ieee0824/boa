@@ -35,6 +35,7 @@ impl SetClassPrototype {
             prototype,
             OrdinaryObject,
         );
+        let _proto_root = proto.clone().root();
         let class = context.vm.get_register(class.into()).clone();
 
         {

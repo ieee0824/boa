@@ -21,7 +21,7 @@ impl GetFunction {
             .frame()
             .code_block()
             .constant_function(index.into());
-        let function = create_function_object_fast(code, context);
+        let function = create_function_object_fast(&code, context);
         context.vm.set_register(dst.into(), function.into());
     }
 }

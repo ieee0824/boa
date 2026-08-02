@@ -490,6 +490,7 @@ impl CallValue {
             native_source_info,
         } = self
         {
+            let _object_root = object.clone().root();
             self = func(
                 &object,
                 argument_count,
@@ -1020,8 +1021,7 @@ pub(crate) fn validate_and_apply_property_descriptor(
         // b. Assert: extensible is true.
 
         if let Some((obj, key)) = obj_and_key {
-            obj.borrow_mut().properties.insert_with_slot(
-                key,
+            let property =
                 // c. If IsGenericDescriptor(Desc) is true or IsDataDescriptor(Desc) is true, then
                 if desc.is_generic_descriptor() || desc.is_data_descriptor() {
                     // i. If O is not undefined, create an own data property named P of
@@ -1041,9 +1041,14 @@ pub(crate) fn validate_and_apply_property_descriptor(
                     // of Desc is absent, the attribute of the newly created property is set to
                     // its default value.
                     desc.into_accessor_defaulted()
-                },
-                slot,
-            );
+                };
+
+            // Planned under a shared borrow so the shape allocation happens outside the
+            // mutable borrow below. See `PropertyMap::plan_insert`.
+            let plan = obj.borrow().properties.plan_insert(key, &property);
+            obj.borrow_mut()
+                .properties
+                .apply_insert(key, property, plan, slot);
         }
 
         // e. Return true.
@@ -1139,9 +1144,12 @@ pub(crate) fn validate_and_apply_property_descriptor(
         // a. For each field of Desc that is present, set the corresponding attribute of the
         // property named P of object O to the value of the field.
         current.fill_with(desc);
+        // Planned under a shared borrow so the shape allocation happens outside the
+        // mutable borrow below. See `PropertyMap::plan_insert`.
+        let plan = obj.borrow().properties.plan_insert(key, &current);
         obj.borrow_mut()
             .properties
-            .insert_with_slot(key, current, slot);
+            .apply_insert(key, current, plan, slot);
         slot.attributes |= SlotAttributes::FOUND;
     }
 

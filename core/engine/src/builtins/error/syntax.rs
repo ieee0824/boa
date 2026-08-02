@@ -88,6 +88,7 @@ impl BuiltInConstructor for SyntaxError {
             prototype,
             Error::with_caller_position(ErrorKind::Syntax, context),
         );
+        let _o_root = o.clone().root();
 
         // 3. If message is not undefined, then
         let message = args.get_or_undefined(0);

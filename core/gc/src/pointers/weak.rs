@@ -95,7 +95,23 @@ pub struct WeakGcEdge<T: Trace + ?Sized + 'static> {
     inner: EphemeronEdge<T, ()>,
 }
 
+/// A temporary external root for the ephemeron backing a [`WeakGcEdge`].
+#[derive(Debug)]
+pub struct WeakGcRoot<T: Trace + ?Sized + 'static> {
+    #[allow(dead_code)]
+    inner: Ephemeron<T, ()>,
+}
+
 impl<T: Trace + ?Sized> WeakGcEdge<T> {
+    /// Registers the backing ephemeron while an external caller is assembling a heap object
+    /// that will take ownership of this edge.
+    #[must_use]
+    pub fn root(&self) -> WeakGcRoot<T> {
+        WeakGcRoot {
+            inner: Ephemeron::from_edge(self.inner.clone()),
+        }
+    }
+
     /// Creates a new weak pointer for a garbage collected value.
     #[inline]
     #[must_use]
