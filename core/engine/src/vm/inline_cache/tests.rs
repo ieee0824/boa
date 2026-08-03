@@ -61,6 +61,45 @@ fn get_own_property_internal_method() {
 }
 
 #[test]
+fn property_inline_cache_retains_multiple_live_shapes() -> JsResult<()> {
+    let context = &mut Context::default();
+    let function = context.eval(Source::from_bytes("(function (o) { return o.value; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+    let _function_root = function.clone().root();
+
+    let objects = [
+        ObjectInitializer::new(context)
+            .property(js_string!("value"), 1, Attribute::all())
+            .property(js_string!("first"), 2, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("first"), 2, Attribute::all())
+            .property(js_string!("value"), 3, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("second"), 4, Attribute::all())
+            .property(js_string!("value"), 5, Attribute::all())
+            .build(),
+    ];
+    let _object_roots: Vec<_> = objects.iter().map(|object| object.clone().root()).collect();
+
+    for (object, expected) in objects.iter().zip([1, 3, 5]) {
+        let value = function.call(&JsValue::undefined(), &[object.clone().into()], context)?;
+        assert_eq!(value.as_number(), Some(f64::from(expected)));
+    }
+
+    assert_ne!(code.ic[0].shape.borrow().to_addr_usize(), 0);
+    assert_eq!(code.ic[0].secondary_shape_count(), 2);
+
+    // Revisit the first shape after warming the secondary entries. This proves
+    // the primary entry remains usable instead of being cleared on a miss.
+    let value = function.call(&JsValue::undefined(), &[objects[0].clone().into()], context)?;
+    assert_eq!(value.as_number(), Some(1.0));
+
+    Ok(())
+}
+
+#[test]
 fn get_internal_method() {
     let context = &mut Context::default();
 

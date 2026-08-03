@@ -2,6 +2,7 @@ use std::cell::Cell;
 
 use boa_gc::GcRefCell;
 use boa_macros::{Finalize, Trace};
+use thin_vec::ThinVec;
 
 use crate::{
     JsString,
@@ -36,104 +37,259 @@ pub(crate) struct InlineCache {
     /// The [`Slot`] of the property.
     #[unsafe_ignore_trace]
     pub(crate) slot: Cell<Slot>,
+
+    /// Additional receiver shapes retained after the first (monomorphic) entry.
+    ///
+    /// The first entry stays in the fields above because monomorphic accesses
+    /// are the common case and should not pay for a collection scan. The
+    /// bounded secondary list makes the same call site useful for a small,
+    /// stable set of shapes without keeping any shape alive strongly.
+    secondary: GcRefCell<ThinVec<CacheEntry>>,
+
+    /// Round-robin victim used once all secondary entries are occupied.
+    #[unsafe_ignore_trace]
+    replacement: Cell<usize>,
 }
 
-impl InlineCache {
-    pub(crate) const fn new(name: JsString) -> Self {
+/// One secondary polymorphic inline-cache entry.
+///
+/// This deliberately mirrors the two shape guards of the primary entry. The
+/// receiver guard protects the receiver's slot index, while the optional
+/// prototype guard protects a prototype-property slot from reindexing.
+#[derive(Clone, Debug, Trace, Finalize)]
+struct CacheEntry {
+    shape: GcRefCell<WeakShape>,
+    prototype_shape: GcRefCell<WeakShape>,
+    #[unsafe_ignore_trace]
+    slot: Cell<Slot>,
+}
+
+const MAX_SECONDARY_ENTRIES: usize = 7;
+
+impl CacheEntry {
+    const fn empty() -> Self {
         Self {
-            name,
             shape: GcRefCell::new(WeakShape::None),
             prototype_shape: GcRefCell::new(WeakShape::None),
             slot: Cell::new(Slot::new()),
         }
     }
 
-    pub(crate) fn set(&self, shape: &ShapeEdge, slot: Slot) {
+    fn from_weak_shapes(shape: WeakShape, prototype_shape: WeakShape, slot: Slot) -> Self {
+        Self {
+            shape: GcRefCell::new(shape),
+            prototype_shape: GcRefCell::new(prototype_shape),
+            slot: Cell::new(slot),
+        }
+    }
+
+    fn shape_addr(&self) -> usize {
+        self.shape.borrow().to_addr_usize()
+    }
+
+    fn matches(&self, shape: &ShapeEdge) -> bool {
+        let current_addr = shape.to_addr_usize();
+        current_addr != 0
+            && self.shape_addr() == current_addr
+            && prototype_matches(&self.prototype_shape, shape, self.slot.get())
+    }
+
+    fn clear(&self) {
+        // SAFETY: clearing weak handles cannot allocate GC storage.
+        *unsafe { self.shape.borrow_mut_no_gc() } = WeakShape::None;
+        *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
+    }
+}
+
+fn prototype_shape(shape: &ShapeEdge, slot: Slot) -> Option<ShapeEdge> {
+    if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+        shape
+            .prototype()
+            .map(|prototype| prototype.borrow().shape_edge().clone())
+    } else {
+        None
+    }
+}
+
+fn prototype_matches(
+    cached_prototype: &GcRefCell<WeakShape>,
+    shape: &ShapeEdge,
+    slot: Slot,
+) -> bool {
+    if !slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+        return true;
+    }
+
+    let current = shape.prototype().map_or(0, |prototype| {
+        prototype.borrow().shape_edge().to_addr_usize()
+    });
+    current != 0 && current == cached_prototype.borrow().to_addr_usize()
+}
+
+fn set_cached_entry(
+    cached_shape: &GcRefCell<WeakShape>,
+    cached_prototype: &GcRefCell<WeakShape>,
+    cached_slot: &Cell<Slot>,
+    shape: &ShapeEdge,
+    slot: Slot,
+) {
+    // SAFETY: retargeting an existing ephemeron does not allocate GC storage.
+    let reused_shape = { unsafe { cached_shape.borrow_mut_no_gc() }.retarget(shape) };
+    if !reused_shape {
+        // Creating the first weak handle allocates its ephemeron, so do that
+        // before taking the no-GC mutable borrow used for assignment.
+        let weak_shape = shape.into();
+        *unsafe { cached_shape.borrow_mut_no_gc() } = weak_shape;
+    }
+
+    let prototype = prototype_shape(shape, slot);
+    let reused_prototype = prototype.as_ref().is_some_and(|prototype| {
         // SAFETY: retargeting an existing ephemeron does not allocate GC storage.
-        let reused_shape = { unsafe { self.shape.borrow_mut_no_gc() }.retarget(shape) };
-        if !reused_shape {
-            // Creating the first weak handle allocates its ephemeron, so do that
-            // before taking the no-GC mutable borrow used for assignment.
-            let weak_shape = shape.into();
-            *unsafe { self.shape.borrow_mut_no_gc() } = weak_shape;
+        unsafe { cached_prototype.borrow_mut_no_gc() }.retarget(prototype)
+    });
+    if !reused_prototype {
+        let weak_prototype = prototype.as_ref().map_or(WeakShape::None, WeakShape::from);
+        *unsafe { cached_prototype.borrow_mut_no_gc() } = weak_prototype;
+    }
+    cached_slot.set(slot);
+}
+
+impl InlineCache {
+    pub(crate) fn new(name: JsString) -> Self {
+        Self {
+            name,
+            shape: GcRefCell::new(WeakShape::None),
+            prototype_shape: GcRefCell::new(WeakShape::None),
+            slot: Cell::new(Slot::new()),
+            secondary: GcRefCell::new(ThinVec::new()),
+            replacement: Cell::new(0),
+        }
+    }
+
+    pub(crate) fn set(&self, shape: &ShapeEdge, slot: Slot) {
+        let current_addr = shape.to_addr_usize();
+        let primary_addr = self.shape.borrow().to_addr_usize();
+
+        // Keep a receiver-shape match in the primary slot, even if only the
+        // prototype guard changed. The property slot belongs to this call
+        // site, so retargeting the existing weak handles is cheaper than
+        // creating a duplicate secondary entry.
+        if current_addr != 0 && (primary_addr == current_addr || primary_addr == 0) {
+            set_cached_entry(&self.shape, &self.prototype_shape, &self.slot, shape, slot);
+            return;
         }
 
-        let prototype = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            shape
-                .prototype()
-                .map(|prototype| prototype.borrow().shape_edge().clone())
-        } else {
-            None
+        // A secondary entry with the same receiver shape is updated in place.
+        // This is the normal path after a prototype reindex on a polymorphic
+        // call site.
+        let existing = {
+            let secondary = self.secondary.borrow();
+            secondary
+                .iter()
+                .position(|entry| entry.shape_addr() == current_addr && current_addr != 0)
         };
-
-        let reused_prototype = prototype.as_ref().is_some_and(|prototype| {
-            // SAFETY: retargeting an existing ephemeron does not allocate GC storage.
-            unsafe { self.prototype_shape.borrow_mut_no_gc() }.retarget(prototype)
-        });
-        if !reused_prototype {
-            let weak_prototype = prototype.as_ref().map_or(WeakShape::None, WeakShape::from);
-            *unsafe { self.prototype_shape.borrow_mut_no_gc() } = weak_prototype;
+        if let Some(index) = existing {
+            let secondary = self.secondary.borrow();
+            let entry = &secondary[index];
+            set_cached_entry(
+                &entry.shape,
+                &entry.prototype_shape,
+                &entry.slot,
+                shape,
+                slot,
+            );
+            return;
         }
-        // Prototype-property slots index into the holder prototype's storage, so
-        // remember the prototype's shape to guard against it being reindexed
-        // later (see the `prototype_shape` field docs). A cachable prototype
-        // slot is always resolved on the receiver's immediate prototype
-        // (`Slot::set_not_cachable_if_already_prototype` makes deeper lookups
-        // non-cachable), so `shape.prototype()` is exactly the holder.
-        self.slot.set(slot);
+
+        // Prepare new weak handles before borrowing the secondary vector. A
+        // first weak handle may allocate an ephemeron in the GC; the later
+        // replacement itself is deliberately no-GC.
+        let weak_shape = WeakShape::from(shape);
+        let prototype = prototype_shape(shape, slot);
+        let weak_prototype = prototype.as_ref().map_or(WeakShape::None, WeakShape::from);
+
+        let mut secondary = self.secondary.borrow_mut();
+        let index = secondary
+            .iter()
+            .position(|entry| entry.shape_addr() == 0)
+            .or_else(|| {
+                if secondary.len() < MAX_SECONDARY_ENTRIES {
+                    secondary.push(CacheEntry::empty());
+                    Some(secondary.len() - 1)
+                } else {
+                    let index = self.replacement.get() % MAX_SECONDARY_ENTRIES;
+                    self.replacement.set((index + 1) % MAX_SECONDARY_ENTRIES);
+                    Some(index)
+                }
+            })
+            .expect("secondary inline-cache victim should exist");
+        secondary[index].clear();
+        secondary[index] = CacheEntry::from_weak_shapes(weak_shape, weak_prototype, slot);
     }
 
     pub(crate) fn slot(&self) -> Slot {
         self.slot.get()
     }
 
+    #[cfg(test)]
+    fn secondary_shape_count(&self) -> usize {
+        self.secondary
+            .borrow()
+            .iter()
+            .filter(|entry| entry.shape_addr() != 0)
+            .count()
+    }
+
     /// Returns `Some(slot)`, if the [`InlineCache`]'s cached shape
     /// matches the given receiver shape (and, for a prototype-property slot, the
     /// holder prototype's shape still matches too).
     ///
-    /// Otherwise we reset the internal weak reference(s) to [`WeakShape::None`],
-    /// so they can be deallocated by the GC.
+    /// Otherwise dead or invalid entries are cleared, while live entries for
+    /// other receiver shapes remain available to the polymorphic call site.
     pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<Slot> {
-        // The receiver's shape edge is live for the duration of this lookup, so
-        // comparing addresses is enough to validate the weak cache entry. The
-        // previous implementation upgraded the weak shape on every hit, which
-        // created a rooted shape handle even though the current object already
-        // owns the matching live edge.
-        let current_addr = shape.to_addr_usize();
-        if current_addr == 0 || self.shape.borrow().to_addr_usize() != current_addr {
-            // SAFETY: resetting weak handles cannot allocate GC storage.
-            let mut old = unsafe { self.shape.borrow_mut_no_gc() };
-            *old = WeakShape::None;
-            *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
-            return None;
+        if self.primary_matches(shape) {
+            return Some(self.slot());
         }
 
-        let slot = self.slot();
-
-        // A prototype-property slot indexes into the holder prototype's storage;
-        // the receiver-shape match above does not observe changes to that
-        // prototype. Require the holder prototype's current shape to still match
-        // the one recorded at cache time, otherwise the slot index may be stale.
-        if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let current_prototype_addr = shape.prototype().map_or(0, |prototype| {
-                prototype.borrow().shape_edge().to_addr_usize()
-            });
-
-            let cached_addr = self.prototype_shape.borrow().to_addr_usize();
-
-            // Treat a missing prototype (`0`) as a miss: a `0 == 0` comparison
-            // here would be a false match between a collected cached shape and a
-            // now-prototype-less receiver.
-            if current_prototype_addr == 0 || cached_addr != current_prototype_addr {
-                // SAFETY: resetting weak handles cannot allocate GC storage.
-                let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
-                *cached_prototype = WeakShape::None;
-                let mut old = unsafe { self.shape.borrow_mut_no_gc() };
-                *old = WeakShape::None;
-                return None;
+        {
+            let secondary = self.secondary.borrow();
+            if let Some(entry) = secondary.iter().find(|entry| entry.matches(shape)) {
+                return Some(entry.slot.get());
             }
         }
 
-        Some(slot)
+        self.clear_invalid_entries(shape);
+        None
+    }
+
+    fn primary_matches(&self, shape: &ShapeEdge) -> bool {
+        let current_addr = shape.to_addr_usize();
+        current_addr != 0
+            && self.shape.borrow().to_addr_usize() == current_addr
+            && prototype_matches(&self.prototype_shape, shape, self.slot())
+    }
+
+    fn clear_invalid_entries(&self, shape: &ShapeEdge) {
+        let current_addr = shape.to_addr_usize();
+        let primary_addr = self.shape.borrow().to_addr_usize();
+        if current_addr == 0
+            || primary_addr == 0
+            || (primary_addr == current_addr && !self.primary_matches(shape))
+        {
+            // SAFETY: resetting weak handles cannot allocate GC storage.
+            *unsafe { self.shape.borrow_mut_no_gc() } = WeakShape::None;
+            *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
+        }
+
+        let secondary = self.secondary.borrow_mut();
+        for entry in secondary.iter() {
+            let entry_addr = entry.shape_addr();
+            if current_addr == 0
+                || entry_addr == 0
+                || (entry_addr == current_addr && !entry.matches(shape))
+            {
+                entry.clear();
+            }
+        }
     }
 }
