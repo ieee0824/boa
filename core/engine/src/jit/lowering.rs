@@ -390,6 +390,8 @@ pub struct BaselineDiagnostics {
     pub compile_requests: u64,
     /// Entries successfully installed by an emitter.
     pub successful_compilations: u64,
+    /// Queued compilations rejected before an entry was installed.
+    pub compile_rejections: u64,
     /// Dispatches selecting an installed compiled entry.
     pub compiled_entries: u64,
     /// Compiled execution paths that resumed the interpreter.
@@ -460,7 +462,8 @@ impl BaselineController {
     pub fn reject_compile(&mut self) {
         if self.queued {
             self.queued = false;
-            self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+            self.diagnostics.compile_rejections =
+                self.diagnostics.compile_rejections.saturating_add(1);
         }
     }
     /// Drops the installed generation and permits recompilation on the next entry.
@@ -822,7 +825,8 @@ mod tests {
         assert_eq!(cache.call_fixed_return(second).unwrap(), 2);
         assert_eq!(controller.diagnostics().compile_requests, 3);
         assert_eq!(controller.diagnostics().successful_compilations, 2);
-        assert_eq!(controller.diagnostics().bailouts, 1);
+        assert_eq!(controller.diagnostics().compile_rejections, 1);
+        assert_eq!(controller.diagnostics().bailouts, 0);
         assert_eq!(controller.diagnostics().invalidations, 1);
     }
 }
