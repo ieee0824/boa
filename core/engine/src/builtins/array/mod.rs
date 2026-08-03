@@ -1001,6 +1001,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        eprintln!("[boa-array-debug] join enter");
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // Property access and element conversion below can allocate and trigger
@@ -1008,6 +1009,7 @@ impl Array {
         let _o_root = o.clone().root();
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
+        eprintln!("[boa-array-debug] join length={len}");
         // 3. If separator is undefined, let sep be the single-element String ",".
         // 4. Else, let sep be ? ToString(separator).
         let separator = args.get_or_undefined(0);
@@ -1022,6 +1024,7 @@ impl Array {
         // 6. Let k be 0.
         // 7. Repeat, while k < len,
         for k in 0..len {
+            eprintln!("[boa-array-debug] join element={k}");
             // a. If k > 0, set R to the string-concatenation of R and sep.
             if k > 0 {
                 r.push(separator.clone());
@@ -1038,6 +1041,7 @@ impl Array {
             r.push(next.clone());
             // e. Set k to k + 1.
         }
+        eprintln!("[boa-array-debug] join result");
         // 8. Return R.
         Ok(js_string!(&r[..]).into())
     }
@@ -1293,6 +1297,7 @@ impl Array {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
+        eprintln!("[boa-array-debug] unshift enter args={}", args.len());
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
         // The generic property operations may execute user code and allocate;
@@ -1300,6 +1305,7 @@ impl Array {
         let _o_root = o.clone().root();
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
+        eprintln!("[boa-array-debug] unshift length={len}");
         // 3. Let argCount be the number of elements in items.
         let arg_count = args.len() as u64;
         // 4. If argCount > 0, then
@@ -1314,6 +1320,7 @@ impl Array {
             let mut k = len;
             // c. Repeat, while k > 0,
             while k > 0 {
+                eprintln!("[boa-array-debug] unshift move={k}");
                 // i. Let from be ! ToString(𝔽(k - 1)).
                 let from = k - 1;
                 // ii. Let to be ! ToString(𝔽(k + argCount - 1)).
@@ -1336,6 +1343,7 @@ impl Array {
             // d. Let j be +0𝔽.
             // e. For each element E of items, do
             for (j, e) in args.iter().enumerate() {
+                eprintln!("[boa-array-debug] unshift arg={j}");
                 // i. Perform ? Set(O, ! ToString(j), E, true).
                 o.set(j, e.clone(), true, context)?;
                 // ii. Set j to j + 1𝔽.
@@ -1343,6 +1351,7 @@ impl Array {
         }
         // 5. Perform ? Set(O, "length", 𝔽(len + argCount), true).
         Self::set_length(&o, len + arg_count, context)?;
+        eprintln!("[boa-array-debug] unshift done");
 
         // 6. Return 𝔽(len + argCount).
         Ok((len + arg_count).into())
