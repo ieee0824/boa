@@ -27,8 +27,8 @@ struct NativeFrame {
 #[derive(Debug)]
 pub(crate) struct ArithmeticCode {
     memory: ExecutableMemory,
-    entry_offset: u32,
-    bytecode_entry: u32,
+    resumed_entry_offset: u32,
+    bytecode_resume: u32,
     required: Box<[u32]>,
     pub(crate) code_map: BytecodeCodeMap,
 }
@@ -52,10 +52,14 @@ impl ArithmeticCode {
                 return Ok(None);
             };
             let mut assembler = Assembler::default();
-            let entry_offset = assembler.position();
+            let resumed_entry_offset = assembler.position();
             // r10 permanently holds the checked integer register-file pointer.
             assembler.bytes(&[0x4c, 0x8b, 0x17]); // mov r10, [rdi]
             assembler.bytes(&[0x4c, 0x8b, 0x5f, 0x08]); // mov r11, [rdi + 8]
+            assembler.jump(
+                &[0xe9],
+                Label::Bytecode(snapshot.instructions[region.first].next_offset),
+            );
             let mut code_map = BytecodeCodeMap::default();
             let mut bailouts = BTreeSet::new();
 
@@ -78,16 +82,31 @@ impl ArithmeticCode {
             let memory = writable.publish()?;
             Ok(Some(Self {
                 memory,
-                entry_offset,
-                bytecode_entry: snapshot.instructions[region.first].offset,
+                resumed_entry_offset,
+                bytecode_resume: snapshot.instructions[region.first].next_offset,
                 required: region.required.into_boxed_slice(),
                 code_map,
             }))
         }
     }
 
-    pub(crate) fn execute(
+    fn execute_after_increment(
         &self,
+        values: &mut [Option<i32>],
+        loop_iterations: &mut u64,
+        loop_limit: u64,
+    ) -> Option<ArithmeticExit> {
+        self.execute_at(
+            self.resumed_entry_offset,
+            values,
+            loop_iterations,
+            loop_limit,
+        )
+    }
+
+    fn execute_at(
+        &self,
+        machine_offset: u32,
         values: &mut [Option<i32>],
         loop_iterations: &mut u64,
         loop_limit: u64,
@@ -112,7 +131,7 @@ impl ArithmeticCode {
         // only accesses this frame and its fixed-size register allocation, and the
         // RX mapping remains owned for the duration of the call.
         let entry: unsafe extern "C" fn(*mut NativeFrame) =
-            unsafe { std::mem::transmute(self.memory.as_ptr().add(self.entry_offset as usize)) };
+            unsafe { std::mem::transmute(self.memory.as_ptr().add(machine_offset as usize)) };
         unsafe { entry(&raw mut frame) };
         *loop_iterations = frame.loop_iterations;
         for (register, &was_written) in dirty.iter().enumerate() {
@@ -131,7 +150,6 @@ impl ArithmeticCode {
 #[derive(Debug, Default)]
 pub(crate) struct ArithmeticRuntime {
     entries: HashMap<u64, RuntimeEntry>,
-    bypass_once: Option<(u64, u32)>,
     diagnostics: ArithmeticJitDiagnostics,
 }
 
@@ -166,13 +184,9 @@ impl ArithmeticRuntime {
 
     /// Observes a loop header and, once hot, replaces repeated bytecode dispatch
     /// with one bounded generated-code call.
-    pub(crate) fn try_execute(&mut self, vm: &mut Vm) -> bool {
+    pub(crate) fn try_execute_after_increment(&mut self, vm: &mut Vm) -> bool {
         let key = vm.frame.code_block.jit_code_id;
         let pc = vm.frame.pc;
-        if self.bypass_once == Some((key, pc)) {
-            self.bypass_once = None;
-            return false;
-        }
         let entry = self.entries.entry(key).or_insert(RuntimeEntry::Warming(0));
         match entry {
             RuntimeEntry::Warming(count) => {
@@ -190,7 +204,7 @@ impl ArithmeticRuntime {
                     .verify()
                     .ok()
                     .and_then(|snapshot| ArithmeticCode::compile(&snapshot).ok().flatten());
-                let Some(code) = compiled.filter(|code| code.bytecode_entry == pc) else {
+                let Some(code) = compiled.filter(|code| code.bytecode_resume == pc) else {
                     vm.frame.code_block.jit_metadata.disable();
                     self.diagnostics.compile_rejections =
                         self.diagnostics.compile_rejections.saturating_add(1);
@@ -206,7 +220,7 @@ impl ArithmeticRuntime {
                 *entry = RuntimeEntry::Compiled(code);
             }
             RuntimeEntry::Unsupported => return false,
-            RuntimeEntry::Compiled(code) if code.bytecode_entry != pc => return false,
+            RuntimeEntry::Compiled(code) if code.bytecode_resume != pc => return false,
             RuntimeEntry::Compiled(_) => {}
         }
 
@@ -226,7 +240,7 @@ impl ArithmeticRuntime {
                 value.as_i32()
             })
             .collect::<Vec<_>>();
-        let Some(exit) = code.execute(
+        let Some(exit) = code.execute_after_increment(
             &mut values,
             &mut vm.frame.loop_iteration_count,
             vm.runtime_limits.loop_iteration_limit(),
@@ -250,7 +264,6 @@ impl ArithmeticRuntime {
                 vm.frame.pc = pc;
                 vm.frame.code_block.jit_metadata.record_reusable_fallback();
                 self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
-                self.bypass_once = Some((key, pc));
                 true
             }
         }
@@ -599,9 +612,9 @@ mod tests {
         );
         let code = ArithmeticCode::compile(&contract).unwrap().unwrap();
         let mut values = vec![Some(1), Some(8), Some(0), None, None, None];
-        let mut iterations = 0;
+        let mut iterations = 1;
         assert_eq!(
-            code.execute(&mut values, &mut iterations, u64::MAX),
+            code.execute_after_increment(&mut values, &mut iterations, u64::MAX),
             Some(ArithmeticExit::Completed(121))
         );
         assert_eq!(values[0], Some(85));
@@ -617,16 +630,16 @@ mod tests {
         );
         let code = ArithmeticCode::compile(&contract).unwrap().unwrap();
         let mut values = vec![Some(i32::MAX), Some(3), Some(0), None, None, None];
-        let mut iterations = 0;
+        let mut iterations = 1;
         let exit = code
-            .execute(&mut values, &mut iterations, u64::MAX)
+            .execute_after_increment(&mut values, &mut iterations, u64::MAX)
             .unwrap();
         assert!(matches!(exit, ArithmeticExit::Bailout(_)));
 
         let mut values = vec![Some(-1_000_006), Some(2), Some(0), None, None, None];
-        let mut iterations = 0;
+        let mut iterations = 1;
         assert!(matches!(
-            code.execute(&mut values, &mut iterations, u64::MAX),
+            code.execute_after_increment(&mut values, &mut iterations, u64::MAX),
             Some(ArithmeticExit::Bailout(_))
         ));
     }

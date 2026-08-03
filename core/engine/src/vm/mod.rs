@@ -1239,19 +1239,6 @@ impl Context {
         {
             let opcode = Opcode::decode(*byte);
 
-            #[cfg(feature = "baseline-jit")]
-            if opcode == Opcode::IncrementLoopIteration
-                && !self.vm.frame.code_block.jit_metadata.is_disabled()
-            {
-                let pc_before_jit = self.vm.frame.pc;
-                let mut arithmetic_jit = std::mem::take(&mut self.vm.arithmetic_jit);
-                let executed = arithmetic_jit.try_execute(&mut self.vm);
-                self.vm.arithmetic_jit = arithmetic_jit;
-                if executed || self.vm.frame.pc != pc_before_jit {
-                    continue;
-                }
-            }
-
             match self.execute_one(Self::execute_bytecode_instruction, opcode) {
                 ControlFlow::Continue(()) => {}
                 ControlFlow::Break(value) => return value,
