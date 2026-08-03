@@ -5,7 +5,7 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, ShapeEdge, WeakShape, slot::Slot, slot::SlotAttributes},
+    object::shape::{ShapeEdge, WeakShape, slot::Slot, slot::SlotAttributes},
 };
 
 #[cfg(test)]
@@ -87,13 +87,13 @@ impl InlineCache {
         self.slot.get()
     }
 
-    /// Returns `Some((shape, slot))`, if the [`InlineCache`]'s cached shape
+    /// Returns `Some(slot)`, if the [`InlineCache`]'s cached shape
     /// matches the given receiver shape (and, for a prototype-property slot, the
     /// holder prototype's shape still matches too).
     ///
     /// Otherwise we reset the internal weak reference(s) to [`WeakShape::None`],
     /// so they can be deallocated by the GC.
-    pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<(Shape, Slot)> {
+    pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<Slot> {
         // SAFETY: matching and resetting weak handles cannot allocate GC storage.
         let mut old = unsafe { self.shape.borrow_mut_no_gc() };
 
@@ -109,7 +109,6 @@ impl InlineCache {
             return None;
         }
 
-        let matched = shape.root();
         let slot = self.slot();
 
         // A prototype-property slot indexes into the holder prototype's storage;
@@ -117,7 +116,7 @@ impl InlineCache {
         // prototype. Require the holder prototype's current shape to still match
         // the one recorded at cache time, otherwise the slot index may be stale.
         if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let current_prototype_addr = matched.prototype().map_or(0, |prototype| {
+            let current_prototype_addr = shape.prototype().map_or(0, |prototype| {
                 prototype.borrow().shape_edge().to_addr_usize()
             });
 
@@ -134,6 +133,6 @@ impl InlineCache {
             }
         }
 
-        Some((matched, slot))
+        Some(slot)
     }
 }
