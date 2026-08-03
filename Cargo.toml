@@ -32,6 +32,7 @@ license = "Unlicense OR MIT"
 description = "Boa is a Javascript lexer, parser and compiler written in Rust. Currently, it has support for some of the language."
 
 [workspace.dependencies]
+libc = "0.2"
 
 # Repo Crates
 boa_ast = { version = "~0.21.1", path = "core/ast" }
