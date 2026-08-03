@@ -297,7 +297,7 @@ impl InlineCache {
             *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
         }
 
-        let secondary = self.secondary.borrow_mut();
+        let secondary = self.secondary.borrow();
         for entry in secondary.iter() {
             let entry_addr = entry.shape_addr();
             if current_addr == 0
