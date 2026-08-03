@@ -1,4 +1,4 @@
-use boa_gc::Rooted;
+use boa_gc::{Rooted, force_collect};
 use boa_parser::Source;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     object::{
         ObjectInitializer,
         internal_methods::InternalMethodPropertyContext,
-        shape::{WeakShape, slot::SlotAttributes},
+        shape::{RootedWeakShape, slot::SlotAttributes},
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     vm::CodeBlock,
@@ -58,6 +58,50 @@ fn get_own_property_internal_method() {
     let slot = slot.expect("the property should be found in the object");
 
     assert_eq!(context.slot().index, slot.index);
+}
+
+#[test]
+fn property_inline_cache_retains_multiple_live_shapes() -> JsResult<()> {
+    let context = &mut Context::default();
+    let function = context.eval(Source::from_bytes("(function (o) { return o.value; })"))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+    let _function_root = function.clone().root();
+    assert_eq!(code.ic.len(), 1);
+
+    let objects = [
+        ObjectInitializer::new(context)
+            .property(js_string!("value"), 1, Attribute::all())
+            .property(js_string!("first"), 2, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("first"), 2, Attribute::all())
+            .property(js_string!("value"), 3, Attribute::all())
+            .build(),
+        ObjectInitializer::new(context)
+            .property(js_string!("second"), 4, Attribute::all())
+            .property(js_string!("value"), 5, Attribute::all())
+            .build(),
+    ];
+    let _object_roots: Vec<_> = objects.iter().map(|object| object.clone().root()).collect();
+
+    for (object, expected) in objects.iter().zip([1, 3, 5]) {
+        let value = function.call(&JsValue::undefined(), &[object.clone().into()], context)?;
+        assert_eq!(value.as_number(), Some(f64::from(expected)));
+    }
+
+    // The cache keeps its ephemeron allocations rooted even when the code
+    // block was already promoted before the cache was warmed.
+    force_collect();
+
+    assert_ne!(code.ic[0].shape.borrow().to_addr_usize(), 0);
+    assert_eq!(code.ic[0].secondary_shape_count(), 2);
+
+    // Revisit the first shape after warming the secondary entries. This proves
+    // the primary entry remains usable instead of being cleared on a miss.
+    let value = function.call(&JsValue::undefined(), &[objects[0].clone().into()], context)?;
+    assert_eq!(value.as_number(), Some(1.0));
+
+    Ok(())
 }
 
 #[test]
@@ -342,7 +386,7 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let _function_root = function.clone().root();
 
     assert_eq!(code.ic.len(), 1);
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
+    assert!(matches!(*code.ic[0].shape.borrow(), RootedWeakShape::None));
 
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
@@ -352,7 +396,10 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
 
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::from(&o_shape));
+    assert_eq!(
+        code.ic[0].shape.borrow().to_addr_usize(),
+        o_shape.to_addr_usize()
+    );
 
     Ok(())
 }
@@ -414,7 +461,7 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let _function_root = function.clone().root();
 
     assert_eq!(code.ic.len(), 1);
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
+    assert!(matches!(*code.ic[0].shape.borrow(), RootedWeakShape::None));
 
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
@@ -424,7 +471,10 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
 
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::from(&o_shape));
+    assert_eq!(
+        code.ic[0].shape.borrow().to_addr_usize(),
+        o_shape.to_addr_usize()
+    );
 
     Ok(())
 }
