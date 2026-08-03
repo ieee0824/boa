@@ -440,6 +440,7 @@ impl BaselineController {
             if !self.queued {
                 return Err(LoweringError::NoCompileRequest);
             }
+            self.reject_compile();
             return Err(LoweringError::ContractVersion {
                 expected: BYTECODE_CONTRACT_VERSION,
                 actual: entry.contract_version,
@@ -790,6 +791,15 @@ mod tests {
         assert_eq!(controller.enter(), CompileDecision::Interpret);
         assert_eq!(controller.enter(), CompileDecision::CompileNow);
         let first = cache.compile_fixed_return(key, 1).unwrap();
+        assert!(matches!(
+            controller.install(BaselineEntry {
+                handle: first,
+                contract_version: BYTECODE_CONTRACT_VERSION + 1,
+                code_map: BytecodeCodeMap::default(),
+            }),
+            Err(LoweringError::ContractVersion { .. })
+        ));
+        assert_eq!(controller.enter(), CompileDecision::CompileNow);
         controller
             .install(BaselineEntry {
                 handle: first,
@@ -810,8 +820,9 @@ mod tests {
             })
             .unwrap();
         assert_eq!(cache.call_fixed_return(second).unwrap(), 2);
-        assert_eq!(controller.diagnostics().compile_requests, 2);
+        assert_eq!(controller.diagnostics().compile_requests, 3);
         assert_eq!(controller.diagnostics().successful_compilations, 2);
+        assert_eq!(controller.diagnostics().bailouts, 1);
         assert_eq!(controller.diagnostics().invalidations, 1);
     }
 }
