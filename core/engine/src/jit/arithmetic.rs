@@ -131,6 +131,23 @@ impl ArithmeticCode {
 #[derive(Debug, Default)]
 pub(crate) struct ArithmeticRuntime {
     entries: HashMap<u64, RuntimeEntry>,
+    bypass_once: Option<(u64, u32)>,
+    diagnostics: ArithmeticJitDiagnostics,
+}
+
+/// Runtime-wide counters for the arithmetic baseline tier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArithmeticJitDiagnostics {
+    /// Hot loops submitted to the emitter.
+    pub compile_requests: u64,
+    /// Requests that installed generated code.
+    pub successful_compilations: u64,
+    /// Requests rejected as unsupported or invalid.
+    pub compile_rejections: u64,
+    /// Calls that entered generated machine code.
+    pub compiled_entries: u64,
+    /// Calls that resumed the interpreter.
+    pub bailouts: u64,
 }
 
 #[derive(Debug)]
@@ -143,11 +160,19 @@ enum RuntimeEntry {
 impl ArithmeticRuntime {
     const HOT_LOOP_THRESHOLD: u32 = 32;
 
+    pub(crate) const fn diagnostics(&self) -> ArithmeticJitDiagnostics {
+        self.diagnostics
+    }
+
     /// Observes a loop header and, once hot, replaces repeated bytecode dispatch
     /// with one bounded generated-code call.
     pub(crate) fn try_execute(&mut self, vm: &mut Vm) -> bool {
         let key = vm.frame.code_block.jit_code_id;
         let pc = vm.frame.pc;
+        if self.bypass_once == Some((key, pc)) {
+            self.bypass_once = None;
+            return false;
+        }
         let entry = self.entries.entry(key).or_insert(RuntimeEntry::Warming(0));
         match entry {
             RuntimeEntry::Warming(count) => {
@@ -156,6 +181,8 @@ impl ArithmeticRuntime {
                     return false;
                 }
                 vm.frame.code_block.jit_metadata.mark_queued();
+                self.diagnostics.compile_requests =
+                    self.diagnostics.compile_requests.saturating_add(1);
                 let compiled = vm
                     .frame
                     .code_block
@@ -165,6 +192,8 @@ impl ArithmeticRuntime {
                     .and_then(|snapshot| ArithmeticCode::compile(&snapshot).ok().flatten());
                 let Some(code) = compiled.filter(|code| code.bytecode_entry == pc) else {
                     vm.frame.code_block.jit_metadata.disable();
+                    self.diagnostics.compile_rejections =
+                        self.diagnostics.compile_rejections.saturating_add(1);
                     *entry = RuntimeEntry::Unsupported;
                     return false;
                 };
@@ -172,6 +201,8 @@ impl ArithmeticRuntime {
                     .code_block
                     .jit_metadata
                     .mark_compiled(BYTECODE_CONTRACT_VERSION);
+                self.diagnostics.successful_compilations =
+                    self.diagnostics.successful_compilations.saturating_add(1);
                 *entry = RuntimeEntry::Compiled(code);
             }
             RuntimeEntry::Unsupported => return false,
@@ -201,8 +232,10 @@ impl ArithmeticRuntime {
             vm.runtime_limits.loop_iteration_limit(),
         ) else {
             vm.frame.code_block.jit_metadata.record_reusable_fallback();
+            self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
             return false;
         };
+        self.diagnostics.compiled_entries = self.diagnostics.compiled_entries.saturating_add(1);
         for (index, value) in values.into_iter().enumerate() {
             if let Some(value) = value {
                 vm.set_register(index, JsValue::from(value));
@@ -216,7 +249,9 @@ impl ArithmeticRuntime {
             ArithmeticExit::Bailout(pc) => {
                 vm.frame.pc = pc;
                 vm.frame.code_block.jit_metadata.record_reusable_fallback();
-                false
+                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                self.bypass_once = Some((key, pc));
+                true
             }
         }
     }
@@ -624,6 +659,10 @@ mod tests {
             instruction_count.get() < 1_000,
             "hot loop stayed interpreted"
         );
+        let runtime_diagnostics = context.arithmetic_jit_diagnostics();
+        assert_eq!(runtime_diagnostics.compile_requests, 1);
+        assert_eq!(runtime_diagnostics.successful_compilations, 1);
+        assert!(runtime_diagnostics.compiled_entries >= 1);
         let diagnostics = function.jit_metadata();
         assert_eq!(diagnostics.state, JitCompilationState::Compiled);
         assert_eq!(diagnostics.compile_requests, 1);
@@ -646,6 +685,23 @@ mod tests {
         .unwrap();
         let expected = (0..40_i64).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003);
         assert_eq!(result.as_number(), Some(expected as f64));
+    }
+
+    #[test]
+    fn vm_restarts_dispatch_at_the_arithmetic_bailout_pc() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "function f(n,s){for(var i=0;i<n;i++)s=s+i*3;return s}\
+                 f(200,1); f(100,2147483640)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(2_147_498_490.0));
     }
 
     #[test]

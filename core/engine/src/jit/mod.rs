@@ -11,6 +11,7 @@ mod arithmetic;
 mod lowering;
 mod platform;
 
+pub use arithmetic::ArithmeticJitDiagnostics;
 pub(crate) use arithmetic::ArithmeticRuntime;
 
 pub use lowering::{
