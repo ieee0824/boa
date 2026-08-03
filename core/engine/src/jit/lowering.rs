@@ -115,6 +115,13 @@ pub enum LoweringError {
     },
     /// An emitter attempted to install code without an outstanding request.
     NoCompileRequest,
+    /// A source map was not appended in unambiguous source/code order.
+    InvalidCodeMapOrder {
+        /// Bytecode offset rejected by the map.
+        bytecode_offset: u32,
+        /// Machine-code offset rejected by the map.
+        machine_offset: u32,
+    },
 }
 
 impl std::fmt::Display for LoweringError {
@@ -128,6 +135,13 @@ impl std::fmt::Display for LoweringError {
                 write!(formatter, "malformed bytecode snapshot at offset {offset}")
             }
             Self::NoCompileRequest => formatter.write_str("no baseline compile request is queued"),
+            Self::InvalidCodeMapOrder {
+                bytecode_offset,
+                machine_offset,
+            } => write!(
+                formatter,
+                "invalid baseline source-map order at bytecode {bytecode_offset}, machine +0x{machine_offset:x}"
+            ),
         }
     }
 }
@@ -207,32 +221,31 @@ impl BaselineIr {
         let mut blocks = Vec::with_capacity(starts.len());
         for (id, start) in starts.iter().copied().enumerate() {
             let end = starts.get(id + 1).copied().unwrap_or(snapshot.byte_len);
-            let source = snapshot
+            let first_instruction = snapshot
                 .instructions
-                .iter()
-                .filter(|i| i.offset >= start && i.offset < end)
-                .collect::<Vec<_>>();
+                .partition_point(|instruction| instruction.offset < start);
+            let after_last_instruction = snapshot
+                .instructions
+                .partition_point(|instruction| instruction.offset < end);
+            let source = &snapshot.instructions[first_instruction..after_last_instruction];
             if source.is_empty() {
                 return Err(LoweringError::MalformedSnapshot { offset: start });
             }
-            let unsupported = source.iter().find(|i| !is_supported(i.name)).copied();
+            let unsupported = source.iter().find(|i| !is_supported(i.name));
             let live_registers = source
                 .iter()
-                .flat_map(|i| register_operands(i))
+                .flat_map(register_operands)
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect();
-            let instructions = source
-                .iter()
-                .map(|instruction| lower_instruction(instruction))
-                .collect();
+            let instructions = source.iter().map(lower_instruction).collect();
             let kind = unsupported.map_or(BaselineBlockKind::Compilable, |instruction| {
                 BaselineBlockKind::InterpreterFallback {
                     opcode: instruction.name,
                     resume_offset: instruction.offset,
                 }
             });
-            let last = *source.last().expect("non-empty source block");
+            let last = source.last().expect("non-empty source block");
             let successors = successors(last, end, snapshot.byte_len)
                 .into_iter()
                 .filter_map(|offset| block_by_offset.get(&offset).copied())
@@ -313,8 +326,9 @@ impl BytecodeCodeMap {
         if self.0.last().is_some_and(|last| {
             last.bytecode_offset >= bytecode_offset || last.machine_offset > machine_offset
         }) {
-            return Err(LoweringError::MalformedSnapshot {
-                offset: bytecode_offset,
+            return Err(LoweringError::InvalidCodeMapOrder {
+                bytecode_offset,
+                machine_offset,
             });
         }
         self.0.push(BytecodeCodeMapEntry {
@@ -516,23 +530,8 @@ fn register_operands(instruction: &BytecodeInstruction) -> Vec<u32> {
     instruction
         .operands
         .iter()
-        .filter(|o| {
-            matches!(
-                o.name,
-                "dst"
-                    | "src"
-                    | "lhs"
-                    | "rhs"
-                    | "value"
-                    | "object"
-                    | "source"
-                    | "key"
-                    | "condition"
-                    | "receiver"
-                    | "array"
-                    | "function"
-                    | "local"
-            )
+        .filter(|operand| {
+            crate::vm::bytecode_contract::is_register_operand(instruction.name, operand.name)
         })
         .filter_map(|o| match o.value {
             BytecodeOperandValue::Unsigned(v) => Some(v as u32),
@@ -697,6 +696,27 @@ mod tests {
             }
         ));
         assert!(ir.dump().contains("GetPropertyByName"));
+    }
+
+    #[test]
+    fn live_registers_use_the_complete_bytecode_contract_classification() {
+        let ir = BaselineIr::lower(&snapshot(
+            vec![op(
+                0,
+                5,
+                1,
+                "CopyDataProperties",
+                vec![
+                    operand("dst", 0),
+                    operand("source", 1),
+                    operand("excluded_keys", 2),
+                    operand("excluded_keys", 3),
+                ],
+            )],
+            5,
+        ))
+        .unwrap();
+        assert_eq!(ir.blocks[0].entry_state.live_registers, vec![0, 1, 2, 3]);
     }
 
     #[test]

@@ -429,7 +429,7 @@ fn is_jump_operand(name: &str) -> bool {
     )
 }
 
-fn is_register_operand(opcode: &str, name: &str) -> bool {
+pub(crate) fn is_register_operand(opcode: &str, name: &str) -> bool {
     matches!(
         name,
         "dst"
