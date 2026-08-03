@@ -39,6 +39,7 @@ pub(crate) use {
     inline_cache::InlineCache,
 };
 
+pub use inline_cache::{InlineCacheMetadataSnapshot, InlineCacheState};
 pub use runtime_limits::RuntimeLimits;
 pub use {
     bytecode_contract::{

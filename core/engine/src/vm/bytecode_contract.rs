@@ -207,6 +207,33 @@ impl CodeBlock {
     pub fn jit_metadata(&self) -> JitMetadataSnapshot {
         self.jit_metadata.snapshot()
     }
+
+    /// Returns diagnostics for each stable bytecode inline-cache slot.
+    #[must_use]
+    pub fn inline_cache_metadata(&self) -> Vec<super::InlineCacheMetadataSnapshot> {
+        self.ic
+            .iter()
+            .enumerate()
+            .map(|(index, cache)| cache.metadata(index as u32))
+            .collect()
+    }
+
+    /// Enables or disables diagnostic hit/miss/install counters for this block.
+    ///
+    /// Counters are disabled by default so production property accesses do not
+    /// pay for saturating counter updates. Existing counts are retained.
+    pub fn set_inline_cache_telemetry_enabled(&self, enabled: bool) {
+        for cache in &self.ic {
+            cache.set_telemetry_enabled(enabled);
+        }
+    }
+
+    /// Resets opt-in hit/miss/install counters without changing cache guards.
+    pub fn reset_inline_cache_telemetry(&self) {
+        for cache in &self.ic {
+            cache.reset_telemetry();
+        }
+    }
 }
 
 impl BytecodeContract<'_> {
