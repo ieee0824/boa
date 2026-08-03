@@ -530,16 +530,6 @@ impl WeakSharedShape {
             ptr as usize
         })
     }
-
-    /// Upgrade returns a [`SharedShape`] pointer for the internal value if the pointer is still live,
-    /// or [`None`] if the value was already garbage collected.
-    #[inline]
-    #[must_use]
-    pub(crate) fn upgrade(&self) -> Option<SharedShape> {
-        Some(SharedShape {
-            inner: self.inner.upgrade()?.root(),
-        })
-    }
 }
 
 impl<H> From<&SharedShape<H>> for WeakSharedShape

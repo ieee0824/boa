@@ -5,7 +5,7 @@ use boa_macros::{Finalize, Trace};
 
 use crate::{
     JsString,
-    object::shape::{Shape, ShapeEdge, WeakShape, slot::Slot, slot::SlotAttributes},
+    object::shape::{ShapeEdge, WeakShape, slot::Slot, slot::SlotAttributes},
 };
 
 #[cfg(test)]
@@ -87,24 +87,27 @@ impl InlineCache {
         self.slot.get()
     }
 
-    /// Returns `Some((shape, slot))`, if the [`InlineCache`]'s cached shape
+    /// Returns `Some(slot)`, if the [`InlineCache`]'s cached shape
     /// matches the given receiver shape (and, for a prototype-property slot, the
     /// holder prototype's shape still matches too).
     ///
     /// Otherwise we reset the internal weak reference(s) to [`WeakShape::None`],
     /// so they can be deallocated by the GC.
-    pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<(Shape, Slot)> {
-        // SAFETY: matching and resetting weak handles cannot allocate GC storage.
-        let mut old = unsafe { self.shape.borrow_mut_no_gc() };
-
-        let old_upgraded = old.upgrade();
-        if old_upgraded.as_ref().map_or(0, Shape::to_addr_usize) != shape.to_addr_usize() {
+    pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<Slot> {
+        // The receiver's shape edge is live for the duration of this lookup, so
+        // comparing addresses is enough to validate the weak cache entry. The
+        // previous implementation upgraded the weak shape on every hit, which
+        // created a rooted shape handle even though the current object already
+        // owns the matching live edge.
+        let current_addr = shape.to_addr_usize();
+        if current_addr == 0 || self.shape.borrow().to_addr_usize() != current_addr {
+            // SAFETY: resetting weak handles cannot allocate GC storage.
+            let mut old = unsafe { self.shape.borrow_mut_no_gc() };
             *old = WeakShape::None;
             *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
             return None;
         }
 
-        let matched = old_upgraded.expect("addr matched a live shape, so it upgrades");
         let slot = self.slot();
 
         // A prototype-property slot indexes into the holder prototype's storage;
@@ -112,26 +115,25 @@ impl InlineCache {
         // prototype. Require the holder prototype's current shape to still match
         // the one recorded at cache time, otherwise the slot index may be stale.
         if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-            let current_prototype_addr = matched.prototype().map_or(0, |prototype| {
+            let current_prototype_addr = shape.prototype().map_or(0, |prototype| {
                 prototype.borrow().shape_edge().to_addr_usize()
             });
 
-            let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
-            let cached_addr = cached_prototype
-                .upgrade()
-                .as_ref()
-                .map_or(0, Shape::to_addr_usize);
+            let cached_addr = self.prototype_shape.borrow().to_addr_usize();
 
             // Treat a missing prototype (`0`) as a miss: a `0 == 0` comparison
             // here would be a false match between a collected cached shape and a
             // now-prototype-less receiver.
             if current_prototype_addr == 0 || cached_addr != current_prototype_addr {
+                // SAFETY: resetting weak handles cannot allocate GC storage.
+                let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
                 *cached_prototype = WeakShape::None;
+                let mut old = unsafe { self.shape.borrow_mut_no_gc() };
                 *old = WeakShape::None;
                 return None;
             }
         }
 
-        Some((matched, slot))
+        Some(slot)
     }
 }
