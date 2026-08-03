@@ -603,6 +603,11 @@ impl Default for JitMetadata {
 }
 
 impl JitMetadata {
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) fn is_disabled(&self) -> bool {
+        self.state.get() == JitCompilationState::Disabled
+    }
+
     pub(crate) fn record_interpreter_entry(&self) {
         self.entries.set(self.entries.get().saturating_add(1));
     }

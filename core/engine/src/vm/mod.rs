@@ -1240,7 +1240,9 @@ impl Context {
             let opcode = Opcode::decode(*byte);
 
             #[cfg(feature = "baseline-jit")]
-            if opcode == Opcode::IncrementLoopIteration {
+            if opcode == Opcode::IncrementLoopIteration
+                && !self.vm.frame.code_block.jit_metadata.is_disabled()
+            {
                 let pc_before_jit = self.vm.frame.pc;
                 let mut arithmetic_jit = std::mem::take(&mut self.vm.arithmetic_jit);
                 let executed = arithmetic_jit.try_execute(&mut self.vm);
