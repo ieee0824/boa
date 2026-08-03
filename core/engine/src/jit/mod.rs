@@ -202,7 +202,11 @@ impl JitCodeCache {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    target_arch = "x86_64",
+    any(target_os = "linux", target_os = "macos")
+))]
 mod tests {
     use super::*;
 

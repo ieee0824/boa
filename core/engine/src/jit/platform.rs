@@ -72,7 +72,12 @@ impl Mapping {
         // SAFETY: sysconf has no memory-safety preconditions.
         let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if page_size <= 0 {
-            return Err(io::Error::last_os_error().into());
+            let os_error = io::Error::last_os_error();
+            return Err(if os_error.raw_os_error().is_some_and(|code| code != 0) {
+                os_error.into()
+            } else {
+                io::Error::other("sysconf(_SC_PAGESIZE) returned a non-positive value").into()
+            });
         }
         let page_size = usize::try_from(page_size).map_err(|_| JitError::InvalidCodeSize)?;
         let mapped_len = requested_len
