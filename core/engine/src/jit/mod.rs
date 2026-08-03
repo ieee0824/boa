@@ -1,12 +1,21 @@
-//! Experimental baseline JIT code-memory and entry ABI substrate.
+//! Experimental baseline JIT lowering, dispatch, code-memory, and entry ABI.
 //!
 //! This is an opt-in public embedding contract through `baseline-jit`; enabling
-//! it does not make the VM compile or execute JavaScript as native code. It
-//! deliberately exposes only a validated fixed-return stub until lowering owns
-//! instruction safety. The API is experimental and may evolve between fork
-//! revisions while Gate 3 is in progress.
+//! it does not yet make the VM execute JavaScript as native code. The common
+//! lowering layer marks supported blocks for future emitters and makes every
+//! unsupported instruction an explicit interpreter fallback. Executable memory
+//! remains limited to a validated fixed-return ABI probe. The API is
+//! experimental and may evolve between fork revisions while Gate 3 is in
+//! progress.
 
+mod lowering;
 mod platform;
+
+pub use lowering::{
+    BaselineBlock, BaselineBlockKind, BaselineController, BaselineDiagnostics, BaselineEntry,
+    BaselineInstruction, BaselineIr, BaselineOperand, BaselineOperandValue, BytecodeCodeMap,
+    BytecodeCodeMapEntry, CompileDecision, LoweringError, VmState,
+};
 
 use std::{
     collections::HashMap,
