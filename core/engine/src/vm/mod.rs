@@ -39,6 +39,9 @@ pub(crate) use {
     inline_cache::InlineCache,
 };
 
+#[cfg(feature = "baseline-jit")]
+pub(crate) use code_block::next_jit_code_id;
+
 pub use inline_cache::{InlineCacheMetadataSnapshot, InlineCacheState};
 pub use runtime_limits::RuntimeLimits;
 pub use {
@@ -119,6 +122,9 @@ pub struct Vm {
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) environments: EnvironmentStack,
     pub(crate) runtime_limits: RuntimeLimits,
+
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
 
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
@@ -563,6 +569,8 @@ impl Vm {
             environments: EnvironmentStack::new(realm.environment()),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
+            #[cfg(feature = "baseline-jit")]
+            arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
@@ -1230,6 +1238,16 @@ impl Context {
             .get(self.vm.frame.pc as usize)
         {
             let opcode = Opcode::decode(*byte);
+
+            #[cfg(feature = "baseline-jit")]
+            if opcode == Opcode::IncrementLoopIteration {
+                let mut arithmetic_jit = std::mem::take(&mut self.vm.arithmetic_jit);
+                let executed = arithmetic_jit.try_execute(&mut self.vm);
+                self.vm.arithmetic_jit = arithmetic_jit;
+                if executed {
+                    continue;
+                }
+            }
 
             match self.execute_one(Self::execute_bytecode_instruction, opcode) {
                 ControlFlow::Continue(()) => {}

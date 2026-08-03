@@ -13,6 +13,8 @@ use crate::{
 use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
 use boa_gc::{Finalize, GcEdge, Rooted, Trace, empty_trace};
+#[cfg(feature = "baseline-jit")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{cell::Cell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
@@ -115,6 +117,9 @@ pub(crate) enum Constant {
 /// attributes of the function.
 #[derive(Clone, Debug, Trace, Finalize)]
 pub struct CodeBlock {
+    #[cfg(feature = "baseline-jit")]
+    #[unsafe_ignore_trace]
+    pub(crate) jit_code_id: u64,
     #[unsafe_ignore_trace]
     pub(crate) flags: Cell<CodeBlockFlags>,
 
@@ -165,6 +170,8 @@ impl CodeBlock {
         let mut flags = CodeBlockFlags::empty();
         flags.set(CodeBlockFlags::STRICT, strict);
         Self {
+            #[cfg(feature = "baseline-jit")]
+            jit_code_id: next_jit_code_id(),
             bytecode: ByteCode::default(),
             constants: ThinVec::default(),
             bindings: Box::default(),
@@ -333,6 +340,14 @@ impl CodeBlock {
     pub(crate) fn source_info(&self) -> &SourceInfo {
         &self.source_info
     }
+}
+
+#[cfg(feature = "baseline-jit")]
+static NEXT_JIT_CODE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "baseline-jit")]
+pub(crate) fn next_jit_code_id() -> u64 {
+    NEXT_JIT_CODE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// ---- `CodeBlock` private API ----

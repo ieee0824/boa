@@ -568,6 +568,10 @@ pub struct JitMetadataSnapshot {
     pub interpreter_entries: u64,
     /// Number of compiled-entry fallbacks to the interpreter.
     pub fallback_entries: u64,
+    /// Number of hot-loop compilation requests.
+    pub compile_requests: u64,
+    /// Number of generated-code entries taken by the VM.
+    pub compiled_entries: u64,
     /// Current compilation lifecycle state.
     pub state: JitCompilationState,
     /// Contract version used by the installed compiled entry, if any.
@@ -578,6 +582,8 @@ pub struct JitMetadataSnapshot {
 pub(crate) struct JitMetadata {
     entries: Cell<u64>,
     fallbacks: Cell<u64>,
+    compile_requests: Cell<u64>,
+    compiled_entries: Cell<u64>,
     state: Cell<JitCompilationState>,
     compiled_contract_version: Cell<Option<u32>>,
 }
@@ -587,6 +593,8 @@ impl Default for JitMetadata {
         Self {
             entries: Cell::new(0),
             fallbacks: Cell::new(0),
+            compile_requests: Cell::new(0),
+            compiled_entries: Cell::new(0),
             state: Cell::new(JitCompilationState::Interpreter),
             compiled_contract_version: Cell::new(None),
         }
@@ -602,6 +610,8 @@ impl JitMetadata {
         JitMetadataSnapshot {
             interpreter_entries: self.entries.get(),
             fallback_entries: self.fallbacks.get(),
+            compile_requests: self.compile_requests.get(),
+            compiled_entries: self.compiled_entries.get(),
             state: self.state.get(),
             compiled_contract_version: self.compiled_contract_version.get(),
         }
@@ -612,6 +622,8 @@ impl JitMetadata {
         reason = "Gate 3 owns the dispatcher that drives these lifecycle transitions"
     )]
     pub(crate) fn mark_queued(&self) {
+        self.compile_requests
+            .set(self.compile_requests.get().saturating_add(1));
         self.state.set(JitCompilationState::Queued);
         self.compiled_contract_version.set(None);
     }
@@ -633,6 +645,18 @@ impl JitMetadata {
         self.fallbacks.set(self.fallbacks.get().saturating_add(1));
         self.state.set(JitCompilationState::Interpreter);
         self.compiled_contract_version.set(None);
+    }
+
+    /// Records a type/overflow bailout while retaining reusable generated code.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) fn record_reusable_fallback(&self) {
+        self.fallbacks.set(self.fallbacks.get().saturating_add(1));
+    }
+
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) fn record_compiled_entry(&self) {
+        self.compiled_entries
+            .set(self.compiled_entries.get().saturating_add(1));
     }
 
     #[allow(

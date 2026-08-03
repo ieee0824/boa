@@ -2114,6 +2114,8 @@ impl<'ctx> ByteCompiler<'ctx> {
         let source_map_entries = self.source_map_builder.build(final_bytecode_len);
 
         CodeBlock {
+            #[cfg(feature = "baseline-jit")]
+            jit_code_id: crate::vm::next_jit_code_id(),
             length: self.length,
             register_count,
             this_mode: self.this_mode,
