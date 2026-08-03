@@ -2,7 +2,6 @@ use std::cell::Cell;
 
 use boa_gc::{GcRefCell, NoGcScope};
 use boa_macros::{Finalize, Trace};
-use thin_vec::ThinVec;
 
 use crate::{
     JsString,
@@ -42,9 +41,9 @@ pub(crate) struct InlineCache {
     ///
     /// The first entry stays in the fields above because monomorphic accesses
     /// are the common case and should not pay for a collection scan. The
-    /// bounded secondary list makes the same call site useful for a small,
+    /// bounded secondary array makes the same call site useful for a small,
     /// stable set of shapes without keeping any shape alive strongly.
-    secondary: GcRefCell<ThinVec<CacheEntry>>,
+    secondary: GcRefCell<[CacheEntry; MAX_SECONDARY_ENTRIES]>,
 
     /// Round-robin victim used once all secondary entries are occupied.
     #[unsafe_ignore_trace]
@@ -75,14 +74,6 @@ impl CacheEntry {
         }
     }
 
-    fn from_weak_shapes(shape: WeakShape, prototype_shape: WeakShape, slot: Slot) -> Self {
-        Self {
-            shape: GcRefCell::new(shape),
-            prototype_shape: GcRefCell::new(prototype_shape),
-            slot: Cell::new(slot),
-        }
-    }
-
     fn shape_addr(&self) -> usize {
         self.shape.borrow().to_addr_usize()
     }
@@ -98,6 +89,14 @@ impl CacheEntry {
         // SAFETY: clearing weak handles cannot allocate GC storage.
         *unsafe { self.shape.borrow_mut_no_gc() } = WeakShape::None;
         *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
+    }
+
+    fn set_weak_shapes(&self, shape: WeakShape, prototype_shape: WeakShape, slot: Slot) {
+        // SAFETY: the caller holds a `NoGcScope`, and replacing these weak
+        // handles does not allocate or trigger collection.
+        *unsafe { self.shape.borrow_mut_no_gc() } = shape;
+        *unsafe { self.prototype_shape.borrow_mut_no_gc() } = prototype_shape;
+        self.slot.set(slot);
     }
 }
 
@@ -161,7 +160,7 @@ impl InlineCache {
             shape: GcRefCell::new(WeakShape::None),
             prototype_shape: GcRefCell::new(WeakShape::None),
             slot: Cell::new(Slot::new()),
-            secondary: GcRefCell::new(ThinVec::new()),
+            secondary: GcRefCell::new(std::array::from_fn(|_| CacheEntry::empty())),
             replacement: Cell::new(0),
         }
     }
@@ -211,23 +210,19 @@ impl InlineCache {
         let prototype = prototype_shape(shape, slot);
         let weak_prototype = prototype.as_ref().map_or(WeakShape::None, WeakShape::from);
 
-        let mut secondary = self.secondary.borrow_mut();
+        let secondary = self.secondary.borrow();
         let index = secondary
             .iter()
             .position(|entry| entry.shape_addr() == 0)
             .or_else(|| {
-                if secondary.len() < MAX_SECONDARY_ENTRIES {
-                    secondary.push(CacheEntry::empty());
-                    Some(secondary.len() - 1)
-                } else {
-                    let index = self.replacement.get() % MAX_SECONDARY_ENTRIES;
-                    self.replacement.set((index + 1) % MAX_SECONDARY_ENTRIES);
-                    Some(index)
-                }
+                let index = self.replacement.get() % MAX_SECONDARY_ENTRIES;
+                self.replacement.set((index + 1) % MAX_SECONDARY_ENTRIES);
+                Some(index)
             })
             .expect("secondary inline-cache victim should exist");
-        secondary[index].clear();
-        secondary[index] = CacheEntry::from_weak_shapes(weak_shape, weak_prototype, slot);
+        let entry = &secondary[index];
+        entry.clear();
+        entry.set_weak_shapes(weak_shape, weak_prototype, slot);
     }
 
     pub(crate) fn slot(&self) -> Slot {
