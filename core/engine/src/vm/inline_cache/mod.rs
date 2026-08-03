@@ -202,9 +202,9 @@ impl InlineCache {
 
         // Creating both ephemerons before inserting them into the cache would
         // normally leave the first one unrooted while the second allocation
-        // runs. Keep this short, bounded window collection-free, then install
-        // both handles in one outer-cell mutation so the write barrier covers
-        // the complete entry.
+        // runs. Keep this short, bounded window collection-free, then update
+        // the already-initialized nested cells in place. The fixed slots avoid
+        // moving their write-barrier state while the new handles are installed.
         let _no_gc = NoGcScope::new();
         let weak_shape = WeakShape::from(shape);
         let prototype = prototype_shape(shape, slot);
