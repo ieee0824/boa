@@ -305,7 +305,9 @@ impl ArithmeticRuntime {
                 });
                 self.diagnostics.total_compile_time_ns =
                     self.diagnostics.total_compile_time_ns.saturating_add(
-                        u64::try_from(compile_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                        u64::try_from(compile_started.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX)
+                            .max(1),
                     );
                 let Some(code) = compiled.filter(|code| code.bytecode_resume == pc) else {
                     if single_loop {
