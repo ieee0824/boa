@@ -362,6 +362,8 @@ pub struct BaselineDiagnostics {
     pub interpreter_entries: u64,
     /// One-shot requests sent to an emitter.
     pub compile_requests: u64,
+    /// Entries successfully installed by an emitter.
+    pub successful_compilations: u64,
     /// Dispatches selecting an installed compiled entry.
     pub compiled_entries: u64,
     /// Compiled execution paths that resumed the interpreter.
@@ -419,6 +421,8 @@ impl BaselineController {
         }
         self.entry = Some(entry);
         self.queued = false;
+        self.diagnostics.successful_compilations =
+            self.diagnostics.successful_compilations.saturating_add(1);
         Ok(())
     }
     /// Records a safe interpreter bailout; the installed entry remains reusable.
@@ -751,6 +755,7 @@ mod tests {
             .unwrap();
         assert_eq!(cache.call_fixed_return(second).unwrap(), 2);
         assert_eq!(controller.diagnostics().compile_requests, 2);
+        assert_eq!(controller.diagnostics().successful_compilations, 2);
         assert_eq!(controller.diagnostics().invalidations, 1);
     }
 }
