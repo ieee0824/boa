@@ -126,6 +126,13 @@ pub struct Vm {
     #[cfg(feature = "baseline-jit")]
     pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
 
+    /// Whether the current dispatch path may enter arithmetic generated code.
+    ///
+    /// Budgeted async dispatch disables this around each instruction so a native
+    /// loop cannot consume work that is invisible to its cooperative budget.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) arithmetic_jit_allowed: bool,
+
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
     pub(crate) native_active_function: Option<JsObject>,
@@ -571,6 +578,8 @@ impl Vm {
             runtime_limits: RuntimeLimits::default(),
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
+            #[cfg(feature = "baseline-jit")]
+            arithmetic_jit_allowed: true,
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,

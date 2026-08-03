@@ -642,6 +642,7 @@ mod tests {
         vm::{BytecodeConstant, Constant, JitCompilationState},
     };
     use boa_parser::Source;
+    use futures_lite::future;
 
     use super::*;
 
@@ -797,6 +798,28 @@ mod tests {
         assert_eq!(diagnostics.state, JitCompilationState::Compiled);
         assert_eq!(diagnostics.compile_requests, 1);
         assert!(diagnostics.compiled_entries >= 1);
+    }
+
+    #[test]
+    fn budgeted_async_dispatch_yields_without_entering_generated_code() {
+        let mut context = Context::default();
+        let script = Script::parse(
+            Source::from_bytes(
+                "(function(n){var s=1;for(var i=0;i<n;i++)s=(s+i*3)%1000003;return s})(2000)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let mut evaluation = Box::pin(script.evaluate_async_with_budget(&mut context, 1));
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+        let result = future::block_on(evaluation).unwrap();
+        let expected = (0..2000_i64).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003);
+        assert_eq!(result.as_number(), Some(expected as f64));
+
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert_eq!(diagnostics.compile_requests, 0);
+        assert_eq!(diagnostics.compiled_entries, 0);
     }
 
     #[test]
