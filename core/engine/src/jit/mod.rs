@@ -10,6 +10,7 @@
 mod arithmetic;
 mod lowering;
 mod platform;
+mod runtime_call;
 mod stack_map;
 
 pub use arithmetic::ArithmeticJitDiagnostics;
@@ -19,6 +20,9 @@ pub use lowering::{
     BaselineBlock, BaselineBlockKind, BaselineController, BaselineDiagnostics, BaselineEntry,
     BaselineInstruction, BaselineIr, BaselineOperand, BaselineOperandValue, BytecodeCodeMap,
     BytecodeCodeMapEntry, CompileDecision, LoweringError, VmState,
+};
+pub use runtime_call::{
+    JitAllocationKind, JitRuntimeCall, JitRuntimeCallDiagnostics, RuntimeCallError,
 };
 pub use stack_map::{
     ActiveJitFrame, FrameCaller, FrameMetadataError, JitFrameChain, JitFrameDescriptor,
