@@ -150,6 +150,11 @@ impl BaselineIr {
                 blocks: Vec::new(),
             });
         }
+        if snapshot.instructions[0].offset != 0 {
+            return Err(LoweringError::MalformedSnapshot {
+                offset: snapshot.instructions[0].offset,
+            });
+        }
 
         let mut boundaries = BTreeSet::from([snapshot.instructions[0].offset]);
         let instruction_offsets = snapshot
@@ -158,6 +163,13 @@ impl BaselineIr {
             .map(|i| i.offset)
             .collect::<BTreeSet<_>>();
         for (index, instruction) in snapshot.instructions.iter().enumerate() {
+            if instruction.operands.iter().any(|operand| {
+                matches!(operand.value, BytecodeOperandValue::Unsigned(value) if value > u64::from(u32::MAX))
+            }) {
+                return Err(LoweringError::MalformedSnapshot {
+                    offset: instruction.offset,
+                });
+            }
             if instruction.next_offset <= instruction.offset
                 || (index + 1 < snapshot.instructions.len()
                     && snapshot.instructions[index + 1].offset != instruction.next_offset)
@@ -718,6 +730,30 @@ mod tests {
         map.push(5, 3).unwrap();
         assert!(map.push(5, 4).is_err());
         assert!(map.dump().contains("machine=+0x000003"));
+    }
+
+    #[test]
+    fn malformed_snapshot_offsets_and_wide_operands_fail_before_emission() {
+        let starts_late = snapshot(vec![op(1, 2, 1, "Return", vec![])], 2);
+        assert!(matches!(
+            BaselineIr::lower(&starts_late),
+            Err(LoweringError::MalformedSnapshot { offset: 1 })
+        ));
+
+        let wide_target = snapshot(
+            vec![op(
+                0,
+                5,
+                1,
+                "Jump",
+                vec![operand("address", u64::from(u32::MAX) + 1)],
+            )],
+            5,
+        );
+        assert!(matches!(
+            BaselineIr::lower(&wide_target),
+            Err(LoweringError::MalformedSnapshot { offset: 0 })
+        ));
     }
 
     #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
