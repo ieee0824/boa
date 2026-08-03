@@ -1,4 +1,4 @@
-use boa_gc::Rooted;
+use boa_gc::{Rooted, force_collect};
 use boa_parser::Source;
 
 use crate::{
@@ -8,7 +8,7 @@ use crate::{
     object::{
         ObjectInitializer,
         internal_methods::InternalMethodPropertyContext,
-        shape::{WeakShape, slot::SlotAttributes},
+        shape::{RootedWeakShape, slot::SlotAttributes},
     },
     property::{Attribute, PropertyDescriptor, PropertyKey},
     vm::CodeBlock,
@@ -88,6 +88,10 @@ fn property_inline_cache_retains_multiple_live_shapes() -> JsResult<()> {
         let value = function.call(&JsValue::undefined(), &[object.clone().into()], context)?;
         assert_eq!(value.as_number(), Some(f64::from(expected)));
     }
+
+    // The cache keeps its ephemeron allocations rooted even when the code
+    // block was already promoted before the cache was warmed.
+    force_collect();
 
     assert_ne!(code.ic[0].shape.borrow().to_addr_usize(), 0);
     assert_eq!(code.ic[0].secondary_shape_count(), 2);
@@ -382,7 +386,7 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let _function_root = function.clone().root();
 
     assert_eq!(code.ic.len(), 1);
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
+    assert!(matches!(*code.ic[0].shape.borrow(), RootedWeakShape::None));
 
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
@@ -392,7 +396,10 @@ fn set_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
 
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::from(&o_shape));
+    assert_eq!(
+        code.ic[0].shape.borrow().to_addr_usize(),
+        o_shape.to_addr_usize()
+    );
 
     Ok(())
 }
@@ -454,7 +461,7 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
     let _function_root = function.clone().root();
 
     assert_eq!(code.ic.len(), 1);
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::None);
+    assert!(matches!(*code.ic[0].shape.borrow(), RootedWeakShape::None));
 
     let o = ObjectInitializer::new(context)
         .property(js_string!("test"), 0, Attribute::all())
@@ -464,7 +471,10 @@ fn get_property_by_name_set_inline_cache_on_property_load() -> JsResult<()> {
 
     function.call(&JsValue::undefined(), &[o.clone().into()], context)?;
 
-    assert_eq!(code.ic[0].shape.borrow().clone(), WeakShape::from(&o_shape));
+    assert_eq!(
+        code.ic[0].shape.borrow().to_addr_usize(),
+        o_shape.to_addr_usize()
+    );
 
     Ok(())
 }

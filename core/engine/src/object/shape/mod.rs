@@ -19,9 +19,9 @@ use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
 use crate::property::PropertyKey;
 
 use self::{
-    shared_shape::{TransitionKey, WeakSharedShape},
+    shared_shape::{RootedWeakSharedShape, TransitionKey},
     slot::Slot,
-    unique_shape::WeakUniqueShape,
+    unique_shape::RootedWeakUniqueShape,
 };
 
 use super::JsPrototype;
@@ -296,54 +296,36 @@ impl From<SharedShape> for Shape {
     }
 }
 
-/// Represents a weak reaference to an object's [`Shape`].
-#[derive(Debug, Trace, Finalize, Clone, PartialEq)]
-pub(crate) enum WeakShape {
-    Unique(WeakUniqueShape),
-    Shared(WeakSharedShape),
+/// A weak shape handle for inline caches.
+///
+/// This keeps the backing ephemeron in the external root set. The shape key is
+/// still weak, so dead shapes are not retained, while the handle itself stays
+/// valid even if a cache is inserted into an old code block without a
+/// write-barrier callback on its nested cell.
+#[derive(Debug, Trace, Finalize, Clone)]
+pub(crate) enum RootedWeakShape {
+    Unique(RootedWeakUniqueShape),
+    Shared(RootedWeakSharedShape),
     None,
 }
 
-impl WeakShape {
-    /// Retargets an existing weak allocation when the shape kind is unchanged.
-    /// Returns `false` when the caller must replace this value instead.
-    pub(crate) fn retarget(&mut self, value: &ShapeEdge) -> bool {
-        match (self, &value.inner) {
-            (Self::Shared(weak), Inner::Shared(shape)) => {
-                weak.retarget(shape);
-                true
-            }
-            (Self::Unique(weak), Inner::Unique(shape)) => {
-                weak.retarget(shape);
-                true
-            }
-            _ => false,
-        }
-    }
-
-    /// Return location in memory of the [`Shape`].
-    ///
-    /// Returns `0` if the shape has been freed.
+impl RootedWeakShape {
     #[inline]
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
         match self {
-            WeakShape::Shared(shape) => shape.to_addr_usize(),
-            WeakShape::Unique(shape) => shape.to_addr_usize(),
-            WeakShape::None => 0,
+            Self::Shared(shape) => shape.to_addr_usize(),
+            Self::Unique(shape) => shape.to_addr_usize(),
+            Self::None => 0,
         }
     }
 }
 
-impl<U, S> From<&Shape<U, S>> for WeakShape
-where
-    U: ShapeGcHandle<unique_shape::Inner>,
-    S: ShapeGcHandle<shared_shape::Inner>,
-{
-    fn from(value: &Shape<U, S>) -> Self {
+impl From<&ShapeEdge> for RootedWeakShape {
+    fn from(value: &ShapeEdge) -> Self {
         match &value.inner {
-            Inner::Shared(shape) => WeakShape::Shared(shape.into()),
-            Inner::Unique(shape) => WeakShape::Unique(shape.into()),
+            Inner::Shared(shape) => Self::Shared(RootedWeakSharedShape::from(shape)),
+            Inner::Unique(shape) => Self::Unique(RootedWeakUniqueShape::from(shape)),
         }
     }
 }
