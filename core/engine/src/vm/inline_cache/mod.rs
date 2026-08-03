@@ -94,16 +94,15 @@ impl InlineCache {
     /// Otherwise we reset the internal weak reference(s) to [`WeakShape::None`],
     /// so they can be deallocated by the GC.
     pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<Slot> {
-        // SAFETY: matching and resetting weak handles cannot allocate GC storage.
-        let mut old = unsafe { self.shape.borrow_mut_no_gc() };
-
         // The receiver's shape edge is live for the duration of this lookup, so
         // comparing addresses is enough to validate the weak cache entry. The
         // previous implementation upgraded the weak shape on every hit, which
         // created a rooted shape handle even though the current object already
         // owns the matching live edge.
         let current_addr = shape.to_addr_usize();
-        if current_addr == 0 || old.to_addr_usize() != current_addr {
+        if current_addr == 0 || self.shape.borrow().to_addr_usize() != current_addr {
+            // SAFETY: resetting weak handles cannot allocate GC storage.
+            let mut old = unsafe { self.shape.borrow_mut_no_gc() };
             *old = WeakShape::None;
             *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
             return None;
@@ -120,14 +119,16 @@ impl InlineCache {
                 prototype.borrow().shape_edge().to_addr_usize()
             });
 
-            let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
-            let cached_addr = cached_prototype.to_addr_usize();
+            let cached_addr = self.prototype_shape.borrow().to_addr_usize();
 
             // Treat a missing prototype (`0`) as a miss: a `0 == 0` comparison
             // here would be a false match between a collected cached shape and a
             // now-prototype-less receiver.
             if current_prototype_addr == 0 || cached_addr != current_prototype_addr {
+                // SAFETY: resetting weak handles cannot allocate GC storage.
+                let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
                 *cached_prototype = WeakShape::None;
+                let mut old = unsafe { self.shape.borrow_mut_no_gc() };
                 *old = WeakShape::None;
                 return None;
             }
