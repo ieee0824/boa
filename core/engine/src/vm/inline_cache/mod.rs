@@ -33,16 +33,6 @@ pub(crate) struct InlineCache {
     /// own-property slots (which do not read from a prototype).
     pub(crate) prototype_shape: GcRefCell<WeakShape>,
 
-    /// Cached addresses are compared without upgrading the weak edges. The
-    /// corresponding weak shape is still checked for liveness on each hit so a
-    /// freed shape can never match an address reused by a later allocation.
-    #[unsafe_ignore_trace]
-    pub(crate) shape_addr: Cell<usize>,
-
-    /// Cached address for the prototype shape, when `slot` is a prototype slot.
-    #[unsafe_ignore_trace]
-    pub(crate) prototype_addr: Cell<usize>,
-
     /// The [`Slot`] of the property.
     #[unsafe_ignore_trace]
     pub(crate) slot: Cell<Slot>,
@@ -54,8 +44,6 @@ impl InlineCache {
             name,
             shape: GcRefCell::new(WeakShape::None),
             prototype_shape: GcRefCell::new(WeakShape::None),
-            shape_addr: Cell::new(0),
-            prototype_addr: Cell::new(0),
             slot: Cell::new(Slot::new()),
         }
     }
@@ -69,7 +57,6 @@ impl InlineCache {
             let weak_shape = shape.into();
             *unsafe { self.shape.borrow_mut_no_gc() } = weak_shape;
         }
-        self.shape_addr.set(shape.to_addr_usize());
 
         let prototype = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
             shape
@@ -87,8 +74,6 @@ impl InlineCache {
             let weak_prototype = prototype.as_ref().map_or(WeakShape::None, WeakShape::from);
             *unsafe { self.prototype_shape.borrow_mut_no_gc() } = weak_prototype;
         }
-        self.prototype_addr
-            .set(prototype.as_ref().map_or(0, ShapeEdge::to_addr_usize));
         // Prototype-property slots index into the holder prototype's storage, so
         // remember the prototype's shape to guard against it being reindexed
         // later (see the `prototype_shape` field docs). A cachable prototype
@@ -115,16 +100,11 @@ impl InlineCache {
         // created a rooted shape handle even though the current object already
         // owns the matching live edge.
         let current_addr = shape.to_addr_usize();
-        if current_addr == 0
-            || self.shape_addr.get() != current_addr
-            || !self.shape.borrow().is_upgradable()
-        {
+        if current_addr == 0 || self.shape.borrow().to_addr_usize() != current_addr {
             // SAFETY: resetting weak handles cannot allocate GC storage.
             let mut old = unsafe { self.shape.borrow_mut_no_gc() };
             *old = WeakShape::None;
             *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
-            self.shape_addr.set(0);
-            self.prototype_addr.set(0);
             return None;
         }
 
@@ -139,22 +119,17 @@ impl InlineCache {
                 prototype.borrow().shape_edge().to_addr_usize()
             });
 
-            let cached_addr = self.prototype_addr.get();
+            let cached_addr = self.prototype_shape.borrow().to_addr_usize();
 
             // Treat a missing prototype (`0`) as a miss: a `0 == 0` comparison
             // here would be a false match between a collected cached shape and a
             // now-prototype-less receiver.
-            if current_prototype_addr == 0
-                || cached_addr != current_prototype_addr
-                || !self.prototype_shape.borrow().is_upgradable()
-            {
+            if current_prototype_addr == 0 || cached_addr != current_prototype_addr {
                 // SAFETY: resetting weak handles cannot allocate GC storage.
                 let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
                 *cached_prototype = WeakShape::None;
                 let mut old = unsafe { self.shape.borrow_mut_no_gc() };
                 *old = WeakShape::None;
-                self.shape_addr.set(0);
-                self.prototype_addr.set(0);
                 return None;
             }
         }

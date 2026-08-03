@@ -333,17 +333,6 @@ impl WeakShape {
             WeakShape::None => 0,
         }
     }
-
-    /// Returns whether the weak shape still points at a live allocation.
-    #[inline]
-    #[must_use]
-    pub(crate) fn is_upgradable(&self) -> bool {
-        match self {
-            WeakShape::Shared(shape) => shape.is_upgradable(),
-            WeakShape::Unique(shape) => shape.is_upgradable(),
-            WeakShape::None => false,
-        }
-    }
 }
 
 impl<U, S> From<&Shape<U, S>> for WeakShape
