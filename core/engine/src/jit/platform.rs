@@ -52,6 +52,10 @@ impl ExecutableMemory {
     pub(super) fn mapped_len(&self) -> usize {
         self.mapping.mapped_len
     }
+
+    pub(super) fn requested_len(&self) -> usize {
+        self.mapping.requested_len
+    }
 }
 
 #[derive(Debug)]
