@@ -243,11 +243,11 @@ impl LoopRegion {
             .iter()
             .position(|i| i.name == "Jump" && unsigned(i, "address") == Some(u64::from(entry)))?
             + first;
-        let exit = snapshot.instructions[first..=backedge]
-            .iter()
-            .find(|i| i.name == "JumpIfFalse")
-            .and_then(|i| unsigned(i, "address"))? as u32;
-        if snapshot.instructions[backedge].next_offset != exit {
+        let exit = snapshot.instructions[backedge].next_offset;
+        if !snapshot.instructions[first..=backedge].iter().any(|i| {
+            matches!(i.name, "JumpIfTrue" | "JumpIfFalse")
+                && unsigned(i, "address") == Some(u64::from(exit))
+        }) {
             return None;
         }
         let supported = [
@@ -662,5 +662,26 @@ mod tests {
         .unwrap()
         .evaluate(&mut context);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn internal_conditional_branch_stays_in_generated_loop() {
+        let mut context = Context::default();
+        let instruction_count = context.vm.instruction_count.clone();
+        let result = Script::parse(
+            Source::from_bytes(
+                "(function(n){var s=0;for(var i=0;i<n;i++){if(i<50)s=s+2;else s=s-1}return s})(2000)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(-1850.0));
+        assert!(
+            instruction_count.get() < 1_500,
+            "branch loop stayed interpreted"
+        );
     }
 }
