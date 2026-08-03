@@ -563,6 +563,7 @@ pub enum JitCompilationState {
 
 /// Copyable telemetry snapshot; mutation remains inside the Boa VM.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct JitMetadataSnapshot {
     /// Number of times this code block has entered the interpreter.
     pub interpreter_entries: u64,
