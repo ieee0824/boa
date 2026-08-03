@@ -326,18 +326,25 @@ impl JitRuntimeCall {
                 capacity,
             });
         }
-        let state = unsafe { &mut *self.state.get() };
         let frame_id = NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed);
-        let caller = state.active_frames.frames().last().map_or(
-            FrameCaller::Interpreter { frame_depth: 0 },
-            |frame| FrameCaller::Jit {
-                frame_id: frame.header.frame_id,
-            },
-        );
-        if !state.active_frames.frames().is_empty() {
-            state.diagnostics.nested_calls = state.diagnostics.nested_calls.saturating_add(1);
-        }
-        state.diagnostics.generated_calls = state.diagnostics.generated_calls.saturating_add(1);
+        let caller = {
+            // End this mutable borrow before generated code enters the
+            // trampoline, which may recursively access the same runtime state.
+            let state = unsafe { &mut *self.state.get() };
+            let caller = state.active_frames.frames().last().map_or(
+                FrameCaller::Interpreter {
+                    frame_depth: context.vm.frames.len(),
+                },
+                |frame| FrameCaller::Jit {
+                    frame_id: frame.header.frame_id,
+                },
+            );
+            if !state.active_frames.frames().is_empty() {
+                state.diagnostics.nested_calls = state.diagnostics.nested_calls.saturating_add(1);
+            }
+            state.diagnostics.generated_calls = state.diagnostics.generated_calls.saturating_add(1);
+            caller
+        };
 
         let code = match request {
             RuntimeRequest::Throw | RuntimeRequest::NestedAllocate(_) => &self.call_code,
@@ -410,18 +417,30 @@ impl JitRuntimeCall {
         arguments: &[JsValue],
         context: &mut Context,
     ) -> Result<JsResult<JsValue>, RuntimeCallError> {
-        let state = unsafe { &mut *self.state.get() };
-        if let Some(remaining) = &mut state.allocation_budget {
-            if *remaining == 0 {
-                state.diagnostics.allocation_failures =
-                    state.diagnostics.allocation_failures.saturating_add(1);
-                return Err(RuntimeCallError::AllocationFailure);
+        let slow_path = {
+            // Collection below can re-enter GC root providers, so runtime state
+            // must not remain mutably borrowed across that safepoint.
+            let state = unsafe { &mut *self.state.get() };
+            if let Some(remaining) = &mut state.allocation_budget {
+                if *remaining == 0 {
+                    state.diagnostics.allocation_failures =
+                        state.diagnostics.allocation_failures.saturating_add(1);
+                    return Err(RuntimeCallError::AllocationFailure);
+                }
+                *remaining -= 1;
             }
-            *remaining -= 1;
-        }
-        if state.fast_remaining == 0 {
-            state.diagnostics.slow_allocations =
-                state.diagnostics.slow_allocations.saturating_add(1);
+            let slow_path = state.fast_remaining == 0;
+            if slow_path {
+                state.diagnostics.slow_allocations =
+                    state.diagnostics.slow_allocations.saturating_add(1);
+            } else {
+                state.diagnostics.fast_allocations =
+                    state.diagnostics.fast_allocations.saturating_add(1);
+                state.fast_remaining = state.fast_remaining.saturating_sub(1);
+            }
+            slow_path
+        };
+        if slow_path {
             // Until Gate 4-3 teaches the collector to scan JIT stack maps
             // directly, promote object-valued spills to temporary native roots.
             // The generated frame and its exact stack map remain active during
@@ -433,12 +452,10 @@ impl JitRuntimeCall {
                 .map(JsObject::root)
                 .collect::<Vec<_>>();
             boa_gc::force_collect();
+            let state = unsafe { &mut *self.state.get() };
             state.fast_remaining = state.fast_capacity;
-        } else {
-            state.diagnostics.fast_allocations =
-                state.diagnostics.fast_allocations.saturating_add(1);
+            state.fast_remaining = state.fast_remaining.saturating_sub(1);
         }
-        state.fast_remaining = state.fast_remaining.saturating_sub(1);
 
         let value = match kind {
             JitAllocationKind::Object => JsObject::with_object_proto(context.intrinsics()).into(),
