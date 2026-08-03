@@ -5,7 +5,7 @@
 //! ECMAScript Number result is not representable by this tier exits before that
 //! bytecode and lets the interpreter perform the operation.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::{
     JsValue,
@@ -327,23 +327,13 @@ impl LoopRegion {
         {
             return None;
         }
-        let mut initialized = BTreeSet::new();
-        let mut required = BTreeSet::new();
         let mut written = BTreeSet::new();
         for i in &snapshot.instructions[first..=backedge] {
-            for operand in &i.operands {
-                let Some(r) = register_operand(i.name, operand.name, operand.value) else {
-                    continue;
-                };
-                if operand.name != "dst" && !initialized.contains(&r) {
-                    required.insert(r);
-                }
-            }
             if let Some(dst) = unsigned(i, "dst").map(|v| v as u32) {
-                initialized.insert(dst);
                 written.insert(dst);
             }
         }
+        let required = required_registers(&snapshot.instructions[first..=backedge])?;
         if required
             .iter()
             .chain(written.iter())
@@ -358,6 +348,62 @@ impl LoopRegion {
             required: required.into_iter().collect(),
         })
     }
+}
+
+fn required_registers(instructions: &[crate::vm::BytecodeInstruction]) -> Option<BTreeSet<u32>> {
+    let by_offset = instructions
+        .iter()
+        .enumerate()
+        .map(|(index, instruction)| (instruction.offset, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut definitely_written = vec![None::<BTreeSet<u32>>; instructions.len()];
+    definitely_written[0] = Some(BTreeSet::new());
+    let mut queue = VecDeque::from([0_usize]);
+    while let Some(index) = queue.pop_front() {
+        let instruction = &instructions[index];
+        let mut outgoing = definitely_written[index].clone()?;
+        if let Some(dst) = unsigned(instruction, "dst").and_then(|v| u32::try_from(v).ok()) {
+            outgoing.insert(dst);
+        }
+        let mut successors = Vec::with_capacity(2);
+        if matches!(instruction.name, "Jump" | "JumpIfTrue" | "JumpIfFalse")
+            && let Some(target) =
+                unsigned(instruction, "address").and_then(|v| u32::try_from(v).ok())
+            && let Some(&target_index) = by_offset.get(&target)
+        {
+            successors.push(target_index);
+        }
+        if instruction.name != "Jump" && index + 1 < instructions.len() {
+            successors.push(index + 1);
+        }
+        successors.sort_unstable();
+        successors.dedup();
+        for successor in successors {
+            let merged = definitely_written[successor].as_ref().map_or_else(
+                || outgoing.clone(),
+                |current| current.intersection(&outgoing).copied().collect(),
+            );
+            if definitely_written[successor].as_ref() != Some(&merged) {
+                definitely_written[successor] = Some(merged);
+                queue.push_back(successor);
+            }
+        }
+    }
+
+    let mut required = BTreeSet::new();
+    for (instruction, initialized) in instructions.iter().zip(definitely_written) {
+        let initialized = initialized?;
+        for operand in &instruction.operands {
+            let Some(register) = register_operand(instruction.name, operand.name, operand.value)
+            else {
+                continue;
+            };
+            if operand.name != "dst" && !initialized.contains(&register) {
+                required.insert(register);
+            }
+        }
+    }
+    Some(required)
 }
 
 fn unsigned(i: &crate::vm::BytecodeInstruction, name: &str) -> Option<u64> {
@@ -396,6 +442,7 @@ fn register_operand(
 enum Label {
     Bytecode(u32),
     Bailout(u32),
+    Internal(u32, u8),
 }
 #[derive(Default)]
 struct Assembler {
@@ -520,7 +567,7 @@ fn emit_instruction(
             bailout(a, &[0x0f, 0x84], i.offset, bailouts);
             // Preserve lhs in r8d; idiv's INT_MIN/-1 trap must bail out.
             a.bytes(&[0x41, 0x89, 0xc0, 0x3d, 0x00, 0x00, 0x00, 0x80]);
-            let safe = Label::Bailout(i.offset | 0x8000_0000);
+            let safe = Label::Internal(i.offset, 0);
             a.jump(&[0x0f, 0x85], safe);
             a.bytes(&[0x83, 0xf9, 0xff]);
             bailout(a, &[0x0f, 0x84], i.offset, bailouts);
@@ -528,7 +575,7 @@ fn emit_instruction(
             a.bytes(&[0x99, 0xf7, 0xf9]); // cdq; idiv ecx
             // A negative zero remainder needs the interpreter's f64 representation.
             a.bytes(&[0x85, 0xd2]);
-            let nonzero = Label::Bailout(i.offset | 0x4000_0000);
+            let nonzero = Label::Internal(i.offset, 1);
             a.jump(&[0x0f, 0x85], nonzero);
             a.bytes(&[0x45, 0x85, 0xc0]);
             bailout(a, &[0x0f, 0x88], i.offset, bailouts);
@@ -586,6 +633,30 @@ mod tests {
 
     use super::*;
 
+    fn register(name: &'static str, value: u64) -> crate::vm::BytecodeOperand {
+        crate::vm::BytecodeOperand {
+            name,
+            value: crate::vm::BytecodeOperandValue::Unsigned(value),
+        }
+    }
+
+    fn instruction(
+        offset: u32,
+        next_offset: u32,
+        name: &'static str,
+        operands: Vec<crate::vm::BytecodeOperand>,
+    ) -> crate::vm::BytecodeInstruction {
+        crate::vm::BytecodeInstruction {
+            offset,
+            next_offset,
+            opcode: 0,
+            name,
+            operands,
+            source_line: None,
+            source_column: None,
+        }
+    }
+
     fn arithmetic_contract(source: &str) -> BytecodeContractSnapshot {
         let mut context = Context::default();
         let outer = Script::parse(Source::from_bytes(source), None, &mut context)
@@ -621,6 +692,30 @@ mod tests {
         assert_eq!(values[2], Some(8));
         assert_eq!(iterations, 8);
         assert!(code.code_map.entries().len() > 8);
+    }
+
+    #[test]
+    fn branch_skipped_writes_remain_required_on_native_entry() {
+        let instructions = [
+            instruction(0, 4, "Move", vec![register("dst", 1), register("src", 0)]),
+            instruction(
+                4,
+                8,
+                "JumpIfFalse",
+                vec![register("address", 12), register("value", 2)],
+            ),
+            instruction(8, 12, "Move", vec![register("dst", 3), register("src", 1)]),
+            instruction(
+                12,
+                17,
+                "Add",
+                vec![register("dst", 4), register("lhs", 3), register("rhs", 1)],
+            ),
+        ];
+        assert_eq!(
+            required_registers(&instructions).unwrap(),
+            BTreeSet::from([0, 2, 3])
+        );
     }
 
     #[test]
