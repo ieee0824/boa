@@ -66,6 +66,7 @@ fn property_inline_cache_retains_multiple_live_shapes() -> JsResult<()> {
     let function = context.eval(Source::from_bytes("(function (o) { return o.value; })"))?;
     let (function, code) = get_codeblock(&function).unwrap();
     let _function_root = function.clone().root();
+    assert_eq!(code.ic.len(), 1);
 
     let objects = [
         ObjectInitializer::new(context)
