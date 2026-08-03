@@ -37,38 +37,59 @@ impl SetPropertyByName {
 
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape_edge();
-        if let Some(slot) = ic.match_or_reset(shape) {
-            let slot_index = slot.index as usize;
+        'fast_path: {
+            if let Some(slot) = ic.match_or_reset(shape) {
+                let slot_index = slot.index as usize;
 
-            if slot.attributes.is_accessor_descriptor() {
-                let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                    let prototype = shape.prototype().expect("prototype should have value");
-                    let prototype = prototype.borrow();
-
-                    prototype.properties().storage[slot_index + 1].clone()
+                let required_index =
+                    slot_index.checked_add(usize::from(slot.attributes.is_accessor_descriptor()));
+                let prototype = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                    let Some(prototype) = shape.prototype() else {
+                        ic.invalidate_native_contract();
+                        break 'fast_path;
+                    };
+                    Some(prototype.clone())
                 } else {
-                    object_borrowed.properties().storage[slot_index + 1].clone()
+                    None
                 };
-
-                drop(object_borrowed);
-                if slot.attributes.has_set() && result.is_object() {
-                    result.as_object().expect("should contain getter").call(
-                        &receiver,
-                        std::slice::from_ref(&value),
-                        context,
-                    )?;
+                let storage_len = if let Some(prototype) = &prototype {
+                    prototype.borrow().properties().storage.len()
+                } else {
+                    object_borrowed.properties().storage.len()
+                };
+                if required_index.is_none_or(|index| index >= storage_len) {
+                    ic.invalidate_native_contract();
+                    break 'fast_path;
                 }
-            } else if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                let prototype = shape.prototype().expect("prototype should have value");
-                let mut prototype = prototype.borrow_mut();
 
-                prototype.properties_mut().storage[slot_index] = value.clone();
-            } else {
-                drop(object_borrowed);
-                let mut object_borrowed = object.borrow_mut();
-                object_borrowed.properties_mut().storage[slot_index] = value.clone();
+                if slot.attributes.is_accessor_descriptor() {
+                    let result = if let Some(prototype) = &prototype {
+                        let prototype = prototype.borrow();
+
+                        prototype.properties().storage[slot_index + 1].clone()
+                    } else {
+                        object_borrowed.properties().storage[slot_index + 1].clone()
+                    };
+
+                    drop(object_borrowed);
+                    if slot.attributes.has_set() && result.is_object() {
+                        result.as_object().expect("should contain setter").call(
+                            &receiver,
+                            std::slice::from_ref(&value),
+                            context,
+                        )?;
+                    }
+                } else if let Some(prototype) = prototype {
+                    let mut prototype = prototype.borrow_mut();
+
+                    prototype.properties_mut().storage[slot_index] = value.clone();
+                } else {
+                    drop(object_borrowed);
+                    let mut object_borrowed = object.borrow_mut();
+                    object_borrowed.properties_mut().storage[slot_index] = value.clone();
+                }
+                return Ok(());
             }
-            return Ok(());
         }
         drop(object_borrowed);
 

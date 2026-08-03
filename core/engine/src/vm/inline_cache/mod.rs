@@ -215,6 +215,36 @@ fn set_cached_entry(
 }
 
 impl InlineCache {
+    /// Returns the sole live own-data entry in a form suitable for a guarded
+    /// native property access. Polymorphic, megamorphic, prototype and accessor
+    /// caches deliberately have no native contract.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) fn monomorphic_own_data_slot(&self) -> Option<(usize, Slot)> {
+        if self.replacements.get() != 0 || self.secondary.borrow().iter().any(CacheEntry::is_live) {
+            return None;
+        }
+        let shape = self.shape.borrow();
+        let slot = self.slot();
+        if !cached_guards_are_live(&shape, &self.prototype_shape.borrow(), slot)
+            || slot.attributes.contains(SlotAttributes::PROTOTYPE)
+            || slot.attributes.is_accessor_descriptor()
+        {
+            return None;
+        }
+        Some((shape.to_addr_usize(), slot))
+    }
+
+    /// Invalidates every guarded entry after native code observes that its
+    /// compiled IC contract is stale. The next interpreter access must perform
+    /// a generic lookup and install fresh shape/slot metadata.
+    pub(crate) fn invalidate_native_contract(&self) {
+        *self.shape.borrow_mut() = RootedWeakShape::None;
+        *self.prototype_shape.borrow_mut() = RootedWeakShape::None;
+        for entry in self.secondary.borrow_mut().iter_mut() {
+            entry.clear();
+        }
+    }
+
     pub(crate) fn new(name: JsString) -> Self {
         Self {
             name,

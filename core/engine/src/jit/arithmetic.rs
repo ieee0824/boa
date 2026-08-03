@@ -1,6 +1,6 @@
 //! Bounded x86-64 integer loop emitter used by the first arithmetic baseline tier.
 //!
-//! Values cross this boundary as checked `i32`s in an engine-owned scratch frame.
+//! Values cross this boundary as checked safe integers in an engine-owned scratch frame.
 //! Generated code cannot allocate or retain GC edges. Any operation whose exact
 //! ECMAScript Number result is not representable by this tier exits before that
 //! bytecode and lets the interpreter perform the operation.
@@ -8,8 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use crate::{
-    JsValue,
-    vm::{BYTECODE_CONTRACT_VERSION, BytecodeContractSnapshot, Vm},
+    JsObject, JsValue,
+    object::shape::slot::SlotAttributes,
+    vm::{BYTECODE_CONTRACT_VERSION, BytecodeContractSnapshot, InlineCache, Vm},
 };
 
 use super::{BytecodeCodeMap, ExecutableMemory, JitError, WritableMemory};
@@ -30,7 +31,18 @@ pub(crate) struct ArithmeticCode {
     resumed_entry_offset: u32,
     bytecode_resume: u32,
     required: Box<[u32]>,
+    properties: Box<[PropertyBinding]>,
     pub(crate) code_map: BytecodeCodeMap,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PropertyBinding {
+    ic_index: u32,
+    object_register: u32,
+    shape: usize,
+    slot: u32,
+    scratch_register: u32,
+    writable: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,18 +54,29 @@ pub(crate) enum ArithmeticExit {
 impl ArithmeticCode {
     pub(crate) fn compile(
         snapshot: &BytecodeContractSnapshot,
+        inline_caches: &[InlineCache],
         bytecode_resume: u32,
     ) -> Result<Option<Self>, JitError> {
         #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
         {
-            let _ = snapshot;
+            let _ = (snapshot, inline_caches, bytecode_resume);
             return Ok(None);
         }
         #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
         {
-            let Some(region) = LoopRegion::find(snapshot, bytecode_resume) else {
+            let Some(mut region) = LoopRegion::find(snapshot, bytecode_resume) else {
                 return Ok(None);
             };
+            let Some((properties, object_move_offsets)) =
+                property_bindings(snapshot, inline_caches, &region)
+            else {
+                return Ok(None);
+            };
+            for property in &properties {
+                region
+                    .required
+                    .retain(|register| *register != property.object_register);
+            }
             let mut assembler = Assembler::default();
             let resumed_entry_offset = assembler.position();
             // r10 permanently holds the checked integer register-file pointer.
@@ -61,7 +84,7 @@ impl ArithmeticCode {
             assembler.bytes(&[0x4c, 0x8b, 0x5f, 0x08]); // mov r11, [rdi + 8]
             assembler.jump(
                 &[0xe9],
-                Label::Bytecode(snapshot.instructions[region.first].next_offset),
+                Label::Bytecode(snapshot.instructions[region.increment].next_offset),
             );
             let mut code_map = BytecodeCodeMap::default();
             let mut bailouts = BTreeSet::new();
@@ -71,7 +94,13 @@ impl ArithmeticCode {
                     .push(instruction.offset, assembler.position())
                     .expect("verified instructions and monotonic emission");
                 assembler.bind(Label::Bytecode(instruction.offset));
-                emit_instruction(&mut assembler, instruction, &mut bailouts)?;
+                emit_instruction(
+                    &mut assembler,
+                    instruction,
+                    &properties,
+                    &object_move_offsets,
+                    &mut bailouts,
+                )?;
             }
             assembler.bind(Label::Bytecode(region.exit));
             emit_exit(&mut assembler, region.exit, 0);
@@ -86,8 +115,9 @@ impl ArithmeticCode {
             Ok(Some(Self {
                 memory,
                 resumed_entry_offset,
-                bytecode_resume: snapshot.instructions[region.first].next_offset,
+                bytecode_resume: snapshot.instructions[region.increment].next_offset,
                 required: region.required.into_boxed_slice(),
+                properties: properties.into_boxed_slice(),
                 code_map,
             }))
         }
@@ -96,7 +126,7 @@ impl ArithmeticCode {
     #[cfg(test)]
     fn execute_after_increment(
         &self,
-        values: &mut [Option<i32>],
+        values: &mut [Option<i64>],
         loop_iterations: &mut u64,
         loop_limit: u64,
     ) -> Option<ArithmeticExit> {
@@ -106,7 +136,7 @@ impl ArithmeticCode {
 
     fn execute_after_increment_typed(
         &self,
-        values: &mut [Option<i32>],
+        values: &mut [Option<i64>],
         write_kinds: &mut [u8],
         loop_iterations: &mut u64,
         loop_limit: u64,
@@ -123,7 +153,7 @@ impl ArithmeticCode {
     fn execute_at(
         &self,
         machine_offset: u32,
-        values: &mut [Option<i32>],
+        values: &mut [Option<i64>],
         write_kinds: &mut [u8],
         loop_iterations: &mut u64,
         loop_limit: u64,
@@ -135,7 +165,7 @@ impl ArithmeticCode {
         }
         let mut registers = values
             .iter()
-            .map(|value| i64::from(value.unwrap_or_default()))
+            .map(|value| value.unwrap_or_default())
             .collect::<Vec<_>>();
         write_kinds.fill(0);
         let mut frame = NativeFrame {
@@ -155,7 +185,7 @@ impl ArithmeticCode {
         *loop_iterations = frame.loop_iterations;
         for (register, &write_kind) in write_kinds.iter().enumerate() {
             if write_kind != 0 {
-                values[register] = i32::try_from(registers[register]).ok();
+                values[register] = Some(registers[register]);
             }
         }
         Some(if frame.status == 0 {
@@ -189,6 +219,12 @@ pub struct ArithmeticJitDiagnostics {
     pub bailouts: u64,
     /// Cached loop sites evicted to keep executable memory bounded.
     pub cache_evictions: u64,
+    /// Native entries whose property shape and IC guards all matched.
+    pub property_guard_hits: u64,
+    /// Native entries rejected because an IC was relinked or a shape changed.
+    pub property_guard_misses: u64,
+    /// Property-enabled native entries that resumed at an exact bytecode PC.
+    pub property_bailouts: u64,
 }
 
 #[derive(Debug)]
@@ -251,9 +287,10 @@ impl ArithmeticRuntime {
                         .count()
                         == 1
                 });
-                let compiled = snapshot
-                    .as_ref()
-                    .and_then(|snapshot| ArithmeticCode::compile(snapshot, pc).ok().flatten());
+                let compiled = snapshot.as_ref().and_then(|snapshot| {
+                    ArithmeticCode::compile(snapshot, &vm.frame.code_block.ic, pc)
+                        .unwrap_or_default()
+                });
                 let Some(code) = compiled.filter(|code| code.bytecode_resume == pc) else {
                     if single_loop {
                         vm.frame.code_block.jit_metadata.disable();
@@ -290,9 +327,102 @@ impl ArithmeticRuntime {
                 if number == 0.0 && number.is_sign_negative() {
                     return None;
                 }
-                value.as_i32()
+                (number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_991.0)
+                    .then_some(number as i64)
             })
             .collect::<Vec<_>>();
+        let mut property_objects = vec![None::<JsObject>; code.properties.len()];
+        let scratch_count = code
+            .properties
+            .iter()
+            .map(|binding| binding.scratch_register as usize + 1)
+            .max()
+            .unwrap_or(register_count)
+            .max(register_count);
+        values.resize(scratch_count, None);
+        let mut property_guard_miss = false;
+        for (binding_index, binding) in code.properties.iter().enumerate() {
+            let Some(ic) = vm.frame.code_block.ic.get(binding.ic_index as usize) else {
+                property_guard_miss = true;
+                break;
+            };
+            let Some((cached_shape, cached_slot)) = ic.monomorphic_own_data_slot() else {
+                ic.invalidate_native_contract();
+                property_guard_miss = true;
+                break;
+            };
+            if cached_shape != binding.shape
+                || cached_slot.index != binding.slot
+                || (binding.writable && !cached_slot.attributes.contains(SlotAttributes::WRITABLE))
+            {
+                ic.invalidate_native_contract();
+                property_guard_miss = true;
+                break;
+            }
+            let Some(object) = vm
+                .get_register(binding.object_register as usize)
+                .as_object()
+            else {
+                property_guard_miss = true;
+                break;
+            };
+            let object_borrowed = object.borrow();
+            if object_borrowed.shape_edge().to_addr_usize() != binding.shape {
+                drop(object_borrowed);
+                ic.invalidate_native_contract();
+                property_guard_miss = true;
+                break;
+            }
+            let Some(slot_value) = object_borrowed
+                .properties()
+                .storage
+                .get(binding.slot as usize)
+            else {
+                drop(object_borrowed);
+                ic.invalidate_native_contract();
+                property_guard_miss = true;
+                break;
+            };
+            let Some(number) = slot_value.as_number() else {
+                vm.frame.code_block.jit_metadata.record_reusable_fallback();
+                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                return false;
+            };
+            if number == 0.0 && number.is_sign_negative() {
+                vm.frame.code_block.jit_metadata.record_reusable_fallback();
+                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                return false;
+            }
+            let Some(value) = (number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_991.0)
+                .then_some(number as i64)
+            else {
+                vm.frame.code_block.jit_metadata.record_reusable_fallback();
+                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                return false;
+            };
+            let scratch = binding.scratch_register as usize;
+            if let Some(previous) = values[scratch]
+                && previous != value
+            {
+                property_guard_miss = true;
+                break;
+            }
+            values[scratch] = Some(value);
+            drop(object_borrowed);
+            property_objects[binding_index] = Some(object);
+        }
+        if property_guard_miss {
+            self.diagnostics.property_guard_misses =
+                self.diagnostics.property_guard_misses.saturating_add(1);
+            vm.frame.code_block.jit_metadata.record_reusable_fallback();
+            self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+            *entry = RuntimeEntry::Warming(0);
+            return false;
+        }
+        if !code.properties.is_empty() {
+            self.diagnostics.property_guard_hits =
+                self.diagnostics.property_guard_hits.saturating_add(1);
+        }
         let mut write_kinds = vec![0; values.len()];
         let Some(exit) = code.execute_after_increment_typed(
             &mut values,
@@ -306,13 +436,30 @@ impl ArithmeticRuntime {
         };
         vm.frame.code_block.jit_metadata.record_compiled_entry();
         self.diagnostics.compiled_entries = self.diagnostics.compiled_entries.saturating_add(1);
-        for (index, (value, write_kind)) in values.into_iter().zip(write_kinds).enumerate() {
+        for (index, (&value, &write_kind)) in values
+            .iter()
+            .zip(&write_kinds)
+            .take(register_count)
+            .enumerate()
+        {
             match (value, write_kind) {
-                (Some(value), 1) => vm.set_register(index, JsValue::from(value)),
+                (Some(value), 1) => vm.set_register(index, JsValue::from(value as f64)),
                 (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
                 (_, 0) => {}
                 _ => unreachable!("emitter only writes validated arithmetic value kinds"),
             }
+        }
+        for (binding_index, binding) in code.properties.iter().enumerate() {
+            if !binding.writable || write_kinds[binding.scratch_register as usize] == 0 {
+                continue;
+            }
+            let object = property_objects[binding_index]
+                .as_ref()
+                .expect("validated property binding has a rooted object");
+            let mut object_borrowed = object.borrow_mut();
+            object_borrowed.properties_mut().storage[binding.slot as usize] = JsValue::from(
+                values[binding.scratch_register as usize].expect("dirty slot") as f64,
+            );
         }
         match exit {
             ArithmeticExit::Completed(pc) => {
@@ -323,6 +470,10 @@ impl ArithmeticRuntime {
                 vm.frame.pc = pc;
                 vm.frame.code_block.jit_metadata.record_reusable_fallback();
                 self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                if !code.properties.is_empty() {
+                    self.diagnostics.property_bailouts =
+                        self.diagnostics.property_bailouts.saturating_add(1);
+                }
                 true
             }
         }
@@ -331,9 +482,112 @@ impl ArithmeticRuntime {
 
 struct LoopRegion {
     first: usize,
+    increment: usize,
     end: usize,
     exit: u32,
     required: Vec<u32>,
+}
+
+fn property_bindings(
+    snapshot: &BytecodeContractSnapshot,
+    inline_caches: &[InlineCache],
+    region: &LoopRegion,
+) -> Option<(Vec<PropertyBinding>, BTreeSet<u32>)> {
+    let mut bindings = Vec::<PropertyBinding>::new();
+    let mut object_move_offsets = BTreeSet::new();
+    let instructions = &snapshot.instructions[region.first..region.end];
+    for (instruction_index, instruction) in instructions.iter().enumerate() {
+        let (object_operand, is_write) = match instruction.name {
+            "GetPropertyByName" => {
+                if unsigned(instruction, "receiver")? != unsigned(instruction, "value")? {
+                    return None;
+                }
+                ("value", false)
+            }
+            "SetPropertyByName" => {
+                if unsigned(instruction, "receiver")? != unsigned(instruction, "object")? {
+                    return None;
+                }
+                ("object", true)
+            }
+            _ => continue,
+        };
+        let ic_index = u32::try_from(unsigned(instruction, "ic_index")?).ok()?;
+        let temporary_object = u32::try_from(unsigned(instruction, object_operand)?).ok()?;
+        let object_register = resolve_property_object_register(
+            instructions,
+            instruction_index,
+            temporary_object,
+            &mut object_move_offsets,
+        )?;
+        let (shape, slot) = inline_caches
+            .get(ic_index as usize)?
+            .monomorphic_own_data_slot()?;
+        if is_write && !slot.attributes.contains(SlotAttributes::WRITABLE) {
+            return None;
+        }
+        let key = (object_register, shape, slot.index);
+        let scratch_register = if let Some(binding) = bindings
+            .iter_mut()
+            .find(|binding| (binding.object_register, binding.shape, binding.slot) == key)
+        {
+            binding.writable |= is_write;
+            binding.scratch_register
+        } else {
+            let unique_slots = bindings
+                .iter()
+                .map(|binding| binding.scratch_register)
+                .collect::<BTreeSet<_>>()
+                .len();
+            let scratch_register = snapshot
+                .register_count
+                .checked_add(u32::try_from(unique_slots).ok()?)?;
+            bindings.push(PropertyBinding {
+                ic_index,
+                object_register,
+                shape,
+                slot: slot.index,
+                scratch_register,
+                writable: is_write,
+            });
+            scratch_register
+        };
+        // Every IC site is independently guarded even when two sites alias the
+        // same object slot. Keep a zero-width guard-only binding for that site.
+        if !bindings.iter().any(|binding| binding.ic_index == ic_index) {
+            bindings.push(PropertyBinding {
+                ic_index,
+                object_register,
+                shape,
+                slot: slot.index,
+                scratch_register,
+                writable: false,
+            });
+        }
+    }
+    Some((bindings, object_move_offsets))
+}
+
+fn resolve_property_object_register(
+    instructions: &[crate::vm::BytecodeInstruction],
+    before: usize,
+    register: u32,
+    object_move_offsets: &mut BTreeSet<u32>,
+) -> Option<u32> {
+    for (index, instruction) in instructions[..before].iter().enumerate().rev() {
+        if unsigned(instruction, "dst").and_then(|value| u32::try_from(value).ok())
+            != Some(register)
+        {
+            continue;
+        }
+        if instruction.name != "Move" {
+            return None;
+        }
+        object_move_offsets.insert(instruction.offset);
+        let source = u32::try_from(unsigned(instruction, "src")?).ok()?;
+        return resolve_property_object_register(instructions, index, source, object_move_offsets);
+    }
+    Some(register)
 }
 
 impl LoopRegion {
@@ -341,15 +595,28 @@ impl LoopRegion {
         if !snapshot.handlers.is_empty() {
             return None;
         }
-        let first = snapshot.instructions.iter().position(|instruction| {
+        let increment = snapshot.instructions.iter().position(|instruction| {
             instruction.name == "IncrementLoopIteration"
                 && instruction.next_offset == bytecode_resume
         })?;
-        let entry = snapshot.instructions[first].offset;
-        let backedge = snapshot.instructions[first..]
+        let increment_offset = snapshot.instructions[increment].offset;
+        let by_offset = snapshot
+            .instructions
             .iter()
-            .position(|i| i.name == "Jump" && unsigned(i, "address") == Some(u64::from(entry)))?
-            + first;
+            .enumerate()
+            .map(|(index, instruction)| (instruction.offset, index))
+            .collect::<BTreeMap<_, _>>();
+        let (backedge, first) = snapshot.instructions[increment..]
+            .iter()
+            .enumerate()
+            .find_map(|(relative, instruction)| {
+                if instruction.name != "Jump" {
+                    return None;
+                }
+                let target = u32::try_from(unsigned(instruction, "address")?).ok()?;
+                let &first = by_offset.get(&target)?;
+                (target <= increment_offset).then_some((increment + relative, first))
+            })?;
         let exit = snapshot.instructions[backedge].next_offset;
         if !snapshot.instructions[first..=backedge].iter().any(|i| {
             matches!(i.name, "JumpIfTrue" | "JumpIfFalse")
@@ -367,6 +634,7 @@ impl LoopRegion {
             "PushInt32",
             "Inc",
             "Add",
+            "AddAssignLocal",
             "Sub",
             "Mul",
             "Mod",
@@ -376,6 +644,8 @@ impl LoopRegion {
             "GreaterThanOrEq",
             "StrictEq",
             "StrictNotEq",
+            "GetPropertyByName",
+            "SetPropertyByName",
             "Jump",
             "JumpIfTrue",
             "JumpIfFalse",
@@ -402,6 +672,7 @@ impl LoopRegion {
         }
         Some(Self {
             first,
+            increment,
             end: backedge + 1,
             exit,
             required: required.into_iter().collect(),
@@ -578,9 +849,22 @@ fn bailout(a: &mut Assembler, opcode: &[u8], pc: u32, set: &mut BTreeSet<u32>) {
     a.jump(opcode, Label::Bailout(pc));
 }
 
+fn guard_safe_integer(a: &mut Assembler, pc: u32, bailouts: &mut BTreeSet<u32>) {
+    a.bytes(&[0x49, 0x89, 0xc0]); // mov r8, rax
+    immediate(a, 9_007_199_254_740_991);
+    a.bytes(&[0x49, 0x39, 0xc0]); // cmp r8, rax
+    bailout(a, &[0x0f, 0x8f], pc, bailouts);
+    immediate(a, -9_007_199_254_740_991);
+    a.bytes(&[0x49, 0x39, 0xc0]); // cmp r8, rax
+    bailout(a, &[0x0f, 0x8c], pc, bailouts);
+    a.bytes(&[0x4c, 0x89, 0xc0]); // mov rax, r8
+}
+
 fn emit_instruction(
     a: &mut Assembler,
     i: &crate::vm::BytecodeInstruction,
+    properties: &[PropertyBinding],
+    object_move_offsets: &BTreeSet<u32>,
     bailouts: &mut BTreeSet<u32>,
 ) -> Result<(), JitError> {
     let dst = || {
@@ -600,6 +884,9 @@ fn emit_instruction(
             a.bytes(&[0x48, 0x83, 0x47, 0x10, 0x01]);
         }
         "Move" => {
+            if object_move_offsets.contains(&i.offset) {
+                return Ok(());
+            }
             let source = src("src")?;
             load(a, source, false);
             move_rax(a, source, dst()?, i.offset);
@@ -618,68 +905,76 @@ fn emit_instruction(
         }
         "Inc" => {
             load(a, src("src")?, false);
-            a.bytes(&[0x83, 0xc0, 0x01]);
+            a.bytes(&[0x48, 0x83, 0xc0, 0x01]);
             bailout(a, &[0x0f, 0x80], i.offset, bailouts);
-            a.bytes(&[0x48, 0x63, 0xc0]);
+            guard_safe_integer(a, i.offset, bailouts);
             store_rax(a, dst()?, 1);
         }
-        "Add" | "Sub" | "Mul" => {
-            load(a, src("lhs")?, false);
+        "Add" | "AddAssignLocal" | "Sub" | "Mul" => {
+            let output = if i.name == "AddAssignLocal" {
+                src("value")?
+            } else {
+                dst()?
+            };
+            load(
+                a,
+                src(if i.name == "AddAssignLocal" {
+                    "value"
+                } else {
+                    "lhs"
+                })?,
+                false,
+            );
             load(a, src("rhs")?, true);
             if i.name == "Mul" {
                 // A zero multiplied by a value with the opposite sign is -0,
-                // which this i32 tier cannot represent.
-                a.bytes(&[0x85, 0xc0]);
+                // which this safe-integer tier cannot represent.
+                a.bytes(&[0x48, 0x85, 0xc0]);
                 let lhs_nonzero = Label::Internal(i.offset, 2);
                 a.jump(&[0x0f, 0x85], lhs_nonzero);
-                a.bytes(&[0x85, 0xc9]);
+                a.bytes(&[0x48, 0x85, 0xc9]);
                 bailout(a, &[0x0f, 0x88], i.offset, bailouts);
                 let safe = Label::Internal(i.offset, 3);
                 a.jump(&[0xe9], safe);
                 a.bind(lhs_nonzero);
-                a.bytes(&[0x85, 0xc9]);
+                a.bytes(&[0x48, 0x85, 0xc9]);
                 a.jump(&[0x0f, 0x85], safe);
-                a.bytes(&[0x85, 0xc0]);
+                a.bytes(&[0x48, 0x85, 0xc0]);
                 bailout(a, &[0x0f, 0x88], i.offset, bailouts);
                 a.bind(safe);
             }
             a.bytes(match i.name {
-                "Add" => &[0x01, 0xc8][..],
-                "Sub" => &[0x29, 0xc8][..],
-                _ => &[0x0f, 0xaf, 0xc1][..],
+                "Add" | "AddAssignLocal" => &[0x48, 0x01, 0xc8][..],
+                "Sub" => &[0x48, 0x29, 0xc8][..],
+                _ => &[0x48, 0x0f, 0xaf, 0xc1][..],
             });
             bailout(a, &[0x0f, 0x80], i.offset, bailouts);
-            a.bytes(&[0x48, 0x63, 0xc0]);
-            store_rax(a, dst()?, 1);
+            guard_safe_integer(a, i.offset, bailouts);
+            store_rax(a, output, 1);
         }
         "Mod" => {
             load(a, src("lhs")?, false);
             load(a, src("rhs")?, true);
-            a.bytes(&[0x85, 0xc9]);
+            a.bytes(&[0x48, 0x85, 0xc9]);
             bailout(a, &[0x0f, 0x84], i.offset, bailouts);
-            // Preserve lhs in r8d; idiv's INT_MIN/-1 trap must bail out.
-            a.bytes(&[0x41, 0x89, 0xc0, 0x3d, 0x00, 0x00, 0x00, 0x80]);
-            let safe = Label::Internal(i.offset, 0);
-            a.jump(&[0x0f, 0x85], safe);
-            a.bytes(&[0x83, 0xf9, 0xff]);
-            bailout(a, &[0x0f, 0x84], i.offset, bailouts);
-            a.bind(safe);
-            a.bytes(&[0x99, 0xf7, 0xf9]); // cdq; idiv ecx
+            // Inputs are bounded to safe integers, so signed division cannot
+            // encounter the i64::MIN / -1 hardware trap.
+            a.bytes(&[0x49, 0x89, 0xc0, 0x48, 0x99, 0x48, 0xf7, 0xf9]);
             // A negative zero remainder needs the interpreter's f64 representation.
-            a.bytes(&[0x85, 0xd2]);
+            a.bytes(&[0x48, 0x85, 0xd2]);
             let nonzero = Label::Internal(i.offset, 1);
             a.jump(&[0x0f, 0x85], nonzero);
-            a.bytes(&[0x45, 0x85, 0xc0]);
+            a.bytes(&[0x4d, 0x85, 0xc0]);
             bailout(a, &[0x0f, 0x88], i.offset, bailouts);
             a.bind(nonzero);
-            a.bytes(&[0x48, 0x63, 0xc2]);
+            a.bytes(&[0x48, 0x89, 0xd0]);
             store_rax(a, dst()?, 1);
         }
         "LessThan" | "LessThanOrEq" | "GreaterThan" | "GreaterThanOrEq" | "StrictEq"
         | "StrictNotEq" => {
             load(a, src("lhs")?, false);
             load(a, src("rhs")?, true);
-            a.bytes(&[0x39, 0xc8]);
+            a.bytes(&[0x48, 0x39, 0xc8]);
             let cc = match i.name {
                 "LessThan" => 0x9c,
                 "LessThanOrEq" => 0x9e,
@@ -697,6 +992,20 @@ fn emit_instruction(
             a.bytes(&[0x48, 0x85, 0xc0]);
             let op = if i.name == "JumpIfTrue" { 0x85 } else { 0x84 };
             a.jump(&[0x0f, op], Label::Bytecode(src("address")?));
+        }
+        "GetPropertyByName" | "SetPropertyByName" => {
+            let ic_index = src("ic_index")?;
+            let binding = properties
+                .iter()
+                .find(|binding| binding.ic_index == ic_index)
+                .ok_or(JitError::InvalidCodeSize)?;
+            if i.name == "GetPropertyByName" {
+                load(a, binding.scratch_register, false);
+                store_rax(a, dst()?, 1);
+            } else {
+                load(a, src("value")?, false);
+                store_rax(a, binding.scratch_register, 1);
+            }
         }
         _ => return Err(JitError::InvalidCodeSize),
     }
@@ -776,7 +1085,9 @@ mod tests {
             .find(|instruction| instruction.name == "IncrementLoopIteration")
             .unwrap()
             .next_offset;
-        ArithmeticCode::compile(contract, resume).unwrap().unwrap()
+        ArithmeticCode::compile(contract, &[], resume)
+            .unwrap()
+            .unwrap()
     }
 
     #[test]
@@ -843,7 +1154,14 @@ mod tests {
             "(function(n){var s=1;for(var i=0;i<n;i++)s=(s+i*3)%1000003;return s})(8)",
         );
         let code = compile_arithmetic(&contract);
-        let mut values = vec![Some(i32::MAX), Some(3), Some(0), None, None, None];
+        let mut values = vec![
+            Some(9_007_199_254_740_991_i64),
+            Some(3),
+            Some(0),
+            None,
+            None,
+            None,
+        ];
         let mut iterations = 1;
         let exit = code
             .execute_after_increment(&mut values, &mut iterations, u64::MAX)
@@ -915,6 +1233,198 @@ mod tests {
         assert_eq!(diagnostics.state, JitCompilationState::Compiled);
         assert_eq!(diagnostics.compile_requests, 1);
         assert!(diagnostics.compiled_entries >= 1);
+    }
+
+    #[test]
+    fn monomorphic_property_read_and_write_run_in_generated_loop() {
+        let mut context = Context::default();
+        let instruction_count = context.vm.instruction_count.clone();
+        let result = Script::parse(
+            Source::from_bytes(
+                "(function(n){let o={x:1},s=0;for(let i=0;i<n;i++){s=s+o.x;o.x=o.x+1}\
+                 return s+o.x})(2000)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(2_003_001.0));
+        assert!(
+            instruction_count.get() < 2_000,
+            "property loop stayed interpreted"
+        );
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert_eq!(diagnostics.successful_compilations, 1);
+        assert!(diagnostics.property_guard_hits >= 1);
+        assert_eq!(diagnostics.property_guard_misses, 0);
+    }
+
+    #[test]
+    fn issue305_prop_mono_shape_stays_in_generated_loop_past_i32() {
+        let mut context = Context::default();
+        let instruction_count = context.vm.instruction_count.clone();
+        let result = Script::parse(
+            Source::from_bytes(
+                "(function(n){var o={a:1,b:2,c:3},s=0;for(var i=0;i<n;i++){o.b=o.a+i;s+=o.b+o.c}return s})(1000000)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(500_003_500_000.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(
+            instruction_count.get() < 2_000,
+            "issue #305 property shape stayed interpreted: {diagnostics:?}"
+        );
+        assert_eq!(diagnostics.successful_compilations, 1);
+        assert!(diagnostics.property_guard_hits >= 1);
+        assert_eq!(diagnostics.property_bailouts, 0);
+    }
+
+    #[test]
+    fn shape_transition_invalidates_property_machine_code() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "function f(o,n){let s=0;for(let i=0;i<n;i++){s=s+o.x;o.x=o.x+1}return s+o.x}\
+                 let a={x:1}; f(a,200); let b={pad:0,x:10}; f(b,2000)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(2_021_010.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(diagnostics.property_guard_hits >= 1);
+        assert!(diagnostics.property_guard_misses >= 1);
+        assert!(diagnostics.compile_rejections >= 1);
+    }
+
+    #[test]
+    fn delete_redefine_and_accessor_objects_never_reuse_stale_property_code() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "function f(o,n){let s=0;for(let i=0;i<n;i++)s=s+o.x;return s}\
+                 let a={x:2}; f(a,200); delete a.x; Object.defineProperty(a,'x',{value:7});\
+                 let r1=f(a,1000); let b={get x(){return 11}}; let r2=f(b,1000); r1+r2",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(18_000.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(diagnostics.property_guard_misses >= 1);
+        assert!(diagnostics.compile_rejections >= 1);
+    }
+
+    #[test]
+    fn forged_stale_ic_slot_is_invalidated_before_interpreter_resume() {
+        let mut context = Context::default();
+        let script = Script::parse(
+            Source::from_bytes(
+                "var target=Object.create(null);target.x=4;function f(o,n){let s=0;for(let i=0;i<n;i++)s=s+o.x;return s}f(target,200)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let outer = script.codeblock(&mut context).unwrap();
+        let function_index = outer
+            .constants
+            .iter()
+            .position(|constant| matches!(constant, Constant::Function(_)))
+            .unwrap();
+        let function = outer.constant_function(function_index);
+        assert_eq!(
+            script.evaluate(&mut context).unwrap().as_number(),
+            Some(800.0)
+        );
+        let ic = function.ic.first().expect("property IC");
+        let mut forged = ic.slot();
+        forged.index = forged.index.saturating_add(100);
+        forged.attributes |= SlotAttributes::PROTOTYPE;
+        ic.slot.set(forged);
+
+        let result = Script::parse(Source::from_bytes("f(target,100)"), None, &mut context)
+            .unwrap()
+            .evaluate(&mut context)
+            .unwrap();
+        assert_eq!(result.as_number(), Some(400.0));
+        assert_eq!(
+            ic.slot().index,
+            0,
+            "generic lookup must repair the stale IC"
+        );
+        assert!(!ic.slot().attributes.contains(SlotAttributes::PROTOTYPE));
+    }
+
+    #[test]
+    fn prototype_property_and_prototype_mutation_stay_in_interpreter() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "function f(o,n){let s=0;for(let i=0;i<n;i++)s=s+o.x;return s}\
+                 let p={x:3},o=Object.create(p); let a=f(o,200); p.x=5; a+f(o,200)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(1_600.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert_eq!(diagnostics.successful_compilations, 0);
+        assert!(diagnostics.compile_rejections >= 1);
+    }
+
+    #[test]
+    fn property_loop_matches_jit_suppressed_execution() {
+        const SOURCE: &str = "(function(n){let o={x:3},s=1;for(let i=0;i<n;i++){s=(s+o.x*3)%1000003;o.x=o.x+1}return s+o.x})(2000)";
+        let mut interpreted = Context::default();
+        interpreted.vm.arithmetic_jit_suppression_depth = 1;
+        let expected = Script::parse(Source::from_bytes(SOURCE), None, &mut interpreted)
+            .unwrap()
+            .evaluate(&mut interpreted)
+            .unwrap();
+
+        let mut compiled = Context::default();
+        let actual = Script::parse(Source::from_bytes(SOURCE), None, &mut compiled)
+            .unwrap()
+            .evaluate(&mut compiled)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert!(compiled.arithmetic_jit_diagnostics().property_guard_hits >= 1);
+    }
+
+    #[test]
+    fn property_write_is_committed_before_exact_arithmetic_bailout() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "function f(o,n,start){let s=start;for(let i=0;i<n;i++){o.x=o.x+1;s=s+o.x}return o.x}\
+                 let o={x:0}; f(o,200,0); o.x=0; f(o,100,9007199254740980)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_number(), Some(100.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(diagnostics.property_bailouts >= 1);
     }
 
     #[test]
@@ -1012,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_loop_does_not_block_a_supported_loop_in_the_same_function() {
+    fn property_and_arithmetic_loops_compile_independently_in_one_function() {
         let mut context = Context::default();
         let result = Script::parse(
             Source::from_bytes(
@@ -1028,8 +1538,9 @@ mod tests {
         let arithmetic = (0..2000_i64).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003);
         assert_eq!(result.as_number(), Some((arithmetic + 1999) as f64));
         let diagnostics = context.arithmetic_jit_diagnostics();
-        assert_eq!(diagnostics.compile_rejections, 1);
-        assert_eq!(diagnostics.successful_compilations, 1);
+        assert_eq!(diagnostics.compile_rejections, 0);
+        assert_eq!(diagnostics.successful_compilations, 2);
+        assert!(diagnostics.property_guard_hits >= 1);
         assert!(diagnostics.compiled_entries >= 1);
     }
 }
