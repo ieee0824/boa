@@ -54,11 +54,18 @@ pub struct Tracer {
     ephemeron_queue: VecDeque<EphemeronEntry>,
     discovered_ephemerons: Vec<EphemeronPointer>,
     discovered_ephemeron_set: HashSet<EphemeronPointer>,
-    // Minor collections must inspect old allocations that are reachable from
-    // a young object in order to discover old-to-young edges. Keep this local
-    // visited set so those old nodes are scanned once without marking them as
-    // nursery survivors.
+    // Promotion tracing may inspect old allocations reachable from a young
+    // object in order to install their write barriers. Keep this local visited
+    // set so those old nodes are scanned once without marking them as nursery
+    // survivors.
     scanned_old: HashSet<GcErasedPointer>,
+    // Whether this tracer is being used to install remembered-set barriers
+    // while an allocation is promoted. Ordinary minor collections keep the
+    // nursery bounded by skipping old allocations entirely.
+    scan_old: bool,
+    // Young allocations discovered while recursively scanning a promoted
+    // allocation. They become direct remembered roots for later minors.
+    marked_young: Vec<GcErasedPointer>,
     current_node: Option<GcErasedPointer>,
     mode: TraceMode,
 }
@@ -71,6 +78,8 @@ impl Tracer {
             discovered_ephemerons: Vec::default(),
             discovered_ephemeron_set: HashSet::default(),
             scanned_old: HashSet::default(),
+            scan_old: false,
+            marked_young: Vec::default(),
             current_node: None,
             mode: TraceMode::Major,
         }
@@ -80,6 +89,13 @@ impl Tracer {
         Self {
             mode: TraceMode::Minor,
             ..Self::new()
+        }
+    }
+
+    pub(crate) fn new_minor_scan_old() -> Self {
+        Self {
+            scan_old: true,
+            ..Self::new_minor()
         }
     }
 
@@ -155,15 +171,33 @@ impl Tracer {
                     TraceMode::Minor => {
                         if node_ref.header.is_young() {
                             if node_ref.header.is_minor_marked() {
+                                if self.scan_old {
+                                    // The main minor mark may have reached a
+                                    // young child before its parent was
+                                    // promoted. It still becomes an old-to-young
+                                    // remembered root even though no new trace
+                                    // walk is needed here.
+                                    self.marked_young.push(node);
+                                }
                                 continue;
                             }
                             node_ref.header.minor_mark();
-                        } else if !self.scanned_old.insert(node) {
-                            // Old allocations are never reclaimed by a minor
-                            // collection, but they can contain young edges. A
-                            // per-collection visited set keeps this conservative
-                            // scan finite in the presence of cycles.
+                            if self.scan_old {
+                                self.marked_young.push(node);
+                            }
+                        } else if !self.scan_old {
                             continue;
+                        } else {
+                            // Old allocations are never reclaimed by a minor
+                            // collection. Promotion tracing only visits each
+                            // old allocation once for the lifetime of its
+                            // barriers, while this local set still breaks
+                            // cycles within the current walk.
+                            let header = &node_ref.header;
+                            if header.barriers_installed() || !self.scanned_old.insert(node) {
+                                continue;
+                            }
+                            header.mark_barriers_installed();
                         }
                     }
                 }
@@ -192,19 +226,8 @@ impl Tracer {
         }
     }
 
-    /// Takes the shallow strong edges emitted by a Trace implementation. This
-    /// is used by the write barrier and deliberately does not recursively walk
-    /// the graph.
-    pub(crate) fn take_shallow_strong(&mut self) -> Vec<GcErasedPointer> {
-        self.queue.drain(..).map(|entry| entry.pointer).collect()
-    }
-
-    /// Takes the shallow ephemeron edges emitted by a Trace implementation.
-    pub(crate) fn take_shallow_ephemerons(&mut self) -> Vec<EphemeronPointer> {
-        self.ephemeron_queue
-            .drain(..)
-            .map(|entry| entry.pointer)
-            .collect()
+    pub(crate) fn take_marked_young(&mut self) -> Vec<GcErasedPointer> {
+        std::mem::take(&mut self.marked_young)
     }
 
     /// Takes the ephemerons discovered while a collection was tracing.

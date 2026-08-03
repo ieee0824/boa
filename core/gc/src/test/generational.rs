@@ -166,6 +166,56 @@ fn mutable_cell_write_remembers_old_to_young_edge() {
 }
 
 #[test]
+fn major_collection_preserves_dirty_old_parent_for_the_next_minor() {
+    run_test(|| {
+        let parent = Rooted::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&parent));
+
+        let child = GcEdge::new(42);
+        *parent.child.borrow_mut() = Some(child);
+        // The major trace sees the old-to-young edge before a minor collection
+        // has materialized it as a direct remembered nursery root.
+        force_collect();
+        force_minor_collect();
+
+        assert_eq!(
+            parent.child.borrow().as_ref().map(|value| **value),
+            Some(42)
+        );
+    });
+}
+
+#[test]
+fn promotion_remembers_a_young_child_already_marked_by_the_minor_pass() {
+    run_test(|| {
+        let parent = Rooted::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+
+        // Age the parent once before creating the child, so the parent is
+        // promoted on the next minor pass while the child remains young.
+        force_minor_collect();
+        *parent.child.borrow_mut() = Some(GcEdge::new(42));
+        force_minor_collect();
+        assert!(is_old(&parent));
+
+        // The child was already marked by the ordinary nursery walk when the
+        // parent was promoted. The promotion scan must still retain it as an
+        // old-to-young remembered root.
+        force_minor_collect();
+        Harness::assert_strong_allocations(2);
+        assert_eq!(
+            parent.child.borrow().as_ref().map(|value| **value),
+            Some(42)
+        );
+    });
+}
+
+#[test]
 fn dirty_parent_scan_preserves_previously_enqueued_roots() {
     run_test(|| {
         let parent = Rooted::new(OldHolder {
@@ -270,6 +320,33 @@ fn minor_ephemeron_tracing_handles_all_generation_pairs() {
                 force_collect();
             }
         }
+    });
+}
+
+#[test]
+fn promoted_ephemeron_value_installs_old_graph_barriers() {
+    run_test(|| {
+        let key = Rooted::new(0_u32);
+        let holder = GcEdge::new(OldHolder {
+            child: GcRefCell::new(None),
+        });
+        let ephemeron = Ephemeron::new(&key, holder.clone());
+
+        force_minor_collect();
+        force_minor_collect();
+        assert!(is_old(&key));
+        assert!(edge_is_old(&holder));
+
+        // The holder is kept alive only by the rooted ephemeron. A write to its
+        // old cell must still remember the newly allocated child.
+        *holder.child.borrow_mut() = Some(GcEdge::new(42));
+        force_minor_collect();
+
+        assert_eq!(
+            holder.child.borrow().as_ref().map(|value| **value),
+            Some(42)
+        );
+        assert!(ephemeron.has_value());
     });
 }
 

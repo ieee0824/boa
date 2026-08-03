@@ -231,16 +231,53 @@ pub(crate) fn remember_ephemeron_pointer(pointer: EphemeronPointer) {
 /// though the parent is no longer in the nursery.
 fn remember_young_allocation(pointer: GcErasedPointer) {
     // SAFETY: the allocation is live and is being promoted before any sweep.
-    let mut tracer = Tracer::new_minor();
-    // SAFETY: the allocation's vtable matches its erased pointer. Setting the
-    // current node also installs parent-aware barriers in nested cells.
-    unsafe { tracer.trace_shallow_node(pointer) };
+    let mut tracer = Tracer::new_minor_scan_old();
+    // SAFETY: the allocation's vtable matches its erased pointer. Queueing it
+    // lets the promotion tracer install the barrier on the allocation itself
+    // before walking its nested edges.
+    tracer.enqueue_root(pointer);
 
-    for child in tracer.take_shallow_strong() {
+    // Walk old descendants once while the promoted allocation is still being
+    // installed in the old generation. This discovers nested young edges and
+    // installs GcRefCell barriers on every old cell without making ordinary
+    // minor collections traverse the old heap.
+    unsafe { tracer.trace_until_empty() };
+
+    for child in tracer.take_marked_young() {
         remember_young(child);
     }
-    for ephemeron in tracer.take_shallow_ephemerons() {
-        remember_ephemeron_pointer(ephemeron);
+    for ephemeron in tracer.take_discovered_ephemerons() {
+        remember_ephemeron_allocation(ephemeron);
+    }
+}
+
+/// Installs remembered-set barriers for the value graph of an ephemeron as it
+/// is promoted. Ephemeron values are deliberately not traversed by the normal
+/// strong minor tracer, so they need the same one-time old-graph walk as a
+/// promoted strong allocation when their key is live.
+fn remember_ephemeron_allocation(pointer: EphemeronPointer) {
+    let mut pending = vec![pointer];
+    let mut seen = HashSet::new();
+    while let Some(pointer) = pending.pop() {
+        if !seen.insert(pointer) {
+            continue;
+        }
+
+        remember_ephemeron_pointer(pointer);
+        let mut tracer = Tracer::new_minor_scan_old();
+        // SAFETY: the ephemeron remains live until the nursery sweep completes;
+        // `minor_trace` only reads its key/value and emits ordinary trace edges.
+        let key_is_live = unsafe { pointer.as_ref().minor_trace(&mut tracer) };
+        if key_is_live {
+            // SAFETY: every edge emitted by the live ephemeron points to an
+            // allocation owned by this collector and remains valid during the walk.
+            unsafe { tracer.trace_until_empty() };
+
+            for child in tracer.take_marked_young() {
+                remember_young(child);
+            }
+            pending.extend(tracer.take_discovered_ephemerons());
+        }
     }
 }
 
@@ -829,6 +866,7 @@ impl Collector {
         #[cfg(feature = "gc-profile")]
         let mark_started = Instant::now();
         let pending_ephemerons = Self::mark_minor(&gc.weak_maps);
+
         #[cfg(feature = "gc-profile")]
         {
             mark_elapsed += mark_started.elapsed();
@@ -932,7 +970,7 @@ impl Collector {
 
             eph.header().minor_unmark();
             if eph.header().promote_if_mature() {
-                remember_ephemeron_pointer(*pointer);
+                remember_ephemeron_allocation(*pointer);
                 promoted_ephemerons.push(*pointer);
                 return false;
             }
@@ -1037,17 +1075,25 @@ impl Collector {
             for pointer in parents {
                 // Old allocations are not reclaimed by a minor collection, so
                 // these parent pointers stay valid until the next major sweep.
-                unsafe { tracer.trace_shallow_node(pointer) };
+                let mut parent_tracer = Tracer::new_minor_scan_old();
+                // The dirty parent itself must be traced even when its
+                // lifetime barrier was installed during promotion; this pass
+                // discovers the edge written since the previous minor.
+                unsafe { parent_tracer.trace_shallow_node(pointer) };
+                // Install barriers on any old descendants that were not
+                // visited during promotion, while retaining the inexpensive
+                // remembered-set path for subsequent minors.
+                unsafe { parent_tracer.trace_until_empty() };
 
                 // Turn the parent's current young edges into direct remembered
                 // roots. They stay there until they die or promote, so the old
                 // parent itself does not have to be rescanned on every minor.
-                for child in tracer.take_shallow_strong() {
+                for child in parent_tracer.take_marked_young() {
                     remember_young(child);
                     tracer.enqueue_root(child);
                 }
-                for ephemeron in tracer.take_shallow_ephemerons() {
-                    remember_ephemeron_pointer(ephemeron);
+                for ephemeron in parent_tracer.take_discovered_ephemerons() {
+                    remember_ephemeron_allocation(ephemeron);
                     tracer.enqueue_ephemeron(ephemeron);
                 }
             }
@@ -1228,9 +1274,16 @@ impl Collector {
                 unsafe { pointer.as_ref() }.header().is_marked()
             });
         });
-        // Every surviving old cell will dirty itself again on its next mutable
-        // borrow. Entries for dead parents must be gone before the major sweep.
-        REMEMBERED_OLD_PARENTS.with(|remembered| remembered.borrow_mut().clear());
+        // Keep reachable dirty parents for the next minor collection. A major
+        // trace can observe an old-to-young edge before the nursery pass has
+        // turned it into a direct remembered young root; dropping the parent
+        // hint here would let that young child die after the major sweep.
+        REMEMBERED_OLD_PARENTS.with(|remembered| {
+            remembered.borrow_mut().retain(|pointer| {
+                // SAFETY: this runs before the major sweep.
+                unsafe { pointer.as_ref() }.is_marked()
+            });
+        });
     }
 
     /// Walk the heap and mark any nodes deemed reachable
@@ -1288,6 +1341,7 @@ impl Collector {
         // normal marked-node fast path, so retrace it shallowly and mark the
         // new edges directly. A dirty but unreachable parent is deliberately
         // ignored: remembered entries are hints, not major-collection roots.
+        let mut reachable_dirty_parents = Vec::new();
         REMEMBERED_OLD_PARENTS.with(|remembered| {
             let parents = mem::take(&mut *remembered.borrow_mut());
             for pointer in parents {
@@ -1295,11 +1349,18 @@ impl Collector {
                 // pointers are still valid. Only reachable parents are traced.
                 if unsafe { pointer.as_ref() }.is_marked() {
                     unsafe { tracer.trace_shallow_node(pointer) };
+                    reachable_dirty_parents.push(pointer);
                 }
             }
         });
         // SAFETY: shallow tracing above emitted edges from live allocations.
         unsafe { tracer.trace_until_empty() };
+        // A major pass resets each cell's dirty bit while tracing it. Keep the
+        // reachable parent hint alive so the following minor pass can
+        // materialize any young edges that the major pass observed.
+        REMEMBERED_OLD_PARENTS.with(|remembered| {
+            remembered.borrow_mut().extend(reachable_dirty_parents);
+        });
 
         // Get the naive list of possibly dead nodes.
         for node in youngs.iter().chain(old_strongs) {
