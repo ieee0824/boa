@@ -261,6 +261,7 @@ impl InlineCache {
         {
             let secondary = self.secondary.borrow();
             if let Some(entry) = secondary.iter().find(|entry| entry.matches(shape)) {
+                self.clear_dead_primary();
                 return Some(entry.slot.get());
             }
         }
@@ -274,6 +275,14 @@ impl InlineCache {
         current_addr != 0
             && self.shape.borrow().to_addr_usize() == current_addr
             && prototype_matches(&self.prototype_shape, shape, self.slot())
+    }
+
+    fn clear_dead_primary(&self) {
+        if self.shape.borrow().to_addr_usize() == 0 {
+            // SAFETY: resetting weak handles cannot allocate GC storage.
+            *unsafe { self.shape.borrow_mut_no_gc() } = WeakShape::None;
+            *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
+        }
     }
 
     fn clear_invalid_entries(&self, shape: &ShapeEdge) {
