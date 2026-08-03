@@ -292,16 +292,6 @@ impl WeakUniqueShape {
             ptr as usize
         })
     }
-
-    /// Upgrade returns a [`UniqueShape`] pointer for the internal value if the pointer is still live,
-    /// or [`None`] if the value was already garbage collected.
-    #[inline]
-    #[must_use]
-    pub(crate) fn upgrade(&self) -> Option<UniqueShape> {
-        Some(UniqueShape {
-            inner: self.inner.upgrade()?.root(),
-        })
-    }
 }
 
 impl<H> From<&UniqueShape<H>> for WeakUniqueShape

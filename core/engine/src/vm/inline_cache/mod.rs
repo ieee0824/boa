@@ -97,14 +97,19 @@ impl InlineCache {
         // SAFETY: matching and resetting weak handles cannot allocate GC storage.
         let mut old = unsafe { self.shape.borrow_mut_no_gc() };
 
-        let old_upgraded = old.upgrade();
-        if old_upgraded.as_ref().map_or(0, Shape::to_addr_usize) != shape.to_addr_usize() {
+        // The receiver's shape edge is live for the duration of this lookup, so
+        // comparing addresses is enough to validate the weak cache entry. The
+        // previous implementation upgraded the weak shape on every hit, which
+        // created a rooted shape handle even though the current object already
+        // owns the matching live edge.
+        let current_addr = shape.to_addr_usize();
+        if current_addr == 0 || old.to_addr_usize() != current_addr {
             *old = WeakShape::None;
             *unsafe { self.prototype_shape.borrow_mut_no_gc() } = WeakShape::None;
             return None;
         }
 
-        let matched = old_upgraded.expect("addr matched a live shape, so it upgrades");
+        let matched = shape.root();
         let slot = self.slot();
 
         // A prototype-property slot indexes into the holder prototype's storage;
@@ -117,10 +122,7 @@ impl InlineCache {
             });
 
             let mut cached_prototype = unsafe { self.prototype_shape.borrow_mut_no_gc() };
-            let cached_addr = cached_prototype
-                .upgrade()
-                .as_ref()
-                .map_or(0, Shape::to_addr_usize);
+            let cached_addr = cached_prototype.to_addr_usize();
 
             // Treat a missing prototype (`0`) as a miss: a `0 == 0` comparison
             // here would be a false match between a collected cached shape and a

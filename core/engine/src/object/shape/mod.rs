@@ -333,19 +333,6 @@ impl WeakShape {
             WeakShape::None => 0,
         }
     }
-
-    /// Return location in memory of the [`Shape`].
-    ///
-    /// Returns `0` if the shape has been freed.
-    #[inline]
-    #[must_use]
-    pub(crate) fn upgrade(&self) -> Option<Shape> {
-        match self {
-            WeakShape::Shared(shape) => Some(shape.upgrade()?.into()),
-            WeakShape::Unique(shape) => Some(shape.upgrade()?.into()),
-            WeakShape::None => None,
-        }
-    }
 }
 
 impl<U, S> From<&Shape<U, S>> for WeakShape
