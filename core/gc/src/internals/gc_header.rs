@@ -26,6 +26,12 @@ pub(crate) struct GcHeader {
     generation: Cell<Generation>,
     minor_survivals: Cell<u8>,
 
+    /// Whether promotion tracing has visited this allocation's old descendants
+    /// and installed their mutable-cell write barriers. This is monotonic for
+    /// the lifetime of an allocation; later writes are covered by those
+    /// barriers and do not require rescanning the old graph.
+    barriers_installed: Cell<bool>,
+
     /// How many explicitly registered roots point at this allocation.
     ///
     /// Kept here rather than in a side table so that registering a root costs a counter
@@ -43,6 +49,7 @@ impl GcHeader {
             minor_marked: Cell::new(false),
             generation: Cell::new(Generation::Young),
             minor_survivals: Cell::new(0),
+            barriers_installed: Cell::new(false),
             root_count: Cell::new(0),
         }
     }
@@ -108,6 +115,14 @@ impl GcHeader {
         }
     }
 
+    pub(crate) fn barriers_installed(&self) -> bool {
+        self.barriers_installed.get()
+    }
+
+    pub(crate) fn mark_barriers_installed(&self) {
+        self.barriers_installed.set(true);
+    }
+
     /// Returns how many explicitly registered roots point at this allocation.
     pub(crate) fn root_count(&self) -> u32 {
         self.root_count.get()
@@ -145,6 +160,7 @@ impl fmt::Debug for GcHeader {
             .field("minor_marked", &self.is_minor_marked())
             .field("generation", &self.generation.get())
             .field("minor_survivals", &self.minor_survivals.get())
+            .field("barriers_installed", &self.barriers_installed())
             .field("root_count", &self.root_count())
             .finish_non_exhaustive()
     }

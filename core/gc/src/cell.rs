@@ -284,11 +284,8 @@ impl<T: Trace + ?Sized> Finalize for GcRefCell<T> {}
 // on GcCell's value may cause Undefined Behavior
 unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
-        if let Some(owner) = tracer
-            .current_node()
+        if let Some(owner) = tracer.current_node() {
             // SAFETY: the current node is live for the duration of tracing.
-            .filter(|owner| unsafe { owner.as_ref() }.header.is_old())
-        {
             self.barrier.owner.set(Some(owner));
             self.barrier.callback.set(Some(trace_barrier));
             self.barrier.dirty.set(false);
@@ -319,6 +316,13 @@ unsafe fn trace_barrier(state: *const ()) {
         .owner
         .get()
         .expect("traced cell barrier was missing its owner pointer");
+    // Young parents are collected through the ordinary nursery graph. The
+    // callback is nevertheless installed while tracing them so it remains
+    // valid if the parent is promoted before its next mutation.
+    // SAFETY: the owner remains live while its cell's mutable borrow exists.
+    if unsafe { owner.as_ref() }.header.is_young() {
+        return;
+    }
     if !state.dirty.replace(true) {
         remember_old_parent(owner);
     }

@@ -253,6 +253,56 @@ fn unshift() {
 }
 
 #[test]
+fn array_receiver_stays_rooted_during_property_callbacks() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function churn() {
+                let garbage = [];
+                for (let i = 0; i < 128; i++) garbage.push({value: i});
+            }
+
+            let joinValues = [];
+            for (let i = 0; i < 32; i++) {
+                Object.defineProperty(joinValues, i, {
+                    configurable: true,
+                    get() {
+                        churn();
+                        return String(i);
+                    }
+                });
+            }
+            joinValues.length = 32;
+            let joined = joinValues.join(',');
+
+            let unshiftValues = [];
+            for (let i = 0; i < 32; i++) unshiftValues[i] = i;
+            let observed = 0;
+            Object.defineProperty(unshiftValues, 0, {
+                configurable: true,
+                get() {
+                    churn();
+                    return 0;
+                },
+                set(value) {
+                    churn();
+                    observed = value;
+                }
+            });
+            unshiftValues.unshift(-1);
+        "#}),
+        TestAction::assert(indoc! {r#"
+            joined.split(',').length === 32 &&
+            joined.startsWith('0,1,2,3') &&
+            joined.endsWith('28,29,30,31') &&
+            observed === -1 &&
+            unshiftValues[1] === 0 &&
+            unshiftValues[31] === 30 &&
+            unshiftValues[32] === 31
+        "#}),
+    ]);
+}
+
+#[test]
 fn reverse() {
     run_test_actions([
         TestAction::run_harness(),
