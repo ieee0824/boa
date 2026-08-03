@@ -353,6 +353,20 @@ impl JitFrameChain {
         Ok(())
     }
 
+    /// Removes the innermost frame after generated execution returns.
+    pub fn pop(&mut self, frame_id: u64) -> Result<ActiveJitFrame, FrameMetadataError> {
+        if self
+            .0
+            .last()
+            .is_none_or(|frame| frame.header.frame_id != frame_id)
+        {
+            return Err(FrameMetadataError::BrokenCallerChain);
+        }
+        let frame = self.0.pop().expect("the innermost frame was checked above");
+        debug_assert!(self.validate());
+        Ok(frame)
+    }
+
     fn validate(&self) -> bool {
         self.0
             .iter()
@@ -493,6 +507,10 @@ mod tests {
                 .contains(&ValueLocation::FrameRegister(1))
         );
         assert!(table.lookup(0x200d).is_none());
+        assert_eq!(chain.pop(10), Err(FrameMetadataError::BrokenCallerChain));
+        assert_eq!(chain.pop(11).unwrap().header.frame_id, 11);
+        assert_eq!(chain.pop(10).unwrap().header.frame_id, 10);
+        assert_eq!(chain.pop(10), Err(FrameMetadataError::BrokenCallerChain));
     }
 
     #[test]
