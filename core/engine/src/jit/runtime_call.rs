@@ -422,10 +422,16 @@ impl JitRuntimeCall {
         if state.fast_remaining == 0 {
             state.diagnostics.slow_allocations =
                 state.diagnostics.slow_allocations.saturating_add(1);
-            // Existing interpreter-owned values and the generated frame's spill
-            // slots remain live while the collector is entered. Gate 4-3 adds
-            // scanning of those slots; current allocations also retain legacy
-            // GC edges, so this boundary is safe during the migration.
+            // Until Gate 4-3 teaches the collector to scan JIT stack maps
+            // directly, promote object-valued spills to temporary native roots.
+            // The generated frame and its exact stack map remain active during
+            // collection, so Gate 4-3 can replace this bridge without changing
+            // the runtime-call ABI.
+            let _argument_roots = arguments
+                .iter()
+                .filter_map(JsValue::as_object)
+                .map(JsObject::root)
+                .collect::<Vec<_>>();
             boa_gc::force_collect();
             state.fast_remaining = state.fast_capacity;
         } else {
