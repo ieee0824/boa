@@ -1003,6 +1003,9 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        // Property access and element conversion below can allocate and trigger
+        // a collection. Keep the receiver alive for the whole native call.
+        let _o_root = o.clone().root();
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
         // 3. If separator is undefined, let sep be the single-element String ",".
@@ -1292,6 +1295,9 @@ impl Array {
     ) -> JsResult<JsValue> {
         // 1. Let O be ? ToObject(this value).
         let o = this.to_object(context)?;
+        // The generic property operations may execute user code and allocate;
+        // the receiver must remain rooted while the array is shifted.
+        let _o_root = o.clone().root();
         // 2. Let len be ? LengthOfArrayLike(O).
         let len = o.length_of_array_like(context)?;
         // 3. Let argCount be the number of elements in items.
