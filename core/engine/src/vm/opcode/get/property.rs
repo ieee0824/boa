@@ -72,25 +72,39 @@ impl GetPropertyByName {
         let ic = &context.vm.frame().code_block().ic[usize::from(index)];
         let object_borrowed = object.borrow();
         let shape = object_borrowed.shape_edge();
-        if let Some(slot) = ic.match_or_reset(shape) {
-            let mut result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                let prototype = shape.prototype().expect("prototype should have value");
-                let prototype = prototype.borrow();
-                prototype.properties().storage[slot.index as usize].clone()
-            } else {
-                object_borrowed.properties().storage[slot.index as usize].clone()
-            };
+        'fast_path: {
+            if let Some(slot) = ic.match_or_reset(shape) {
+                let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                    let prototype = shape.prototype().expect("prototype should have value");
+                    let prototype = prototype.borrow();
+                    prototype
+                        .properties()
+                        .storage
+                        .get(slot.index as usize)
+                        .cloned()
+                } else {
+                    object_borrowed
+                        .properties()
+                        .storage
+                        .get(slot.index as usize)
+                        .cloned()
+                };
+                let Some(mut result) = result else {
+                    ic.invalidate_native_contract();
+                    break 'fast_path;
+                };
 
-            drop(object_borrowed);
-            if slot.attributes.has_get() && result.is_object() {
-                result = result.as_object().expect("should contain getter").call(
-                    &receiver,
-                    &[],
-                    context,
-                )?;
+                drop(object_borrowed);
+                if slot.attributes.has_get() && result.is_object() {
+                    result = result.as_object().expect("should contain getter").call(
+                        &receiver,
+                        &[],
+                        context,
+                    )?;
+                }
+                context.vm.set_register(dst.into(), result);
+                return Ok(());
             }
-            context.vm.set_register(dst.into(), result);
-            return Ok(());
         }
 
         drop(object_borrowed);
