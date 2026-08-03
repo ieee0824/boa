@@ -6,7 +6,14 @@
 //! instruction safety. The API is experimental and may evolve between fork
 //! revisions while Gate 3 is in progress.
 
+mod lowering;
 mod platform;
+
+pub use lowering::{
+    BaselineBlock, BaselineBlockKind, BaselineController, BaselineDiagnostics, BaselineEntry,
+    BaselineInstruction, BaselineIr, BaselineOperand, BaselineOperandValue, BytecodeCodeMap,
+    BytecodeCodeMapEntry, CompileDecision, LoweringError, VmState,
+};
 
 use std::{
     collections::HashMap,
