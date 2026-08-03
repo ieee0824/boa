@@ -184,6 +184,13 @@ impl Default for Context {
 
 // ==== Public API ====
 impl Context {
+    /// Returns runtime-wide diagnostics for the opt-in arithmetic baseline tier.
+    #[cfg(feature = "baseline-jit")]
+    #[must_use]
+    pub const fn arithmetic_jit_diagnostics(&self) -> crate::jit::ArithmeticJitDiagnostics {
+        self.vm.arithmetic_jit.diagnostics()
+    }
+
     pub(crate) fn set_pending_async_resume(
         &mut self,
         pending: builtins::generator::PendingAsyncResume,

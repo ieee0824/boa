@@ -591,6 +591,7 @@ fn is_supported(name: &str) -> bool {
             | "PushNull"
             | "PushUndefined"
             | "Move"
+            | "Inc"
             | "Add"
             | "Sub"
             | "Mul"
@@ -607,6 +608,7 @@ fn is_supported(name: &str) -> bool {
             | "Jump"
             | "JumpIfTrue"
             | "JumpIfFalse"
+            | "IncrementLoopIteration"
             | "Return"
     )
 }

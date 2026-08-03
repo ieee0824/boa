@@ -501,7 +501,15 @@ impl Context {
         let frame = self.vm.frame_mut();
         let pc = frame.pc as usize;
 
-        OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget)
+        #[cfg(feature = "baseline-jit")]
+        let arithmetic_jit_suppression_depth =
+            std::mem::replace(&mut self.vm.arithmetic_jit_suppression_depth, 1);
+        let result = OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget);
+        #[cfg(feature = "baseline-jit")]
+        {
+            self.vm.arithmetic_jit_suppression_depth = arithmetic_jit_suppression_depth;
+        }
+        result
     }
 }
 

@@ -39,6 +39,9 @@ pub(crate) use {
     inline_cache::InlineCache,
 };
 
+#[cfg(feature = "baseline-jit")]
+pub(crate) use code_block::next_jit_code_id;
+
 pub use inline_cache::{InlineCacheMetadataSnapshot, InlineCacheState};
 pub use runtime_limits::RuntimeLimits;
 pub use {
@@ -119,6 +122,16 @@ pub struct Vm {
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) environments: EnvironmentStack,
     pub(crate) runtime_limits: RuntimeLimits,
+
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
+
+    /// Non-zero while the current dispatch path must not enter arithmetic generated code.
+    ///
+    /// Budgeted async dispatch disables this around each instruction so a native
+    /// loop cannot consume work that is invisible to its cooperative budget.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) arithmetic_jit_suppression_depth: u8,
 
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
@@ -563,6 +576,10 @@ impl Vm {
             environments: EnvironmentStack::new(realm.environment()),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
+            #[cfg(feature = "baseline-jit")]
+            arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
+            #[cfg(feature = "baseline-jit")]
+            arithmetic_jit_suppression_depth: 0,
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
