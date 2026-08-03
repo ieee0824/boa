@@ -131,7 +131,7 @@ jobs:
           key: ${{ matrix.os }}-baseline-jit-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test RW-to-RX memory and entry ABI
-        run: cargo test -p boa_engine --features baseline-jit jit::
+        run: "cargo test -p boa_engine --features baseline-jit jit::"
 
   msrv:
     name: MSRV
