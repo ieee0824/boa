@@ -55,6 +55,7 @@ pub(crate) mod bytecode_contract;
 mod call_frame;
 mod code_block;
 mod completion_record;
+pub(crate) mod frame_contract;
 mod inline_cache;
 mod runtime_limits;
 
@@ -67,6 +68,15 @@ pub mod flowgraph;
 
 #[cfg(test)]
 mod tests;
+
+/// Test-only frame handoff probe installed by focused VM contract tests.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) enum FallbackProbe {
+    #[default]
+    Disabled,
+    RoundTripOnPush,
+}
 
 /// Virtual Machine.
 #[derive(Debug)]
@@ -125,6 +135,9 @@ pub struct Vm {
 
     #[cfg(test)]
     pub(crate) instruction_count: Rc<Cell<u64>>,
+
+    #[cfg(test)]
+    pub(crate) fallback_probe: FallbackProbe,
 
     /// realm holds both the global object and the environment
     pub(crate) realm: Realm,
@@ -556,6 +569,8 @@ impl Vm {
             native_call_continuation_active: false,
             #[cfg(test)]
             instruction_count: Rc::new(Cell::new(0)),
+            #[cfg(test)]
+            fallback_probe: FallbackProbe::Disabled,
             realm,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
@@ -635,6 +650,19 @@ impl Vm {
 
         std::mem::swap(&mut self.frame, &mut frame);
         self.frames.push(frame);
+
+        #[cfg(test)]
+        if matches!(self.fallback_probe, FallbackProbe::RoundTripOnPush) {
+            let layout = self
+                .verify_interpreter_frame_layout()
+                .expect("test fallback probe must verify every pushed frame");
+            let mut registers = vec![JsValue::undefined(); layout.register_count() as usize];
+            let state = self
+                .capture_interpreter_frame(&layout, &mut registers)
+                .expect("test fallback probe must capture every pushed frame");
+            self.restore_interpreter_frame(state)
+                .expect("test fallback probe must restore every pushed frame");
+        }
     }
 
     pub(crate) fn push_frame_with_stack(
