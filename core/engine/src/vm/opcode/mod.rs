@@ -502,12 +502,12 @@ impl Context {
         let pc = frame.pc as usize;
 
         #[cfg(feature = "baseline-jit")]
-        let arithmetic_jit_was_allowed =
-            std::mem::replace(&mut self.vm.arithmetic_jit_allowed, false);
+        let arithmetic_jit_suppression_depth =
+            std::mem::replace(&mut self.vm.arithmetic_jit_suppression_depth, 1);
         let result = OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget);
         #[cfg(feature = "baseline-jit")]
         {
-            self.vm.arithmetic_jit_allowed = arithmetic_jit_was_allowed;
+            self.vm.arithmetic_jit_suppression_depth = arithmetic_jit_suppression_depth;
         }
         result
     }
