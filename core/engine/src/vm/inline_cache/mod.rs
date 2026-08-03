@@ -132,6 +132,11 @@ fn set_cached_entry(
     shape: &ShapeEdge,
     slot: Slot,
 ) {
+    // A cache entry can need two new ephemerons. Keep the first one alive until
+    // both handles have been installed in their traced cells; otherwise the
+    // allocation of the second handle could collect the first one in between.
+    let _no_gc = NoGcScope::new();
+
     // SAFETY: retargeting an existing ephemeron does not allocate GC storage.
     let reused_shape = { unsafe { cached_shape.borrow_mut_no_gc() }.retarget(shape) };
     if !reused_shape {
