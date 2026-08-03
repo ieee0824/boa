@@ -608,6 +608,12 @@ impl JitMetadata {
         self.state.get() == JitCompilationState::Disabled
     }
 
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) fn mark_interpreter(&self) {
+        self.state.set(JitCompilationState::Interpreter);
+        self.compiled_contract_version.set(None);
+    }
+
     pub(crate) fn record_interpreter_entry(&self) {
         self.entries.set(self.entries.get().saturating_add(1));
     }

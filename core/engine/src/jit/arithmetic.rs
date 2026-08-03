@@ -40,7 +40,10 @@ pub(crate) enum ArithmeticExit {
 }
 
 impl ArithmeticCode {
-    pub(crate) fn compile(snapshot: &BytecodeContractSnapshot) -> Result<Option<Self>, JitError> {
+    pub(crate) fn compile(
+        snapshot: &BytecodeContractSnapshot,
+        bytecode_resume: u32,
+    ) -> Result<Option<Self>, JitError> {
         #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
         {
             let _ = snapshot;
@@ -48,7 +51,7 @@ impl ArithmeticCode {
         }
         #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
         {
-            let Some(region) = LoopRegion::find(snapshot) else {
+            let Some(region) = LoopRegion::find(snapshot, bytecode_resume) else {
                 return Ok(None);
             };
             let mut assembler = Assembler::default();
@@ -149,7 +152,7 @@ impl ArithmeticCode {
 
 #[derive(Debug, Default)]
 pub(crate) struct ArithmeticRuntime {
-    entries: HashMap<u64, RuntimeEntry>,
+    entries: HashMap<(u64, u32), RuntimeEntry>,
     diagnostics: ArithmeticJitDiagnostics,
 }
 
@@ -185,8 +188,8 @@ impl ArithmeticRuntime {
     /// Observes a loop header and, once hot, replaces repeated bytecode dispatch
     /// with one bounded generated-code call.
     pub(crate) fn try_execute_after_increment(&mut self, vm: &mut Vm) -> bool {
-        let key = vm.frame.code_block.jit_code_id;
         let pc = vm.frame.pc;
+        let key = (vm.frame.code_block.jit_code_id, pc);
         let entry = self.entries.entry(key).or_insert(RuntimeEntry::Warming(0));
         match entry {
             RuntimeEntry::Warming(count) => {
@@ -197,15 +200,24 @@ impl ArithmeticRuntime {
                 vm.frame.code_block.jit_metadata.mark_queued();
                 self.diagnostics.compile_requests =
                     self.diagnostics.compile_requests.saturating_add(1);
-                let compiled = vm
-                    .frame
-                    .code_block
-                    .bytecode_contract()
-                    .verify()
-                    .ok()
-                    .and_then(|snapshot| ArithmeticCode::compile(&snapshot).ok().flatten());
+                let snapshot = vm.frame.code_block.bytecode_contract().verify().ok();
+                let single_loop = snapshot.as_ref().is_some_and(|snapshot| {
+                    snapshot
+                        .instructions
+                        .iter()
+                        .filter(|instruction| instruction.name == "IncrementLoopIteration")
+                        .count()
+                        == 1
+                });
+                let compiled = snapshot
+                    .as_ref()
+                    .and_then(|snapshot| ArithmeticCode::compile(snapshot, pc).ok().flatten());
                 let Some(code) = compiled.filter(|code| code.bytecode_resume == pc) else {
-                    vm.frame.code_block.jit_metadata.disable();
+                    if single_loop {
+                        vm.frame.code_block.jit_metadata.disable();
+                    } else {
+                        vm.frame.code_block.jit_metadata.mark_interpreter();
+                    }
                     self.diagnostics.compile_rejections =
                         self.diagnostics.compile_rejections.saturating_add(1);
                     *entry = RuntimeEntry::Unsupported;
@@ -278,14 +290,14 @@ struct LoopRegion {
 }
 
 impl LoopRegion {
-    fn find(snapshot: &BytecodeContractSnapshot) -> Option<Self> {
+    fn find(snapshot: &BytecodeContractSnapshot, bytecode_resume: u32) -> Option<Self> {
         if !snapshot.handlers.is_empty() {
             return None;
         }
-        let first = snapshot
-            .instructions
-            .iter()
-            .position(|i| i.name == "IncrementLoopIteration")?;
+        let first = snapshot.instructions.iter().position(|instruction| {
+            instruction.name == "IncrementLoopIteration"
+                && instruction.next_offset == bytecode_resume
+        })?;
         let entry = snapshot.instructions[first].offset;
         let backedge = snapshot.instructions[first..]
             .iter()
@@ -676,12 +688,22 @@ mod tests {
             .unwrap()
     }
 
+    fn compile_arithmetic(contract: &BytecodeContractSnapshot) -> ArithmeticCode {
+        let resume = contract
+            .instructions
+            .iter()
+            .find(|instruction| instruction.name == "IncrementLoopIteration")
+            .unwrap()
+            .next_offset;
+        ArithmeticCode::compile(contract, resume).unwrap().unwrap()
+    }
+
     #[test]
     fn emitted_machine_code_executes_gate3_arithmetic_loop() {
         let contract = arithmetic_contract(
             "(function(n){var s=1;for(var i=0;i<n;i++)s=(s+i*3)%1000003;return s})(8)",
         );
-        let code = ArithmeticCode::compile(&contract).unwrap().unwrap();
+        let code = compile_arithmetic(&contract);
         let mut values = vec![Some(1), Some(8), Some(0), None, None, None];
         let mut iterations = 1;
         assert_eq!(
@@ -723,7 +745,7 @@ mod tests {
         let contract = arithmetic_contract(
             "(function(n){var s=1;for(var i=0;i<n;i++)s=(s+i*3)%1000003;return s})(8)",
         );
-        let code = ArithmeticCode::compile(&contract).unwrap().unwrap();
+        let code = compile_arithmetic(&contract);
         let mut values = vec![Some(i32::MAX), Some(3), Some(0), None, None, None];
         let mut iterations = 1;
         let exit = code
@@ -847,5 +869,27 @@ mod tests {
             instruction_count.get() < 1_500,
             "branch loop stayed interpreted"
         );
+    }
+
+    #[test]
+    fn unsupported_loop_does_not_block_a_supported_loop_in_the_same_function() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "(function(n){var o={x:0};for(var i=0;i<n;i++)o.x=i;\
+                 var s=1;for(var j=0;j<n;j++)s=(s+j*3)%1000003;return s+o.x})(2000)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        let arithmetic = (0..2000_i64).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003);
+        assert_eq!(result.as_number(), Some((arithmetic + 1999) as f64));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert_eq!(diagnostics.compile_rejections, 1);
+        assert_eq!(diagnostics.successful_compilations, 1);
+        assert!(diagnostics.compiled_entries >= 1);
     }
 }
