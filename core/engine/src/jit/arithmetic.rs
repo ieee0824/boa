@@ -5,7 +5,10 @@
 //! ECMAScript Number result is not representable by this tier exits before that
 //! bytecode and lets the interpreter perform the operation.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    time::Instant,
+};
 
 use crate::{
     JsObject, JsValue,
@@ -52,6 +55,10 @@ pub(crate) enum ArithmeticExit {
 }
 
 impl ArithmeticCode {
+    fn generated_code_bytes(&self) -> usize {
+        self.memory.requested_len()
+    }
+
     pub(crate) fn compile(
         snapshot: &BytecodeContractSnapshot,
         inline_caches: &[InlineCache],
@@ -213,6 +220,10 @@ pub struct ArithmeticJitDiagnostics {
     pub successful_compilations: u64,
     /// Requests rejected as unsupported or invalid.
     pub compile_rejections: u64,
+    /// Wall-clock nanoseconds spent verifying and emitting all compile requests.
+    pub total_compile_time_ns: u64,
+    /// Executable bytes emitted by successful compile requests.
+    pub generated_code_bytes: u64,
     /// Calls that entered generated machine code.
     pub compiled_entries: u64,
     /// Calls that resumed the interpreter.
@@ -278,6 +289,7 @@ impl ArithmeticRuntime {
                 vm.frame.code_block.jit_metadata.mark_queued();
                 self.diagnostics.compile_requests =
                     self.diagnostics.compile_requests.saturating_add(1);
+                let compile_started = Instant::now();
                 let snapshot = vm.frame.code_block.bytecode_contract().verify().ok();
                 let single_loop = snapshot.as_ref().is_some_and(|snapshot| {
                     snapshot
@@ -291,6 +303,10 @@ impl ArithmeticRuntime {
                     ArithmeticCode::compile(snapshot, &vm.frame.code_block.ic, pc)
                         .unwrap_or_default()
                 });
+                self.diagnostics.total_compile_time_ns =
+                    self.diagnostics.total_compile_time_ns.saturating_add(
+                        u64::try_from(compile_started.elapsed().as_nanos()).unwrap_or(u64::MAX),
+                    );
                 let Some(code) = compiled.filter(|code| code.bytecode_resume == pc) else {
                     if single_loop {
                         vm.frame.code_block.jit_metadata.disable();
@@ -308,6 +324,10 @@ impl ArithmeticRuntime {
                     .mark_compiled(BYTECODE_CONTRACT_VERSION);
                 self.diagnostics.successful_compilations =
                     self.diagnostics.successful_compilations.saturating_add(1);
+                self.diagnostics.generated_code_bytes = self
+                    .diagnostics
+                    .generated_code_bytes
+                    .saturating_add(u64::try_from(code.generated_code_bytes()).unwrap_or(u64::MAX));
                 *entry = RuntimeEntry::Compiled(code);
             }
             RuntimeEntry::Unsupported => return false,
@@ -1228,6 +1248,8 @@ mod tests {
         let runtime_diagnostics = context.arithmetic_jit_diagnostics();
         assert_eq!(runtime_diagnostics.compile_requests, 1);
         assert_eq!(runtime_diagnostics.successful_compilations, 1);
+        assert!(runtime_diagnostics.total_compile_time_ns > 0);
+        assert!(runtime_diagnostics.generated_code_bytes > 0);
         assert!(runtime_diagnostics.compiled_entries >= 1);
         let diagnostics = function.jit_metadata();
         assert_eq!(diagnostics.state, JitCompilationState::Compiled);
