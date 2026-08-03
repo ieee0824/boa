@@ -49,6 +49,58 @@ pub(crate) struct InlineCache {
     /// Round-robin victim used once all secondary entries are occupied.
     #[unsafe_ignore_trace]
     replacement: Cell<usize>,
+
+    /// Diagnostic counters consumed by the Gate 2/3 adapter.
+    #[unsafe_ignore_trace]
+    hits: Cell<u64>,
+    #[unsafe_ignore_trace]
+    misses: Cell<u64>,
+    #[unsafe_ignore_trace]
+    installs: Cell<u64>,
+    #[unsafe_ignore_trace]
+    replacements: Cell<u64>,
+    #[unsafe_ignore_trace]
+    telemetry_enabled: Cell<bool>,
+}
+
+/// Observable lifecycle of one bytecode inline-cache slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InlineCacheState {
+    /// No entry has all of its required shape guards live.
+    Empty,
+    /// Exactly one entry has all of its required shape guards live.
+    Monomorphic,
+    /// Multiple entries with live required guards fit in the bounded cache.
+    Polymorphic,
+    /// The bounded cache has replaced at least one receiver shape.
+    Megamorphic,
+}
+
+/// Owned diagnostics for one stable bytecode inline-cache slot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct InlineCacheMetadataSnapshot {
+    /// Stable `ic_index` encoded by property bytecode in this code block.
+    pub index: u32,
+    /// Property name associated with the bytecode call site.
+    pub name: JsString,
+    /// Current cache lifecycle state.
+    pub state: InlineCacheState,
+    /// Whether hit/miss/install counters are currently enabled.
+    pub telemetry_enabled: bool,
+    /// Number of entries whose receiver and optional prototype guards are live.
+    pub live_entries: u32,
+    /// Maximum number of receiver-shape guards retained by this slot.
+    pub capacity: u32,
+    /// Successful guard checks.
+    pub hits: u64,
+    /// Guard checks that fell back to the generic property path.
+    pub misses: u64,
+    /// Cache installations or relinks after a generic lookup.
+    pub installs: u64,
+    /// Bounded-cache victim replacements.
+    pub replacements: u64,
 }
 
 /// One secondary polymorphic inline-cache entry.
@@ -77,6 +129,10 @@ impl CacheEntry {
 
     fn shape_addr(&self) -> usize {
         self.shape.to_addr_usize()
+    }
+
+    fn is_live(&self) -> bool {
+        cached_guards_are_live(&self.shape, &self.prototype_shape, self.slot.get())
     }
 
     fn matches(&self, shape: &ShapeEdge) -> bool {
@@ -124,6 +180,16 @@ fn prototype_matches(cached_prototype: &RootedWeakShape, shape: &ShapeEdge, slot
     current != 0 && current == cached_prototype.to_addr_usize()
 }
 
+fn cached_guards_are_live(
+    cached_shape: &RootedWeakShape,
+    cached_prototype: &RootedWeakShape,
+    slot: Slot,
+) -> bool {
+    cached_shape.to_addr_usize() != 0
+        && (!slot.attributes.contains(SlotAttributes::PROTOTYPE)
+            || cached_prototype.to_addr_usize() != 0)
+}
+
 fn new_cached_shapes(shape: &ShapeEdge, slot: Slot) -> (RootedWeakShape, RootedWeakShape) {
     // The first rooted weak handle keeps its ephemeron alive while the second
     // one is created. Neither handle keeps its shape key strongly reachable.
@@ -157,10 +223,18 @@ impl InlineCache {
             slot: Cell::new(Slot::new()),
             secondary: GcRefCell::new(std::array::from_fn(|_| CacheEntry::empty())),
             replacement: Cell::new(0),
+            hits: Cell::new(0),
+            misses: Cell::new(0),
+            installs: Cell::new(0),
+            replacements: Cell::new(0),
+            telemetry_enabled: Cell::new(false),
         }
     }
 
     pub(crate) fn set(&self, shape: &ShapeEdge, slot: Slot) {
+        if self.telemetry_enabled.get() {
+            self.installs.set(self.installs.get().saturating_add(1));
+        }
         let current_addr = shape.to_addr_usize();
         let primary_addr = self.shape.borrow().to_addr_usize();
 
@@ -206,6 +280,8 @@ impl InlineCache {
             .or_else(|| {
                 let index = self.replacement.get() % MAX_SECONDARY_ENTRIES;
                 self.replacement.set((index + 1) % MAX_SECONDARY_ENTRIES);
+                self.replacements
+                    .set(self.replacements.get().saturating_add(1));
                 Some(index)
             })
             .expect("secondary inline-cache victim should exist");
@@ -235,6 +311,7 @@ impl InlineCache {
     /// other receiver shapes remain available to the polymorphic call site.
     pub(crate) fn match_or_reset(&self, shape: &ShapeEdge) -> Option<Slot> {
         if self.primary_matches(shape) {
+            self.record_hit();
             return Some(self.slot());
         }
 
@@ -242,12 +319,73 @@ impl InlineCache {
             let secondary = self.secondary.borrow();
             if let Some(entry) = secondary.iter().find(|entry| entry.matches(shape)) {
                 self.clear_dead_primary();
+                self.record_hit();
                 return Some(entry.slot.get());
             }
         }
 
+        self.record_miss();
         self.clear_invalid_entries(shape);
         None
+    }
+
+    pub(crate) fn metadata(&self, index: u32) -> InlineCacheMetadataSnapshot {
+        let primary = usize::from(cached_guards_are_live(
+            &self.shape.borrow(),
+            &self.prototype_shape.borrow(),
+            self.slot(),
+        ));
+        let secondary = self
+            .secondary
+            .borrow()
+            .iter()
+            .filter(|entry| entry.is_live())
+            .count();
+        let live_entries = primary + secondary;
+        let replacements = self.replacements.get();
+        let state = if replacements != 0 {
+            InlineCacheState::Megamorphic
+        } else {
+            match live_entries {
+                0 => InlineCacheState::Empty,
+                1 => InlineCacheState::Monomorphic,
+                _ => InlineCacheState::Polymorphic,
+            }
+        };
+        InlineCacheMetadataSnapshot {
+            index,
+            name: self.name.clone(),
+            state,
+            telemetry_enabled: self.telemetry_enabled.get(),
+            live_entries: live_entries as u32,
+            capacity: (MAX_SECONDARY_ENTRIES + 1) as u32,
+            hits: self.hits.get(),
+            misses: self.misses.get(),
+            installs: self.installs.get(),
+            replacements,
+        }
+    }
+
+    pub(crate) fn set_telemetry_enabled(&self, enabled: bool) {
+        self.telemetry_enabled.set(enabled);
+    }
+
+    pub(crate) fn reset_telemetry(&self) {
+        self.hits.set(0);
+        self.misses.set(0);
+        self.installs.set(0);
+    }
+
+    fn record_hit(&self) {
+        if self.telemetry_enabled.get() {
+            self.hits.set(self.hits.get().saturating_add(1));
+        }
+    }
+
+    fn record_miss(&self) {
+        if self.telemetry_enabled.get() {
+            self.misses.set(self.misses.get().saturating_add(1));
+        }
     }
 
     fn primary_matches(&self, shape: &ShapeEdge) -> bool {

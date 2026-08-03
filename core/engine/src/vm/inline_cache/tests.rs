@@ -2,7 +2,7 @@ use boa_gc::{Rooted, force_collect};
 use boa_parser::Source;
 
 use crate::{
-    Context, JsObject, JsResult, JsValue,
+    Context, JsObject, JsResult, JsString, JsValue,
     builtins::{OrdinaryObject, function::OrdinaryFunction},
     js_string,
     object::{
@@ -67,6 +67,7 @@ fn property_inline_cache_retains_multiple_live_shapes() -> JsResult<()> {
     let (function, code) = get_codeblock(&function).unwrap();
     let _function_root = function.clone().root();
     assert_eq!(code.ic.len(), 1);
+    code.set_inline_cache_telemetry_enabled(true);
 
     let objects = [
         ObjectInitializer::new(context)
@@ -100,6 +101,88 @@ fn property_inline_cache_retains_multiple_live_shapes() -> JsResult<()> {
     // the primary entry remains usable instead of being cleared on a miss.
     let value = function.call(&JsValue::undefined(), &[objects[0].clone().into()], context)?;
     assert_eq!(value.as_number(), Some(1.0));
+
+    let metadata = code.inline_cache_metadata();
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].index, 0);
+    assert_eq!(metadata[0].state, super::InlineCacheState::Polymorphic);
+    assert_eq!(metadata[0].live_entries, 3);
+    assert_eq!(metadata[0].capacity, 8);
+    assert_eq!(metadata[0].hits, 1);
+    assert_eq!(metadata[0].misses, 3);
+    assert_eq!(metadata[0].installs, 3);
+    assert_eq!(metadata[0].replacements, 0);
+
+    code.reset_inline_cache_telemetry();
+    let reset = code.inline_cache_metadata();
+    assert_eq!(
+        (reset[0].hits, reset[0].misses, reset[0].installs),
+        (0, 0, 0)
+    );
+    assert_eq!(reset[0].state, super::InlineCacheState::Polymorphic);
+
+    Ok(())
+}
+
+#[test]
+fn metadata_excludes_entry_with_dead_prototype_guard() {
+    let context = &mut Context::default();
+    let receiver = ObjectInitializer::new(context).build();
+    let receiver_shape = receiver.borrow().shape_edge().clone();
+    let cache = super::InlineCache::new(js_string!("value"));
+
+    *cache.shape.borrow_mut() = RootedWeakShape::from(&receiver_shape);
+    cache.slot.set(crate::object::shape::slot::Slot {
+        attributes: SlotAttributes::PROTOTYPE,
+        ..crate::object::shape::slot::Slot::new()
+    });
+
+    let metadata = cache.metadata(0);
+    assert_eq!(metadata.live_entries, 0);
+    assert_eq!(metadata.state, super::InlineCacheState::Empty);
+}
+
+#[test]
+fn inline_cache_reports_megamorphic_replacement_and_hits() -> JsResult<()> {
+    let context = &mut Context::default();
+    let function = context.eval(Source::from_bytes(
+        "(function (object) { return object.value; })",
+    ))?;
+    let (function, code) = get_codeblock(&function).unwrap();
+    let _function_root = function.clone().root();
+    code.set_inline_cache_telemetry_enabled(true);
+    let mut objects = Vec::new();
+    for index in 0..9 {
+        objects.push(
+            ObjectInitializer::new(context)
+                .property(
+                    JsString::from(format!("shape{index}")),
+                    index,
+                    Attribute::all(),
+                )
+                .property(js_string!("value"), index + 10, Attribute::all())
+                .build(),
+        );
+    }
+    let _object_roots: Vec<_> = objects.iter().map(|object| object.clone().root()).collect();
+    for (index, object) in objects.iter().enumerate() {
+        let value = function.call(&JsValue::undefined(), &[object.clone().into()], context)?;
+        assert_eq!(value.as_number(), Some(index as f64 + 10.0));
+    }
+    let value = function.call(&JsValue::undefined(), &[objects[8].clone().into()], context)?;
+    assert_eq!(value.as_number(), Some(18.0));
+
+    let metadata = code.inline_cache_metadata();
+    assert_eq!(metadata.len(), 1);
+    assert_eq!(metadata[0].index, 0);
+    assert_eq!(metadata[0].state, super::InlineCacheState::Megamorphic);
+    assert!(metadata[0].telemetry_enabled);
+    assert_eq!(metadata[0].live_entries, 8);
+    assert_eq!(metadata[0].capacity, 8);
+    assert_eq!(metadata[0].hits, 1);
+    assert_eq!(metadata[0].misses, 9);
+    assert_eq!(metadata[0].installs, 9);
+    assert_eq!(metadata[0].replacements, 1);
 
     Ok(())
 }

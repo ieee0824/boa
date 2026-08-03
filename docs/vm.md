@@ -44,6 +44,19 @@ It must consume the token before interpreter re-entry. Letting a native frame
 survive a GC safepoint still requires the independently rooted frame/stack-map
 work in Gate 4.
 
+Each verified `ic_index` addresses the same immutable `CodeBlock` cache slot for
+the lifetime of that block. Boa owns the receiver/prototype shape guards and slot
+actions so raw GC identities never escape to an embedding or compiled-code
+adapter. `CodeBlock::inline_cache_metadata()` exposes a read-only diagnostic
+snapshot for every slot: empty/monomorphic/polymorphic/megamorphic state, live
+bounded entries, hits, misses, installs (including relinks), and victim
+replacements. Gate 3 can use
+the stable bytecode index and Boa-owned guard operation while telemetry and
+fallback decisions remain observable without making cache internals mutable.
+Hit/miss/install counters are opt-in per code block, so normal property accesses
+do not perform counter updates; bounded-cache replacement state is always kept.
+Counters can be reset without discarding warmed guards for repeatable sampling.
+
 ## Architecture
 
 ![image](img/boa_architecture.png)
