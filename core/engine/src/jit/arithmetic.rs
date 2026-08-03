@@ -239,7 +239,6 @@ impl ArithmeticRuntime {
         let RuntimeEntry::Compiled(code) = entry else {
             unreachable!("successful compilation was installed above")
         };
-        vm.frame.code_block.jit_metadata.record_compiled_entry();
         debug_assert!(!code.code_map.entries().is_empty());
         let register_count = vm.frame.code_block.register_count as usize;
         let mut values = (0..register_count)
@@ -261,6 +260,7 @@ impl ArithmeticRuntime {
             self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
             return false;
         };
+        vm.frame.code_block.jit_metadata.record_compiled_entry();
         self.diagnostics.compiled_entries = self.diagnostics.compiled_entries.saturating_add(1);
         for (index, value) in values.into_iter().enumerate() {
             if let Some(value) = value {
