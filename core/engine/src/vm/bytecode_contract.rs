@@ -415,7 +415,7 @@ impl BytecodeContract<'_> {
     }
 }
 
-fn is_jump_operand(name: &str) -> bool {
+pub(crate) fn is_jump_operand(name: &str) -> bool {
     matches!(
         name,
         "address"

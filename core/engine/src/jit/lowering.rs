@@ -83,6 +83,8 @@ pub struct BaselineBlock {
     pub instructions: Vec<BaselineInstruction>,
     /// Successor block identifiers.
     pub successors: Vec<u32>,
+    /// Exception-handler successors covering this block's bytecode range.
+    pub exception_successors: Vec<u32>,
     /// Compilation disposition.
     pub kind: BaselineBlockKind,
 }
@@ -176,6 +178,18 @@ impl BaselineIr {
             .iter()
             .map(|i| i.offset)
             .collect::<BTreeSet<_>>();
+        for handler in &snapshot.handlers {
+            if handler.start >= handler.end
+                || !instruction_offsets.contains(&handler.start)
+                || !instruction_offsets.contains(&handler.end)
+            {
+                return Err(LoweringError::MalformedSnapshot {
+                    offset: handler.start,
+                });
+            }
+            boundaries.insert(handler.start);
+            boundaries.insert(handler.end);
+        }
         for (index, instruction) in snapshot.instructions.iter().enumerate() {
             if instruction.operands.iter().any(|operand| {
                 matches!(operand.value, BytecodeOperandValue::Unsigned(value) if value > u64::from(u32::MAX))
@@ -250,6 +264,14 @@ impl BaselineIr {
                 .into_iter()
                 .filter_map(|offset| block_by_offset.get(&offset).copied())
                 .collect();
+            let exception_successors = snapshot
+                .handlers
+                .iter()
+                .filter(|handler| start < handler.end && end > handler.start)
+                .filter_map(|handler| block_by_offset.get(&handler.end).copied())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             blocks.push(BaselineBlock {
                 id: id as u32,
                 start_offset: start,
@@ -261,6 +283,7 @@ impl BaselineIr {
                 },
                 instructions,
                 successors,
+                exception_successors,
                 kind,
             });
         }
@@ -291,6 +314,9 @@ impl BaselineIr {
                 block.entry_state.live_registers,
                 block.successors
             );
+            if !block.exception_successors.is_empty() {
+                let _ = writeln!(output, "  exception-succ={:?}", block.exception_successors);
+            }
             for instruction in &block.instructions {
                 let _ = write!(
                     output,
@@ -511,19 +537,7 @@ fn branch_targets(instruction: &BytecodeInstruction) -> Vec<u32> {
     instruction
         .operands
         .iter()
-        .filter(|o| {
-            matches!(
-                o.name,
-                "address"
-                    | "default"
-                    | "addresses"
-                    | "exit"
-                    | "return"
-                    | "r#return"
-                    | "throw_method_undefined"
-                    | "return_method_undefined"
-            )
-        })
+        .filter(|operand| crate::vm::bytecode_contract::is_jump_operand(operand.name))
         .filter_map(|o| match o.value {
             BytecodeOperandValue::Unsigned(v) => Some(v as u32),
             _ => None,
@@ -600,7 +614,7 @@ fn is_supported(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vm::{BytecodeInstruction, BytecodeOperand};
+    use crate::vm::{BytecodeHandler, BytecodeInstruction, BytecodeOperand};
     use crate::{Context, Script};
     use boa_parser::Source;
 
@@ -745,6 +759,33 @@ mod tests {
             vec![0, 5, 7]
         );
         assert_eq!(ir.blocks[0].successors, vec![1, 2]);
+    }
+
+    #[test]
+    fn exception_handler_entries_are_blocks_with_explicit_exception_edges() {
+        let mut input = snapshot(
+            vec![
+                op(0, 5, 1, "Add", vec![operand("dst", 0)]),
+                op(5, 6, 2, "Return", vec![]),
+            ],
+            6,
+        );
+        input.handlers.push(BytecodeHandler {
+            start: 0,
+            end: 5,
+            environment_count: 0,
+        });
+        let ir = BaselineIr::lower(&input).unwrap();
+        assert_eq!(
+            ir.blocks
+                .iter()
+                .map(|block| block.start_offset)
+                .collect::<Vec<_>>(),
+            vec![0, 5]
+        );
+        assert_eq!(ir.blocks[0].exception_successors, vec![1]);
+        assert!(ir.blocks[1].exception_successors.is_empty());
+        assert!(ir.dump().contains("exception-succ=[1]"));
     }
 
     #[test]
