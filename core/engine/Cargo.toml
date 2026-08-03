@@ -85,6 +85,10 @@ xsum = ["dep:xsum"]
 # Native Backtraces
 native-backtrace = []
 
+# Enables the test-only x86_64 baseline JIT substrate. This does not enable
+# tiering or select JIT execution in the production VM.
+baseline-jit = ["dep:libc"]
+
 [dependencies]
 tag_ptr.workspace = true
 boa_interner.workspace = true
@@ -133,6 +137,7 @@ either = { workspace = true, optional = true }
 static_assertions.workspace = true
 futures-channel.workspace = true
 aligned-vec.workspace = true
+libc = { workspace = true, optional = true }
 
 # intl deps
 boa_icu_provider = { workspace = true, features = ["std"], optional = true }

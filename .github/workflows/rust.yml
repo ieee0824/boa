@@ -107,6 +107,32 @@ jobs:
       - name: Test docs
         run: cargo test --doc --profile ci --features annex-b,intl_bundled,experimental
 
+  baseline-jit-memory:
+    name: Baseline JIT memory (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-15-intel]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            target
+            ~/.cargo/git
+            ~/.cargo/registry
+          key: ${{ matrix.os }}-baseline-jit-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Test RW-to-RX memory and entry ABI
+        run: cargo test -p boa_engine --features baseline-jit jit::
+
   msrv:
     name: MSRV
     runs-on: ubuntu-latest

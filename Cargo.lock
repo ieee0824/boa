@@ -397,6 +397,7 @@ dependencies = [
  "intrusive-collections",
  "itertools 0.14.0",
  "jemallocator",
+ "libc",
  "lz4_flex",
  "num-bigint",
  "num-integer",
