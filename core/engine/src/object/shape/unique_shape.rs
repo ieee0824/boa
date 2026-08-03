@@ -292,6 +292,13 @@ impl WeakUniqueShape {
             ptr as usize
         })
     }
+
+    /// Returns whether the weak shape still points at a live allocation.
+    #[inline]
+    #[must_use]
+    pub(crate) fn is_upgradable(&self) -> bool {
+        self.inner.is_upgradable()
+    }
 }
 
 impl<H> From<&UniqueShape<H>> for WeakUniqueShape
