@@ -10,6 +10,7 @@
 mod arithmetic;
 mod lowering;
 mod platform;
+mod stack_map;
 
 pub use arithmetic::ArithmeticJitDiagnostics;
 pub(crate) use arithmetic::ArithmeticRuntime;
@@ -18,6 +19,11 @@ pub use lowering::{
     BaselineBlock, BaselineBlockKind, BaselineController, BaselineDiagnostics, BaselineEntry,
     BaselineInstruction, BaselineIr, BaselineOperand, BaselineOperandValue, BytecodeCodeMap,
     BytecodeCodeMapEntry, CompileDecision, LoweringError, VmState,
+};
+pub use stack_map::{
+    ActiveJitFrame, FrameCaller, FrameMetadataError, JitFrameChain, JitFrameDescriptor,
+    JitFrameDescriptorId, JitFrameHeader, JitPcLookup, JitPcTable, Safepoint, SafepointKind,
+    StackMap, ValueLocation,
 };
 
 use std::{
@@ -42,6 +48,8 @@ pub enum JitError {
     Os(io::Error),
     /// A handle no longer names the current cache generation.
     StaleCodeHandle,
+    /// An emitter produced an invalid frame descriptor or stack map.
+    FrameMetadata(FrameMetadataError),
 }
 
 impl fmt::Display for JitError {
@@ -53,6 +61,7 @@ impl fmt::Display for JitError {
             Self::InvalidCodeSize => formatter.write_str("invalid JIT code size"),
             Self::Os(error) => write!(formatter, "JIT code memory operation failed: {error}"),
             Self::StaleCodeHandle => formatter.write_str("JIT code handle is stale or invalidated"),
+            Self::FrameMetadata(error) => error.fmt(formatter),
         }
     }
 }
@@ -61,6 +70,7 @@ impl std::error::Error for JitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Os(error) => Some(error),
+            Self::FrameMetadata(error) => Some(error),
             _ => None,
         }
     }
@@ -69,6 +79,12 @@ impl std::error::Error for JitError {
 impl From<io::Error> for JitError {
     fn from(error: io::Error) -> Self {
         Self::Os(error)
+    }
+}
+
+impl From<FrameMetadataError> for JitError {
+    fn from(error: FrameMetadataError) -> Self {
+        Self::FrameMetadata(error)
     }
 }
 
