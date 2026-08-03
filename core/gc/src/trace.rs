@@ -54,6 +54,11 @@ pub struct Tracer {
     ephemeron_queue: VecDeque<EphemeronEntry>,
     discovered_ephemerons: Vec<EphemeronPointer>,
     discovered_ephemeron_set: HashSet<EphemeronPointer>,
+    // Minor collections must inspect old allocations that are reachable from
+    // a young object in order to discover old-to-young edges. Keep this local
+    // visited set so those old nodes are scanned once without marking them as
+    // nursery survivors.
+    scanned_old: HashSet<GcErasedPointer>,
     current_node: Option<GcErasedPointer>,
     mode: TraceMode,
 }
@@ -65,6 +70,7 @@ impl Tracer {
             ephemeron_queue: VecDeque::default(),
             discovered_ephemerons: Vec::default(),
             discovered_ephemeron_set: HashSet::default(),
+            scanned_old: HashSet::default(),
             current_node: None,
             mode: TraceMode::Major,
         }
@@ -147,19 +153,18 @@ impl Tracer {
                         node_ref.header.mark();
                     }
                     TraceMode::Minor => {
-                        // Old allocations are outside the nursery. Their young
-                        // children are seeded directly from the remembered set,
-                        // populated when an allocation is promoted and whenever
-                        // a traced cell is mutated. Recursively tracing old nodes
-                        // here turns every minor collection back into an old-heap
-                        // traversal and defeats the generational split.
-                        if !node_ref.header.is_young() {
+                        if node_ref.header.is_young() {
+                            if node_ref.header.is_minor_marked() {
+                                continue;
+                            }
+                            node_ref.header.minor_mark();
+                        } else if !self.scanned_old.insert(node) {
+                            // Old allocations are never reclaimed by a minor
+                            // collection, but they can contain young edges. A
+                            // per-collection visited set keeps this conservative
+                            // scan finite in the presence of cycles.
                             continue;
                         }
-                        if node_ref.header.is_minor_marked() {
-                            continue;
-                        }
-                        node_ref.header.minor_mark();
                     }
                 }
 
