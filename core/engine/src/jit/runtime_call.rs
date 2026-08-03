@@ -566,21 +566,23 @@ mod tests {
     fn gc_slow_path_nested_call_exception_and_failure_are_distinct() {
         let mut context = Context::default();
         let mut runtime = JitRuntimeCall::new(2, 0).unwrap();
-        let live_object = JsObject::with_null_proto();
-        let nested = runtime
-            .nested_allocate_for_test(
-                JitAllocationKind::Array,
-                &[live_object.clone().into()],
-                &mut context,
-            )
-            .unwrap()
-            .unwrap();
-        let nested = nested.as_object().unwrap();
-        assert_eq!(nested.length_of_array_like(&mut context).unwrap(), 1);
-        assert!(JsObject::equals(
-            &nested.get(0, &mut context).unwrap().as_object().unwrap(),
-            &live_object,
-        ));
+        for _ in 0..16 {
+            let live_object = JsObject::with_null_proto();
+            let nested = runtime
+                .nested_allocate_for_test(
+                    JitAllocationKind::Array,
+                    &[live_object.clone().into()],
+                    &mut context,
+                )
+                .unwrap()
+                .unwrap();
+            let nested = nested.as_object().unwrap();
+            assert_eq!(nested.length_of_array_like(&mut context).unwrap(), 1);
+            assert!(JsObject::equals(
+                &nested.get(0, &mut context).unwrap().as_object().unwrap(),
+                &live_object,
+            ));
+        }
         assert!(runtime.throw_for_test(&mut context).unwrap().is_err());
         runtime.set_allocation_budget(Some(0));
         assert!(matches!(
@@ -588,8 +590,8 @@ mod tests {
             Err(RuntimeCallError::AllocationFailure)
         ));
         let diagnostics = runtime.diagnostics();
-        assert_eq!(diagnostics.nested_calls, 1);
-        assert_eq!(diagnostics.slow_allocations, 1);
+        assert_eq!(diagnostics.nested_calls, 16);
+        assert_eq!(diagnostics.slow_allocations, 16);
         assert_eq!(diagnostics.exceptions, 1);
         assert_eq!(diagnostics.allocation_failures, 1);
         assert_eq!(
