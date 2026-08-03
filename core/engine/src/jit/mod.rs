@@ -10,6 +10,7 @@
 mod arithmetic;
 mod lowering;
 mod platform;
+mod stack_map;
 
 pub use arithmetic::ArithmeticJitDiagnostics;
 pub(crate) use arithmetic::ArithmeticRuntime;
@@ -18,6 +19,11 @@ pub use lowering::{
     BaselineBlock, BaselineBlockKind, BaselineController, BaselineDiagnostics, BaselineEntry,
     BaselineInstruction, BaselineIr, BaselineOperand, BaselineOperandValue, BytecodeCodeMap,
     BytecodeCodeMapEntry, CompileDecision, LoweringError, VmState,
+};
+pub use stack_map::{
+    ActiveJitFrame, FrameCaller, FrameMetadataError, JitFrameChain, JitFrameDescriptor,
+    JitFrameDescriptorId, JitFrameHeader, JitPcLookup, JitPcTable, Safepoint, SafepointKind,
+    StackMap, ValueLocation,
 };
 
 use std::{

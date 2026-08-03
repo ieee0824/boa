@@ -7,6 +7,8 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    mem::size_of,
+    sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
@@ -16,7 +18,13 @@ use crate::{
     vm::{BYTECODE_CONTRACT_VERSION, BytecodeContractSnapshot, InlineCache, Vm},
 };
 
-use super::{BytecodeCodeMap, ExecutableMemory, JitError, WritableMemory};
+use super::{
+    BytecodeCodeMap, ExecutableMemory, FrameCaller, JitError, JitFrameDescriptor,
+    JitFrameDescriptorId, JitFrameHeader, Safepoint, SafepointKind, StackMap, WritableMemory,
+};
+
+static NEXT_FRAME_DESCRIPTOR_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_ACTIVE_FRAME_ID: AtomicU64 = AtomicU64::new(1);
 
 #[repr(C)]
 struct NativeFrame {
@@ -26,6 +34,7 @@ struct NativeFrame {
     loop_limit: u64,
     pc: u32,
     status: u32,
+    header: JitFrameHeader,
 }
 
 #[derive(Debug)]
@@ -36,6 +45,7 @@ pub(crate) struct ArithmeticCode {
     required: Box<[u32]>,
     properties: Box<[PropertyBinding]>,
     pub(crate) code_map: BytecodeCodeMap,
+    frame_descriptor: JitFrameDescriptor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,12 +105,23 @@ impl ArithmeticCode {
             );
             let mut code_map = BytecodeCodeMap::default();
             let mut bailouts = BTreeSet::new();
+            let mut safepoints = Vec::new();
 
             for instruction in &snapshot.instructions[region.first..region.end] {
                 code_map
                     .push(instruction.offset, assembler.position())
                     .expect("verified instructions and monotonic emission");
                 assembler.bind(Label::Bytecode(instruction.offset));
+                if instruction.name == "IncrementLoopIteration" {
+                    safepoints.push(Safepoint {
+                        machine_offset: assembler.position(),
+                        bytecode_offset: instruction.offset,
+                        kind: SafepointKind::LoopBackedge,
+                        // This tier keeps only checked i64 values in generated code;
+                        // the owning JsValues remain in the interpreter frame.
+                        stack_map: StackMap::new([]),
+                    });
+                }
                 emit_instruction(
                     &mut assembler,
                     instruction,
@@ -113,9 +134,24 @@ impl ArithmeticCode {
             emit_exit(&mut assembler, region.exit, 0);
             for pc in bailouts {
                 assembler.bind(Label::Bailout(pc));
+                safepoints.push(Safepoint {
+                    machine_offset: assembler.position(),
+                    bytecode_offset: pc,
+                    kind: SafepointKind::Bailout,
+                    stack_map: StackMap::new([]),
+                });
                 emit_exit(&mut assembler, pc, 1);
             }
             assembler.resolve()?;
+            safepoints.sort_unstable_by_key(|point| point.machine_offset);
+            let frame_descriptor = JitFrameDescriptor::new(
+                JitFrameDescriptorId(NEXT_FRAME_DESCRIPTOR_ID.fetch_add(1, Ordering::Relaxed)),
+                u32::try_from(assembler.code.len()).map_err(|_| JitError::InvalidCodeSize)?,
+                u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
+                snapshot.register_count,
+                safepoints,
+            )
+            .map_err(|_| JitError::InvalidCodeSize)?;
             let mut writable = WritableMemory::allocate(assembler.code.len())?;
             writable.write(0, &assembler.code)?;
             let memory = writable.publish()?;
@@ -126,6 +162,7 @@ impl ArithmeticCode {
                 required: region.required.into_boxed_slice(),
                 properties: properties.into_boxed_slice(),
                 code_map,
+                frame_descriptor,
             }))
         }
     }
@@ -138,7 +175,7 @@ impl ArithmeticCode {
         loop_limit: u64,
     ) -> Option<ArithmeticExit> {
         let mut write_kinds = vec![0; values.len()];
-        self.execute_after_increment_typed(values, &mut write_kinds, loop_iterations, loop_limit)
+        self.execute_after_increment_typed(values, &mut write_kinds, loop_iterations, loop_limit, 0)
     }
 
     fn execute_after_increment_typed(
@@ -147,6 +184,7 @@ impl ArithmeticCode {
         write_kinds: &mut [u8],
         loop_iterations: &mut u64,
         loop_limit: u64,
+        interpreter_frame_depth: usize,
     ) -> Option<ArithmeticExit> {
         self.execute_at(
             self.resumed_entry_offset,
@@ -154,6 +192,7 @@ impl ArithmeticCode {
             write_kinds,
             loop_iterations,
             loop_limit,
+            interpreter_frame_depth,
         )
     }
 
@@ -164,6 +203,7 @@ impl ArithmeticCode {
         write_kinds: &mut [u8],
         loop_iterations: &mut u64,
         loop_limit: u64,
+        interpreter_frame_depth: usize,
     ) -> Option<ArithmeticExit> {
         if values.len() != write_kinds.len()
             || self.required.iter().any(|&r| values[r as usize].is_none())
@@ -182,6 +222,13 @@ impl ArithmeticCode {
             loop_limit,
             pc: 0,
             status: 0,
+            header: JitFrameHeader {
+                frame_id: NEXT_ACTIVE_FRAME_ID.fetch_add(1, Ordering::Relaxed),
+                descriptor_id: self.frame_descriptor.id(),
+                caller: FrameCaller::Interpreter {
+                    frame_depth: interpreter_frame_depth,
+                },
+            },
         };
         // SAFETY: the emitter validates every register and branch, generated code
         // only accesses this frame and its fixed-size register allocation, and the
@@ -189,6 +236,7 @@ impl ArithmeticCode {
         let entry: unsafe extern "C" fn(*mut NativeFrame) =
             unsafe { std::mem::transmute(self.memory.as_ptr().add(machine_offset as usize)) };
         unsafe { entry(&raw mut frame) };
+        debug_assert_eq!(frame.header.descriptor_id, self.frame_descriptor.id());
         *loop_iterations = frame.loop_iterations;
         for (register, &write_kind) in write_kinds.iter().enumerate() {
             if write_kind != 0 {
@@ -341,6 +389,7 @@ impl ArithmeticRuntime {
             unreachable!("successful compilation was installed above")
         };
         debug_assert!(!code.code_map.entries().is_empty());
+        debug_assert!(!code.frame_descriptor.safepoints().is_empty());
         let register_count = vm.frame.code_block.register_count as usize;
         let mut values = (0..register_count)
             .map(|index| {
@@ -446,11 +495,13 @@ impl ArithmeticRuntime {
                 self.diagnostics.property_guard_hits.saturating_add(1);
         }
         let mut write_kinds = vec![0; values.len()];
+        let interpreter_frame_depth = vm.frames.len();
         let Some(exit) = code.execute_after_increment_typed(
             &mut values,
             &mut write_kinds,
             &mut vm.frame.loop_iteration_count,
             vm.runtime_limits.loop_iteration_limit(),
+            interpreter_frame_depth,
         ) else {
             vm.frame.code_block.jit_metadata.record_reusable_fallback();
             self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
@@ -1144,6 +1195,24 @@ mod tests {
         assert_eq!(values[2], Some(8));
         assert_eq!(iterations, 8);
         assert!(code.code_map.entries().len() > 8);
+        assert!(
+            code.frame_descriptor
+                .safepoints()
+                .iter()
+                .any(|point| point.kind == SafepointKind::LoopBackedge)
+        );
+        assert!(
+            code.frame_descriptor
+                .safepoints()
+                .iter()
+                .any(|point| point.kind == SafepointKind::Bailout)
+        );
+        assert!(
+            code.frame_descriptor
+                .safepoints()
+                .iter()
+                .all(|point| point.stack_map.live_values().is_empty())
+        );
     }
 
     #[test]
