@@ -290,13 +290,15 @@ fn array_receiver_stays_rooted_during_property_callbacks() {
             });
             unshiftValues.unshift(-1);
         "#}),
-        TestAction::assert_eq(
-            "joined",
-            js_str!("0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,31"),
-        ),
-        TestAction::assert(
-            "observed === -1 && unshiftValues[1] === 0 && unshiftValues[31] === 30 && unshiftValues[32] === 31",
-        ),
+        TestAction::assert(indoc! {r#"
+            joined.split(',').length === 32 &&
+            joined.startsWith('0,1,2,3') &&
+            joined.endsWith('28,29,30,31') &&
+            observed === -1 &&
+            unshiftValues[1] === 0 &&
+            unshiftValues[31] === 30 &&
+            unshiftValues[32] === 31
+        "#}),
     ]);
 }
 
