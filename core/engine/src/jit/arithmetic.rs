@@ -93,15 +93,28 @@ impl ArithmeticCode {
         }
     }
 
+    #[cfg(test)]
     fn execute_after_increment(
         &self,
         values: &mut [Option<i32>],
         loop_iterations: &mut u64,
         loop_limit: u64,
     ) -> Option<ArithmeticExit> {
+        let mut write_kinds = vec![0; values.len()];
+        self.execute_after_increment_typed(values, &mut write_kinds, loop_iterations, loop_limit)
+    }
+
+    fn execute_after_increment_typed(
+        &self,
+        values: &mut [Option<i32>],
+        write_kinds: &mut [u8],
+        loop_iterations: &mut u64,
+        loop_limit: u64,
+    ) -> Option<ArithmeticExit> {
         self.execute_at(
             self.resumed_entry_offset,
             values,
+            write_kinds,
             loop_iterations,
             loop_limit,
         )
@@ -111,20 +124,23 @@ impl ArithmeticCode {
         &self,
         machine_offset: u32,
         values: &mut [Option<i32>],
+        write_kinds: &mut [u8],
         loop_iterations: &mut u64,
         loop_limit: u64,
     ) -> Option<ArithmeticExit> {
-        if self.required.iter().any(|&r| values[r as usize].is_none()) {
+        if values.len() != write_kinds.len()
+            || self.required.iter().any(|&r| values[r as usize].is_none())
+        {
             return None;
         }
         let mut registers = values
             .iter()
             .map(|value| i64::from(value.unwrap_or_default()))
             .collect::<Vec<_>>();
-        let mut dirty = vec![0_u8; values.len()];
+        write_kinds.fill(0);
         let mut frame = NativeFrame {
             registers: registers.as_mut_ptr(),
-            dirty: dirty.as_mut_ptr(),
+            dirty: write_kinds.as_mut_ptr(),
             loop_iterations: *loop_iterations,
             loop_limit,
             pc: 0,
@@ -137,8 +153,8 @@ impl ArithmeticCode {
             unsafe { std::mem::transmute(self.memory.as_ptr().add(machine_offset as usize)) };
         unsafe { entry(&raw mut frame) };
         *loop_iterations = frame.loop_iterations;
-        for (register, &was_written) in dirty.iter().enumerate() {
-            if was_written != 0 {
+        for (register, &write_kind) in write_kinds.iter().enumerate() {
+            if write_kind != 0 {
                 values[register] = i32::try_from(registers[register]).ok();
             }
         }
@@ -251,8 +267,10 @@ impl ArithmeticRuntime {
                 value.as_i32()
             })
             .collect::<Vec<_>>();
-        let Some(exit) = code.execute_after_increment(
+        let mut write_kinds = vec![0; values.len()];
+        let Some(exit) = code.execute_after_increment_typed(
             &mut values,
+            &mut write_kinds,
             &mut vm.frame.loop_iteration_count,
             vm.runtime_limits.loop_iteration_limit(),
         ) else {
@@ -262,9 +280,12 @@ impl ArithmeticRuntime {
         };
         vm.frame.code_block.jit_metadata.record_compiled_entry();
         self.diagnostics.compiled_entries = self.diagnostics.compiled_entries.saturating_add(1);
-        for (index, value) in values.into_iter().enumerate() {
-            if let Some(value) = value {
-                vm.set_register(index, JsValue::from(value));
+        for (index, (value, write_kind)) in values.into_iter().zip(write_kinds).enumerate() {
+            match (value, write_kind) {
+                (Some(value), 1) => vm.set_register(index, JsValue::from(value)),
+                (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
+                (_, 0) => {}
+                _ => unreachable!("emitter only writes validated arithmetic value kinds"),
             }
         }
         match exit {
@@ -500,12 +521,27 @@ fn load(a: &mut Assembler, reg: u32, rcx: bool) {
     });
     a.u32(reg * 8);
 }
-fn store_rax(a: &mut Assembler, reg: u32) {
+fn store_rax(a: &mut Assembler, reg: u32, kind: u8) {
     a.bytes(&[0x49, 0x89, 0x82]);
     a.u32(reg * 8);
     a.bytes(&[0x41, 0xc6, 0x83]);
     a.u32(reg);
-    a.bytes(&[0x01]);
+    a.bytes(&[kind]);
+}
+fn move_rax(a: &mut Assembler, src: u32, dst: u32, pc: u32) {
+    // Preserve a comparison's boolean tag when Move forwards it. Untagged
+    // native-entry inputs are known numeric values.
+    a.bytes(&[0x41, 0x8a, 0x8b]);
+    a.u32(src);
+    a.bytes(&[0x84, 0xc9]);
+    let typed = Label::Internal(pc, 4);
+    a.jump(&[0x0f, 0x85], typed);
+    a.bytes(&[0xb1, 0x01]);
+    a.bind(typed);
+    a.bytes(&[0x49, 0x89, 0x82]);
+    a.u32(dst * 8);
+    a.bytes(&[0x41, 0x88, 0x8b]);
+    a.u32(dst);
 }
 fn immediate(a: &mut Assembler, value: i64) {
     a.bytes(&[0x48, 0xb8]);
@@ -538,31 +574,49 @@ fn emit_instruction(
             a.bytes(&[0x48, 0x83, 0x47, 0x10, 0x01]);
         }
         "Move" => {
-            load(a, src("src")?, false);
-            store_rax(a, dst()?);
+            let source = src("src")?;
+            load(a, source, false);
+            move_rax(a, source, dst()?, i.offset);
         }
         "PushZero" => {
             immediate(a, 0);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 1);
         }
         "PushOne" => {
             immediate(a, 1);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 1);
         }
         "PushInt8" | "PushInt16" | "PushInt32" => {
             immediate(a, signed(i, "value").ok_or(JitError::InvalidCodeSize)?);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 1);
         }
         "Inc" => {
             load(a, src("src")?, false);
             a.bytes(&[0x83, 0xc0, 0x01]);
             bailout(a, &[0x0f, 0x80], i.offset, bailouts);
             a.bytes(&[0x48, 0x63, 0xc0]);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 1);
         }
         "Add" | "Sub" | "Mul" => {
             load(a, src("lhs")?, false);
             load(a, src("rhs")?, true);
+            if i.name == "Mul" {
+                // A zero multiplied by a value with the opposite sign is -0,
+                // which this i32 tier cannot represent.
+                a.bytes(&[0x85, 0xc0]);
+                let lhs_nonzero = Label::Internal(i.offset, 2);
+                a.jump(&[0x0f, 0x85], lhs_nonzero);
+                a.bytes(&[0x85, 0xc9]);
+                bailout(a, &[0x0f, 0x88], i.offset, bailouts);
+                let safe = Label::Internal(i.offset, 3);
+                a.jump(&[0xe9], safe);
+                a.bind(lhs_nonzero);
+                a.bytes(&[0x85, 0xc9]);
+                a.jump(&[0x0f, 0x85], safe);
+                a.bytes(&[0x85, 0xc0]);
+                bailout(a, &[0x0f, 0x88], i.offset, bailouts);
+                a.bind(safe);
+            }
             a.bytes(match i.name {
                 "Add" => &[0x01, 0xc8][..],
                 "Sub" => &[0x29, 0xc8][..],
@@ -570,7 +624,7 @@ fn emit_instruction(
             });
             bailout(a, &[0x0f, 0x80], i.offset, bailouts);
             a.bytes(&[0x48, 0x63, 0xc0]);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 1);
         }
         "Mod" => {
             load(a, src("lhs")?, false);
@@ -593,7 +647,7 @@ fn emit_instruction(
             bailout(a, &[0x0f, 0x88], i.offset, bailouts);
             a.bind(nonzero);
             a.bytes(&[0x48, 0x63, 0xc2]);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 1);
         }
         "LessThan" | "LessThanOrEq" | "GreaterThan" | "GreaterThanOrEq" | "StrictEq"
         | "StrictNotEq" => {
@@ -609,7 +663,7 @@ fn emit_instruction(
                 _ => 0x95,
             };
             a.bytes(&[0x0f, cc, 0xc0, 0x48, 0x0f, 0xb6, 0xc0]);
-            store_rax(a, dst()?);
+            store_rax(a, dst()?, 2);
         }
         "Jump" => a.jump(&[0xe9], Label::Bytecode(src("address")?)),
         "JumpIfTrue" | "JumpIfFalse" => {
@@ -760,6 +814,27 @@ mod tests {
             code.execute_after_increment(&mut values, &mut iterations, u64::MAX),
             Some(ArithmeticExit::Bailout(_))
         ));
+    }
+
+    #[test]
+    fn multiplication_negative_zero_and_comparison_types_remain_observable() {
+        let mut context = Context::default();
+        let result = Script::parse(
+            Source::from_bytes(
+                "(function(n){var z=1,b=false,zero=0,neg=-1;for(var i=0;i<n;i++){z=zero*neg;b=i<3}\
+                 return Object.is(z,-0) && typeof b === 'boolean'})(200)",
+            ),
+            None,
+            &mut context,
+        )
+        .unwrap()
+        .evaluate(&mut context)
+        .unwrap();
+        assert_eq!(result.as_boolean(), Some(true));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert_eq!(diagnostics.successful_compilations, 1);
+        assert!(diagnostics.compiled_entries >= 1);
+        assert!(diagnostics.bailouts >= 1);
     }
 
     #[test]
