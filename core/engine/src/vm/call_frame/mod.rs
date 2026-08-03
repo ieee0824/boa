@@ -19,7 +19,7 @@ use thin_vec::ThinVec;
 
 bitflags::bitflags! {
     /// Flags associated with a [`CallFrame`].
-    #[derive(Debug, Default, Clone, Copy)]
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
     pub(crate) struct CallFrameFlags: u8 {
         /// When we return from this [`CallFrame`] to stop execution and
         /// return from [`crate::Context::run()`], and leave the remaining [`CallFrame`]s unchanged.

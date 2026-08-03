@@ -21,6 +21,29 @@ compiled-entry/fallback state. Gate 2 stores no executable pointer: the existing
 interpreter is authoritative, and failed or unsupported compilation must remain
 on that path. Executable memory and native entry installation belong to Gate 3.
 
+## Interpreter fallback frame
+
+The crate-private Gate 2 frame contract verifies a reusable code-block layout
+once, then captures the current program counter, register file, call depth,
+argument/register pointers, lexical environment bounds, loop counter, return
+value, and pending exception without decoding bytecode again. Restore
+is accepted only for the same active frame, the same bytecode contract version,
+an instruction-boundary program counter, an exact-size register file, and an
+environment depth that can be reached by truncation. Iterator, binding-update,
+constructor, async/generator, module, active-native-call, and native-continuation
+state is rejected instead of being approximated.
+The consumed token returns an explicit continue, return, or throw disposition
+to the dispatcher, so fallback cannot infer control flow from a value slot. The
+same verified layout supplies PC boundaries and register count at capture and
+restore, keeping the hot fallback handoff linear only in the live register file.
+
+The token is a bounded no-safepoint handoff: all copied GC edges remain owned by
+the active Boa VM stack. Capture writes into an exact-size register slice owned
+and reusable by the caller, so Gate 3 can keep the hot handoff allocation-free.
+It must consume the token before interpreter re-entry. Letting a native frame
+survive a GC safepoint still requires the independently rooted frame/stack-map
+work in Gate 4.
+
 ## Architecture
 
 ![image](img/boa_architecture.png)
