@@ -169,11 +169,13 @@ impl ArithmeticCode {
 #[derive(Debug, Default)]
 pub(crate) struct ArithmeticRuntime {
     entries: HashMap<(u64, u32), RuntimeEntry>,
+    insertion_order: VecDeque<(u64, u32)>,
     diagnostics: ArithmeticJitDiagnostics,
 }
 
 /// Runtime-wide counters for the arithmetic baseline tier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ArithmeticJitDiagnostics {
     /// Hot loops submitted to the emitter.
     pub compile_requests: u64,
@@ -185,6 +187,8 @@ pub struct ArithmeticJitDiagnostics {
     pub compiled_entries: u64,
     /// Calls that resumed the interpreter.
     pub bailouts: u64,
+    /// Cached loop sites evicted to keep executable memory bounded.
+    pub cache_evictions: u64,
 }
 
 #[derive(Debug)]
@@ -196,9 +200,27 @@ enum RuntimeEntry {
 
 impl ArithmeticRuntime {
     const HOT_LOOP_THRESHOLD: u32 = 32;
+    const MAX_CACHE_ENTRIES: usize = 256;
 
     pub(crate) const fn diagnostics(&self) -> ArithmeticJitDiagnostics {
         self.diagnostics
+    }
+
+    fn ensure_entry(&mut self, key: (u64, u32)) {
+        if !self.entries.contains_key(&key) {
+            if self.entries.len() >= Self::MAX_CACHE_ENTRIES {
+                let oldest = self
+                    .insertion_order
+                    .pop_front()
+                    .expect("a full arithmetic cache has an insertion-order entry");
+                let removed = self.entries.remove(&oldest);
+                debug_assert!(removed.is_some());
+                self.diagnostics.cache_evictions =
+                    self.diagnostics.cache_evictions.saturating_add(1);
+            }
+            self.insertion_order.push_back(key);
+        }
+        self.entries.entry(key).or_insert(RuntimeEntry::Warming(0));
     }
 
     /// Observes a loop header and, once hot, replaces repeated bytecode dispatch
@@ -206,7 +228,11 @@ impl ArithmeticRuntime {
     pub(crate) fn try_execute_after_increment(&mut self, vm: &mut Vm) -> bool {
         let pc = vm.frame.pc;
         let key = (vm.frame.code_block.jit_code_id, pc);
-        let entry = self.entries.entry(key).or_insert(RuntimeEntry::Warming(0));
+        self.ensure_entry(key);
+        let entry = self
+            .entries
+            .get_mut(&key)
+            .expect("the arithmetic cache entry was just ensured");
         match entry {
             RuntimeEntry::Warming(count) => {
                 *count = count.saturating_add(1);
@@ -751,6 +777,22 @@ mod tests {
             .unwrap()
             .next_offset;
         ArithmeticCode::compile(contract, resume).unwrap().unwrap()
+    }
+
+    #[test]
+    fn runtime_cache_evicts_the_oldest_loop_site_at_its_bound() {
+        let mut runtime = ArithmeticRuntime::default();
+        for code_id in 0..=ArithmeticRuntime::MAX_CACHE_ENTRIES as u64 {
+            runtime.ensure_entry((code_id, 1));
+        }
+        assert_eq!(runtime.entries.len(), ArithmeticRuntime::MAX_CACHE_ENTRIES);
+        assert!(!runtime.entries.contains_key(&(0, 1)));
+        assert!(
+            runtime
+                .entries
+                .contains_key(&(ArithmeticRuntime::MAX_CACHE_ENTRIES as u64, 1))
+        );
+        assert_eq!(runtime.diagnostics.cache_evictions, 1);
     }
 
     #[test]
