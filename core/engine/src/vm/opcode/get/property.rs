@@ -75,7 +75,10 @@ impl GetPropertyByName {
         'fast_path: {
             if let Some(slot) = ic.match_or_reset(shape) {
                 let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                    let prototype = shape.prototype().expect("prototype should have value");
+                    let Some(prototype) = shape.prototype() else {
+                        ic.invalidate_native_contract();
+                        break 'fast_path;
+                    };
                     let prototype = prototype.borrow();
                     prototype
                         .properties()

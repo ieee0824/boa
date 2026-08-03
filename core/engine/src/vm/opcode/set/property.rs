@@ -43,14 +43,17 @@ impl SetPropertyByName {
 
                 let required_index =
                     slot_index.checked_add(usize::from(slot.attributes.is_accessor_descriptor()));
-                let storage_len = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                    shape
-                        .prototype()
-                        .expect("prototype should have value")
-                        .borrow()
-                        .properties()
-                        .storage
-                        .len()
+                let prototype = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
+                    let Some(prototype) = shape.prototype() else {
+                        ic.invalidate_native_contract();
+                        break 'fast_path;
+                    };
+                    Some(prototype.clone())
+                } else {
+                    None
+                };
+                let storage_len = if let Some(prototype) = &prototype {
+                    prototype.borrow().properties().storage.len()
                 } else {
                     object_borrowed.properties().storage.len()
                 };
@@ -60,8 +63,7 @@ impl SetPropertyByName {
                 }
 
                 if slot.attributes.is_accessor_descriptor() {
-                    let result = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                        let prototype = shape.prototype().expect("prototype should have value");
+                    let result = if let Some(prototype) = &prototype {
                         let prototype = prototype.borrow();
 
                         prototype.properties().storage[slot_index + 1].clone()
@@ -71,14 +73,13 @@ impl SetPropertyByName {
 
                     drop(object_borrowed);
                     if slot.attributes.has_set() && result.is_object() {
-                        result.as_object().expect("should contain getter").call(
+                        result.as_object().expect("should contain setter").call(
                             &receiver,
                             std::slice::from_ref(&value),
                             context,
                         )?;
                     }
-                } else if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
-                    let prototype = shape.prototype().expect("prototype should have value");
+                } else if let Some(prototype) = prototype {
                     let mut prototype = prototype.borrow_mut();
 
                     prototype.properties_mut().storage[slot_index] = value.clone();

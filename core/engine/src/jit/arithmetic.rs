@@ -1328,7 +1328,7 @@ mod tests {
         let mut context = Context::default();
         let script = Script::parse(
             Source::from_bytes(
-                "var target={x:4}; function f(o,n){let s=0;for(let i=0;i<n;i++)s=s+o.x;return s} f(target,200)",
+                "var target=Object.create(null);target.x=4;function f(o,n){let s=0;for(let i=0;i<n;i++)s=s+o.x;return s}f(target,200)",
             ),
             None,
             &mut context,
@@ -1348,6 +1348,7 @@ mod tests {
         let ic = function.ic.first().expect("property IC");
         let mut forged = ic.slot();
         forged.index = forged.index.saturating_add(100);
+        forged.attributes |= SlotAttributes::PROTOTYPE;
         ic.slot.set(forged);
 
         let result = Script::parse(Source::from_bytes("f(target,100)"), None, &mut context)
@@ -1360,6 +1361,7 @@ mod tests {
             0,
             "generic lookup must repair the stale IC"
         );
+        assert!(!ic.slot().attributes.contains(SlotAttributes::PROTOTYPE));
     }
 
     #[test]
