@@ -48,6 +48,8 @@ pub enum JitError {
     Os(io::Error),
     /// A handle no longer names the current cache generation.
     StaleCodeHandle,
+    /// An emitter produced an invalid frame descriptor or stack map.
+    FrameMetadata(FrameMetadataError),
 }
 
 impl fmt::Display for JitError {
@@ -59,6 +61,7 @@ impl fmt::Display for JitError {
             Self::InvalidCodeSize => formatter.write_str("invalid JIT code size"),
             Self::Os(error) => write!(formatter, "JIT code memory operation failed: {error}"),
             Self::StaleCodeHandle => formatter.write_str("JIT code handle is stale or invalidated"),
+            Self::FrameMetadata(error) => error.fmt(formatter),
         }
     }
 }
@@ -67,6 +70,7 @@ impl std::error::Error for JitError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Os(error) => Some(error),
+            Self::FrameMetadata(error) => Some(error),
             _ => None,
         }
     }
@@ -75,6 +79,12 @@ impl std::error::Error for JitError {
 impl From<io::Error> for JitError {
     fn from(error: io::Error) -> Self {
         Self::Os(error)
+    }
+}
+
+impl From<FrameMetadataError> for JitError {
+    fn from(error: FrameMetadataError) -> Self {
+        Self::FrameMetadata(error)
     }
 }
 

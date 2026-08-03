@@ -150,8 +150,7 @@ impl ArithmeticCode {
                 u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
                 snapshot.register_count,
                 safepoints,
-            )
-            .map_err(|_| JitError::InvalidCodeSize)?;
+            )?;
             let mut writable = WritableMemory::allocate(assembler.code.len())?;
             writable.write(0, &assembler.code)?;
             let memory = writable.publish()?;

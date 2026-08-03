@@ -9,6 +9,7 @@ use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
 /// Stable identity of one installed JIT frame descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(transparent)]
 pub struct JitFrameDescriptorId(pub u64);
 
 /// A location that contains a live garbage-collected value at a safepoint.
@@ -256,11 +257,14 @@ impl JitPcTable {
         let end = code_start
             .checked_add(descriptor.code_size as usize)
             .ok_or(FrameMetadataError::CodeRangesOverlap)?;
-        if self.0.iter().any(|entry| {
-            let entry_end = entry.code_start + entry.descriptor.code_size as usize;
-            code_start < entry_end && entry.code_start < end
-        }) {
-            return Err(FrameMetadataError::CodeRangesOverlap);
+        for entry in &self.0 {
+            let entry_end = entry
+                .code_start
+                .checked_add(entry.descriptor.code_size as usize)
+                .ok_or(FrameMetadataError::CodeRangesOverlap)?;
+            if code_start < entry_end && entry.code_start < end {
+                return Err(FrameMetadataError::CodeRangesOverlap);
+            }
         }
         self.0.push(InstalledDescriptor {
             code_start,
@@ -389,6 +393,7 @@ impl JitFrameChain {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::size_of;
 
     fn point(
         machine_offset: u32,
@@ -521,5 +526,16 @@ mod tests {
             ),
             Err(FrameMetadataError::FrameRegisterOutOfBounds { .. })
         ));
+
+        assert_eq!(size_of::<JitFrameDescriptorId>(), size_of::<u64>());
+        let mut malformed_table = JitPcTable(vec![InstalledDescriptor {
+            code_start: usize::MAX,
+            descriptor: Arc::new(descriptor),
+        }]);
+        let next = Arc::new(JitFrameDescriptor::new(JitFrameDescriptorId(5), 8, 8, 0, []).unwrap());
+        assert_eq!(
+            malformed_table.install(0, next),
+            Err(FrameMetadataError::CodeRangesOverlap)
+        );
     }
 }
