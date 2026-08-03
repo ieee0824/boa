@@ -220,13 +220,12 @@ impl InlineCache {
     /// caches deliberately have no native contract.
     #[cfg(feature = "baseline-jit")]
     pub(crate) fn monomorphic_own_data_slot(&self) -> Option<(usize, Slot)> {
-        let metadata = self.metadata(0);
-        if metadata.state != InlineCacheState::Monomorphic {
+        if self.replacements.get() != 0 || self.secondary.borrow().iter().any(CacheEntry::is_live) {
             return None;
         }
         let shape = self.shape.borrow();
         let slot = self.slot();
-        if shape.to_addr_usize() == 0
+        if !cached_guards_are_live(&shape, &self.prototype_shape.borrow(), slot)
             || slot.attributes.contains(SlotAttributes::PROTOTYPE)
             || slot.attributes.is_accessor_descriptor()
         {

@@ -534,9 +534,14 @@ fn property_bindings(
             binding.writable |= is_write;
             binding.scratch_register
         } else {
+            let unique_slots = bindings
+                .iter()
+                .map(|binding| binding.scratch_register)
+                .collect::<BTreeSet<_>>()
+                .len();
             let scratch_register = snapshot
                 .register_count
-                .checked_add(u32::try_from(bindings.len()).ok()?)?;
+                .checked_add(u32::try_from(unique_slots).ok()?)?;
             bindings.push(PropertyBinding {
                 ic_index,
                 object_register,
@@ -556,7 +561,7 @@ fn property_bindings(
                 shape,
                 slot: slot.index,
                 scratch_register,
-                writable: is_write,
+                writable: false,
             });
         }
     }
