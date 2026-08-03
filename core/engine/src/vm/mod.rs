@@ -41,11 +41,17 @@ pub(crate) use {
 
 pub use runtime_limits::RuntimeLimits;
 pub use {
+    bytecode_contract::{
+        BYTECODE_CONTRACT_VERSION, BytecodeConstant, BytecodeContract, BytecodeContractError,
+        BytecodeContractSnapshot, BytecodeHandler, BytecodeInstruction, BytecodeOperand,
+        BytecodeOperandValue, JitCompilationState, JitMetadataSnapshot,
+    },
     call_frame::{CallFrame, GeneratorResumeKind},
     code_block::CodeBlock,
     source_info::{NativeSourceInfo, SourcePath},
 };
 
+pub(crate) mod bytecode_contract;
 mod call_frame;
 mod code_block;
 mod completion_record;
@@ -600,6 +606,7 @@ impl Vm {
     }
 
     pub(crate) fn push_frame(&mut self, mut frame: CallFrame) {
+        frame.code_block.jit_metadata.record_interpreter_entry();
         let current_stack_length = self.stack.stack.len();
         frame.set_register_pointer(current_stack_length as u32);
         std::mem::swap(&mut self.environments, &mut frame.environments);
