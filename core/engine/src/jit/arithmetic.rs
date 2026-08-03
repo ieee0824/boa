@@ -12,6 +12,9 @@ use std::{
     time::Instant,
 };
 
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+use std::mem::offset_of;
+
 use crate::{
     JsObject, JsValue,
     object::shape::slot::SlotAttributes,
@@ -36,6 +39,21 @@ struct NativeFrame {
     status: u32,
     header: JitFrameHeader,
 }
+
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, registers) == 0x00);
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, dirty) == 0x08);
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, loop_iterations) == 0x10);
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, loop_limit) == 0x18);
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, pc) == 0x20);
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, status) == 0x24);
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+static_assertions::const_assert!(offset_of!(NativeFrame, header) == 0x28);
 
 #[derive(Debug)]
 pub(crate) struct ArithmeticCode {
