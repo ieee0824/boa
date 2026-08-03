@@ -1,6 +1,6 @@
 use std::cell::Cell;
 
-use boa_gc::GcRefCell;
+use boa_gc::{GcRefCell, NoGcScope};
 use boa_macros::{Finalize, Trace};
 use thin_vec::ThinVec;
 
@@ -201,37 +201,33 @@ impl InlineCache {
             return;
         }
 
-        // Allocate the receiver weak handle before borrowing the secondary
-        // vector. Creating an ephemeron can collect, so it must be installed
-        // in the traced cache before allocating the prototype weak handle.
+        // Creating both ephemerons before inserting them into the cache would
+        // normally leave the first one unrooted while the second allocation
+        // runs. Keep this short, bounded window collection-free, then install
+        // both handles in one outer-cell mutation so the write barrier covers
+        // the complete entry.
+        let _no_gc = NoGcScope::new();
         let weak_shape = WeakShape::from(shape);
-        let index = {
-            let mut secondary = self.secondary.borrow_mut();
-            let index = secondary
-                .iter()
-                .position(|entry| entry.shape_addr() == 0)
-                .or_else(|| {
-                    if secondary.len() < MAX_SECONDARY_ENTRIES {
-                        secondary.push(CacheEntry::empty());
-                        Some(secondary.len() - 1)
-                    } else {
-                        let index = self.replacement.get() % MAX_SECONDARY_ENTRIES;
-                        self.replacement.set((index + 1) % MAX_SECONDARY_ENTRIES);
-                        Some(index)
-                    }
-                })
-                .expect("secondary inline-cache victim should exist");
-            secondary[index].clear();
-            secondary[index] = CacheEntry::from_weak_shapes(weak_shape, WeakShape::None, slot);
-            index
-        };
-
-        // The receiver weak handle is now owned by the traced cache, so a
-        // collection during this second allocation cannot leave it dangling.
         let prototype = prototype_shape(shape, slot);
         let weak_prototype = prototype.as_ref().map_or(WeakShape::None, WeakShape::from);
-        let secondary = self.secondary.borrow();
-        *unsafe { secondary[index].prototype_shape.borrow_mut_no_gc() } = weak_prototype;
+
+        let mut secondary = self.secondary.borrow_mut();
+        let index = secondary
+            .iter()
+            .position(|entry| entry.shape_addr() == 0)
+            .or_else(|| {
+                if secondary.len() < MAX_SECONDARY_ENTRIES {
+                    secondary.push(CacheEntry::empty());
+                    Some(secondary.len() - 1)
+                } else {
+                    let index = self.replacement.get() % MAX_SECONDARY_ENTRIES;
+                    self.replacement.set((index + 1) % MAX_SECONDARY_ENTRIES);
+                    Some(index)
+                }
+            })
+            .expect("secondary inline-cache victim should exist");
+        secondary[index].clear();
+        secondary[index] = CacheEntry::from_weak_shapes(weak_shape, weak_prototype, slot);
     }
 
     pub(crate) fn slot(&self) -> Slot {
