@@ -221,6 +221,10 @@ impl VaryingOperand {
         Self { value }
     }
 
+    pub(crate) const fn value(self) -> u32 {
+        self.value
+    }
+
     /// Return the variant of the [`VaryingOperand`].
     fn variant(self) -> VaryingOperandVariant {
         if let Ok(value) = u8::try_from(self.value) {
@@ -428,6 +432,31 @@ macro_rules! generate_opcodes {
                     ),*
                 })?
             ),*
+        }
+
+        impl Instruction {
+            pub(crate) fn contract_operands(
+                &self,
+            ) -> Vec<super::bytecode_contract::BytecodeOperand> {
+                match self {
+                    $(
+                        Self::$Variant $({ $($FieldName),* })? => {
+                            #[allow(unused_mut)]
+                            let mut operands = Vec::new();
+                            $(
+                                $(
+                                    super::bytecode_contract::ContractArgument::append_contract(
+                                        $FieldName,
+                                        stringify!($FieldName),
+                                        &mut operands,
+                                    );
+                                )*
+                            )?
+                            operands
+                        }
+                    ),*
+                }
+            }
         }
 
         impl ByteCode {

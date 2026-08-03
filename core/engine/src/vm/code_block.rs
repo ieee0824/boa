@@ -18,6 +18,7 @@ use thin_vec::ThinVec;
 
 use super::{
     InlineCache,
+    bytecode_contract::JitMetadata,
     opcode::{ByteCode, Instruction, InstructionIterator},
     source_info::{SourceInfo, SourceMap, SourcePath},
 };
@@ -150,6 +151,10 @@ pub struct CodeBlock {
 
     /// Bytecode to source code mapping.
     pub(crate) source_info: SourceInfo,
+
+    /// Gate 2 JIT adapter metadata. The interpreter remains authoritative.
+    #[unsafe_ignore_trace]
+    pub(crate) jit_metadata: JitMetadata,
 }
 
 /// ---- `CodeBlock` public API ----
@@ -176,6 +181,7 @@ impl CodeBlock {
                 name,
                 SpannedSourceText::new_empty(),
             ),
+            jit_metadata: JitMetadata::default(),
         }
     }
 

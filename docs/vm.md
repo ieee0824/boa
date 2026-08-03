@@ -1,5 +1,26 @@
 # VM
 
+## Versioned bytecode contract
+
+`CodeBlock::bytecode_contract()` is the supported read-only boundary for code
+that needs to inspect interpreter bytecode. Consumers must call `verify()` and
+use the returned owned snapshot; the compact byte array, compiler structures,
+VM stack, call frames, and inline-cache storage remain private.
+
+The snapshot is tagged with `BYTECODE_CONTRACT_VERSION` and contains verified
+instruction boundaries, numeric opcode and name, named operands, register and
+index limits, constants (including recursively verified function code),
+exception handlers, inline-cache count, and source line/column data. Verification
+rejects reserved or undecodable instructions, out-of-range register/constant/
+binding/cache operands, non-instruction jump targets, and malformed handlers.
+Changing an opcode meaning, operand encoding, or snapshot invariant requires a
+contract version bump.
+
+`CodeBlock::jit_metadata()` exposes a copy of interpreter-entry hotness and the
+compiled-entry/fallback state. Gate 2 stores no executable pointer: the existing
+interpreter is authoritative, and failed or unsupported compilation must remain
+on that path. Executable memory and native entry installation belong to Gate 3.
+
 ## Architecture
 
 ![image](img/boa_architecture.png)

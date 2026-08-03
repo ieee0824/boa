@@ -2130,6 +2130,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                 self.function_name,
                 self.spanned_source_text,
             ),
+            jit_metadata: crate::vm::bytecode_contract::JitMetadata::default(),
         }
     }
 
