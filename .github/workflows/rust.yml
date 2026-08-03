@@ -128,7 +128,7 @@ jobs:
             target
             ~/.cargo/git
             ~/.cargo/registry
-          key: ${{ matrix.os }}-baseline-jit-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.os }}-${{ runner.arch }}-baseline-jit-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Test RW-to-RX memory and entry ABI
         run: "cargo test -p boa_engine --features baseline-jit jit::"

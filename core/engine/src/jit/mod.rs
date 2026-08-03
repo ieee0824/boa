@@ -1,8 +1,10 @@
-//! Test-only baseline JIT code-memory and entry ABI substrate.
+//! Experimental baseline JIT code-memory and entry ABI substrate.
 //!
-//! The module is opt-in through `baseline-jit`; enabling it does not make the
-//! VM compile or execute JavaScript as native code.  It deliberately exposes
-//! only a validated fixed-return stub until lowering owns instruction safety.
+//! This is an opt-in public embedding contract through `baseline-jit`; enabling
+//! it does not make the VM compile or execute JavaScript as native code. It
+//! deliberately exposes only a validated fixed-return stub until lowering owns
+//! instruction safety. The API is experimental and may evolve between fork
+//! revisions while Gate 3 is in progress.
 
 mod platform;
 
