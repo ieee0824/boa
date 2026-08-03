@@ -42,7 +42,7 @@ impl SetPropertyByName {
                 let slot_index = slot.index as usize;
 
                 let required_index =
-                    slot_index + usize::from(slot.attributes.is_accessor_descriptor());
+                    slot_index.checked_add(usize::from(slot.attributes.is_accessor_descriptor()));
                 let storage_len = if slot.attributes.contains(SlotAttributes::PROTOTYPE) {
                     shape
                         .prototype()
@@ -54,7 +54,7 @@ impl SetPropertyByName {
                 } else {
                     object_borrowed.properties().storage.len()
                 };
-                if required_index >= storage_len {
+                if required_index.is_none_or(|index| index >= storage_len) {
                     ic.invalidate_native_contract();
                     break 'fast_path;
                 }
