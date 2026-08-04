@@ -18,15 +18,15 @@ use std::{
 use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::{
-    Context, JsResult, JsValue, NativeFunction,
+    Context, JsError, JsResult, JsValue, NativeFunction,
     error::JsNativeError,
     object::{FunctionObjectBuilder, JsObject, builtins::JsArray},
 };
 
 use super::{
-    ActiveJitFrame, ExecutableMemory, FrameCaller, JitError, JitFrameChain, JitFrameDescriptor,
-    JitFrameDescriptorId, JitFrameHeader, JitPcTable, Safepoint, SafepointKind, StackMap,
-    ValueLocation, WritableMemory,
+    ActiveJitFrame, ExecutableMemory, FrameCaller, JitError, JitExceptionUnwindPlan,
+    JitExceptionUnwindTarget, JitFrameChain, JitFrameDescriptor, JitFrameDescriptorId,
+    JitFrameHeader, JitPcTable, Safepoint, SafepointKind, StackMap, ValueLocation, WritableMemory,
 };
 
 static NEXT_DESCRIPTOR_ID: AtomicU64 = AtomicU64::new(1 << 32);
@@ -100,6 +100,22 @@ impl Error for RuntimeCallError {
     }
 }
 
+impl RuntimeCallError {
+    /// Converts a generated-boundary failure into a JavaScript error that can
+    /// travel through the normal interpreter catch/finally machinery.
+    #[must_use]
+    pub fn into_js_error(self) -> JsError {
+        match self {
+            Self::AllocationFailure => JsNativeError::range()
+                .with_message("JIT allocation budget exhausted")
+                .into(),
+            error => JsNativeError::error()
+                .with_message(error.to_string())
+                .into(),
+        }
+    }
+}
+
 impl From<JitError> for RuntimeCallError {
     fn from(error: JitError) -> Self {
         Self::Jit(error)
@@ -119,6 +135,8 @@ pub struct JitRuntimeCallDiagnostics {
     pub nested_calls: u64,
     /// Runtime exceptions returned through the common result slot.
     pub exceptions: u64,
+    /// Runtime exceptions planned through the active generated frame chain.
+    pub exception_unwinds: u64,
     /// Deterministically injected allocation failures.
     pub allocation_failures: u64,
 }
@@ -356,6 +374,18 @@ impl JitRuntimeCall {
         self.invoke(RuntimeRequest::Allocate(kind), arguments, context)
     }
 
+    /// Allocates through generated code and flattens boundary failures into the
+    /// same `JsResult` channel used by interpreter and native-function calls.
+    pub fn allocate_or_throw(
+        &self,
+        kind: JitAllocationKind,
+        arguments: &[JsValue],
+        context: &mut Context,
+    ) -> JsResult<JsValue> {
+        self.allocate(kind, arguments, context)
+            .map_err(RuntimeCallError::into_js_error)?
+    }
+
     /// Exercises the common exception return path through generated code.
     #[doc(hidden)]
     pub fn throw_for_test(
@@ -475,6 +505,20 @@ impl JitRuntimeCall {
         }
         code.enter(&mut frame);
         let state = unsafe { &mut *self.state.get() };
+        if pending
+            .result
+            .as_ref()
+            .is_some_and(|result| matches!(result, Ok(Err(_))))
+        {
+            let plan = JitExceptionUnwindPlan::build(&state.active_frames, &state.pc_table)
+                .expect("active generated exception frames resolve at exact safepoints");
+            debug_assert!(matches!(
+                plan.target(),
+                JitExceptionUnwindTarget::Interpreter { .. }
+            ));
+            state.diagnostics.exception_unwinds =
+                state.diagnostics.exception_unwinds.saturating_add(1);
+        }
         let popped_roots = state
             .active_roots
             .pop()
@@ -706,11 +750,20 @@ mod tests {
             runtime.allocate(JitAllocationKind::Object, &[], &mut context),
             Err(RuntimeCallError::AllocationFailure)
         ));
+        let allocation_error = runtime
+            .allocate_or_throw(JitAllocationKind::Object, &[], &mut context)
+            .unwrap_err();
+        assert!(allocation_error.as_native().unwrap().is_range());
+        assert_eq!(
+            allocation_error.as_native().unwrap().message(),
+            "JIT allocation budget exhausted"
+        );
         let diagnostics = runtime.diagnostics();
         assert_eq!(diagnostics.nested_calls, 16);
         assert_eq!(diagnostics.slow_allocations, 16);
         assert_eq!(diagnostics.exceptions, 1);
-        assert_eq!(diagnostics.allocation_failures, 1);
+        assert_eq!(diagnostics.exception_unwinds, 1);
+        assert_eq!(diagnostics.allocation_failures, 2);
         assert_eq!(
             runtime.call_code[0].descriptor.safepoints()[0].kind,
             SafepointKind::Call
@@ -773,6 +826,68 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(!weak.is_upgradable());
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    fn generated_helper_errors_cross_js_catch_finally_rethrow_and_gc_boundary() {
+        fn helper_throw(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
+            let runtime = JitRuntimeCall::new(1, 0).map_err(RuntimeCallError::into_js_error)?;
+            runtime
+                .collect_major_for_test(&[JsValue::from(7)], context)
+                .map_err(RuntimeCallError::into_js_error)??;
+            runtime
+                .throw_for_test(context)
+                .map_err(RuntimeCallError::into_js_error)?
+        }
+
+        fn allocation_failure(
+            _: &JsValue,
+            _: &[JsValue],
+            context: &mut Context,
+        ) -> JsResult<JsValue> {
+            let mut runtime = JitRuntimeCall::new(0, 0).map_err(RuntimeCallError::into_js_error)?;
+            runtime.set_allocation_budget(Some(0));
+            runtime.allocate_or_throw(JitAllocationKind::Object, &[], context)
+        }
+
+        let mut context = Context::default();
+        context
+            .register_global_builtin_callable(
+                js_string!("helperThrow"),
+                0,
+                NativeFunction::from_fn_ptr(helper_throw),
+            )
+            .unwrap();
+        context
+            .register_global_builtin_callable(
+                js_string!("allocationFailure"),
+                0,
+                NativeFunction::from_fn_ptr(allocation_failure),
+            )
+            .unwrap();
+        let result = context
+            .eval(Source::from_bytes(
+                "let log=[];function middle(){try{helperThrow()}finally{log.push('finally')}}\
+                 try{middle()}catch(error){log.push(error.name);log.push(error.message);\
+                   try{throw error}catch(same){log.push(same===error)}}\
+                 try{allocationFailure()}catch(error){log.push(error.name);log.push(error.message)}\
+                 log.join('|')",
+            ))
+            .unwrap();
+        assert_eq!(
+            result.display().to_string(),
+            "\"finally|TypeError|JIT runtime helper exception|true|RangeError|JIT allocation budget exhausted\""
+        );
+
+        let uncaught = context
+            .eval(Source::from_bytes(
+                "function hostBoundary(){helperThrow()}hostBoundary()",
+            ))
+            .unwrap_err();
+        let native = uncaught.as_native().expect("helper returns a native error");
+        assert!(native.is_type());
+        assert_eq!(native.message(), "JIT runtime helper exception");
     }
 
     #[test]

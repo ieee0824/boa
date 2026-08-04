@@ -7,6 +7,8 @@
 
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
+use super::JitExceptionMetadata;
+
 /// Stable identity of one installed JIT frame descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(transparent)]
@@ -124,6 +126,7 @@ pub struct JitFrameDescriptor {
     frame_size: u32,
     frame_register_count: u32,
     safepoints: Box<[Safepoint]>,
+    exception_metadata: JitExceptionMetadata,
 }
 
 impl JitFrameDescriptor {
@@ -145,10 +148,18 @@ impl JitFrameDescriptor {
             frame_size,
             frame_register_count,
             safepoints,
+            exception_metadata: JitExceptionMetadata::default(),
         };
         descriptor.validate()?;
         debug_assert!(descriptor.validate().is_ok());
         Ok(descriptor)
+    }
+
+    /// Attaches already-verified bytecode handler and source metadata.
+    #[must_use]
+    pub fn with_exception_metadata(mut self, metadata: JitExceptionMetadata) -> Self {
+        self.exception_metadata = metadata;
+        self
     }
 
     fn validate(&self) -> Result<(), FrameMetadataError> {
@@ -210,6 +221,12 @@ impl JitFrameDescriptor {
     /// Returns the ordered exact-PC safepoints.
     pub const fn safepoints(&self) -> &[Safepoint] {
         &self.safepoints
+    }
+
+    /// Returns immutable exception handler and source metadata.
+    #[must_use]
+    pub const fn exception_metadata(&self) -> &JitExceptionMetadata {
+        &self.exception_metadata
     }
     #[must_use]
     /// Resolves an exact machine offset within this code object.
