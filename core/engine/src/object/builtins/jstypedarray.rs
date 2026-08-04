@@ -7,7 +7,7 @@ use crate::{
         typed_array::{BuiltinTypedArray, TypedArray, TypedArrayKind},
     },
     error::JsNativeError,
-    object::{JsArrayBuffer, JsFunction, JsObject, JsSharedArrayBuffer},
+    object::{JsArrayBuffer, JsFunction, JsObject, JsSharedArrayBuffer, RootedJsObject},
     value::{IntoOrUndefined, TryFromJs},
 };
 use boa_gc::{Finalize, Trace};
@@ -18,9 +18,17 @@ use std::ops::Deref;
 #[derive(Debug, Clone, Trace, Finalize)]
 pub struct JsTypedArray {
     inner: JsObject,
+    _owner: RootedJsObject,
 }
 
 impl JsTypedArray {
+    fn from_owned_object(object: JsObject) -> Self {
+        Self {
+            _owner: object.clone().root(),
+            inner: object,
+        }
+    }
+
     /// Create a [`JsTypedArray`] from a [`JsObject`], if the object is not a typed array throw a
     /// `TypeError`.
     ///
@@ -29,7 +37,7 @@ impl JsTypedArray {
     #[inline]
     pub fn from_object(object: JsObject) -> JsResult<Self> {
         if object.is::<TypedArray>() {
-            Ok(Self { inner: object })
+            Ok(Self::from_owned_object(object))
         } else {
             Err(JsNativeError::typ()
                 .with_message("object is not a TypedArray")
@@ -192,11 +200,11 @@ impl JsTypedArray {
             context,
         )?;
 
-        Ok(Self {
-            inner: object
-                .as_object()
-                .expect("`copyWithin` must always return a `TypedArray` on success"),
-        })
+        let object = object
+            .as_object()
+            .expect("`copyWithin` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(object))
     }
 
     /// Calls `TypedArray.prototype.fill()`.
@@ -307,11 +315,11 @@ impl JsTypedArray {
             context,
         )?;
 
-        Ok(Self {
-            inner: subarray
-                .as_object()
-                .expect("`subarray` must always return a `TypedArray` on success"),
-        })
+        let subarray = subarray
+            .as_object()
+            .expect("`subarray` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(subarray))
     }
 
     /// Calls `TypedArray.prototype.toLocaleString()`
@@ -343,11 +351,11 @@ impl JsTypedArray {
             context,
         )?;
 
-        Ok(Self {
-            inner: object
-                .as_object()
-                .expect("`filter` must always return a `TypedArray` on success"),
-        })
+        let object = object
+            .as_object()
+            .expect("`filter` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(object))
     }
 
     /// Calls `TypedArray.prototype.map()`.
@@ -364,11 +372,11 @@ impl JsTypedArray {
             context,
         )?;
 
-        Ok(Self {
-            inner: object
-                .as_object()
-                .expect("`map` must always return a `TypedArray` on success"),
-        })
+        let object = object
+            .as_object()
+            .expect("`map` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(object))
     }
 
     /// Calls `TypedArray.prototype.reduce()`.
@@ -468,11 +476,11 @@ impl JsTypedArray {
             context,
         )?;
 
-        Ok(Self {
-            inner: object
-                .as_object()
-                .expect("`slice` must always return a `TypedArray` on success"),
-        })
+        let object = object
+            .as_object()
+            .expect("`slice` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(object))
     }
 
     /// Calls `TypedArray.prototype.find()`.
@@ -826,11 +834,11 @@ impl JsTypedArray {
     pub fn to_reversed(&self, context: &mut Context) -> JsResult<Self> {
         let array = BuiltinTypedArray::to_reversed(&self.inner.clone().into(), &[], context)?;
 
-        Ok(Self {
-            inner: array
-                .as_object()
-                .expect("`to_reversed` must always return a `TypedArray` on success"),
-        })
+        let array = array
+            .as_object()
+            .expect("`to_reversed` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(array))
     }
 
     /// Calls `TypedArray.prototype.toSorted ( comparefn )`.
@@ -846,11 +854,11 @@ impl JsTypedArray {
             context,
         )?;
 
-        Ok(Self {
-            inner: array
-                .as_object()
-                .expect("`to_sorted` must always return a `TypedArray` on success"),
-        })
+        let array = array
+            .as_object()
+            .expect("`to_sorted` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(array))
     }
 
     /// Calls `TypedArray.prototype.with ( index, value )`.
@@ -859,11 +867,11 @@ impl JsTypedArray {
         let array =
             BuiltinTypedArray::with(&self.inner.clone().into(), &[index.into(), value], context)?;
 
-        Ok(Self {
-            inner: array
-                .as_object()
-                .expect("`with` must always return a `TypedArray` on success"),
-        })
+        let array = array
+            .as_object()
+            .expect("`with` must always return a `TypedArray` on success")
+            .clone();
+        Ok(Self::from_owned_object(array))
     }
 
     /// It is a getter that returns the same string as the typed array constructor's name.
@@ -960,7 +968,8 @@ macro_rules! JsTypedArrayType {
                 if is_kind {
                     Ok(Self {
                         inner: JsTypedArray {
-                            inner: object.into(),
+                            _owner: object.clone().root(),
+                            inner: object,
                         },
                     })
                 } else {
@@ -992,7 +1001,8 @@ macro_rules! JsTypedArrayType {
 
                 Ok(Self {
                     inner: JsTypedArray {
-                        inner: object.into(),
+                        _owner: object.clone().root(),
+                        inner: object,
                     },
                 })
             }
@@ -1019,7 +1029,8 @@ macro_rules! JsTypedArrayType {
 
                 Ok(Self {
                     inner: JsTypedArray {
-                        inner: object.into(),
+                        _owner: object.clone().root(),
+                        inner: object,
                     },
                 })
             }
@@ -1053,7 +1064,8 @@ macro_rules! JsTypedArrayType {
 
                 Ok(Self {
                     inner: JsTypedArray {
-                        inner: object.into(),
+                        _owner: object.clone().root(),
+                        inner: object,
                     },
                 })
             }

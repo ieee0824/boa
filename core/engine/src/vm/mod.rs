@@ -14,9 +14,9 @@ use crate::{
     realm::Realm,
     script::{Script, ScriptEdge},
 };
-use boa_gc::{Finalize, Rooted, Trace, custom_trace};
+use boa_gc::{Finalize, RootProvider, Rooted, Trace, Tracer, custom_trace};
 use shadow_stack::ShadowStack;
-use std::{future::Future, ops::ControlFlow, pin::Pin, task};
+use std::{future::Future, ops::ControlFlow, pin::Pin, ptr::NonNull, task};
 
 #[cfg(test)]
 use std::{cell::Cell, rc::Rc};
@@ -39,16 +39,27 @@ pub(crate) use {
     inline_cache::InlineCache,
 };
 
+#[cfg(feature = "baseline-jit")]
+pub(crate) use code_block::next_jit_code_id;
+
+pub use inline_cache::{InlineCacheMetadataSnapshot, InlineCacheState};
 pub use runtime_limits::RuntimeLimits;
 pub use {
+    bytecode_contract::{
+        BYTECODE_CONTRACT_VERSION, BytecodeConstant, BytecodeContract, BytecodeContractError,
+        BytecodeContractSnapshot, BytecodeHandler, BytecodeInstruction, BytecodeOperand,
+        BytecodeOperandValue, JitCompilationState, JitMetadataSnapshot,
+    },
     call_frame::{CallFrame, GeneratorResumeKind},
     code_block::CodeBlock,
     source_info::{NativeSourceInfo, SourcePath},
 };
 
+pub(crate) mod bytecode_contract;
 mod call_frame;
 mod code_block;
 mod completion_record;
+pub(crate) mod frame_contract;
 mod inline_cache;
 mod runtime_limits;
 
@@ -62,9 +73,25 @@ pub mod flowgraph;
 #[cfg(test)]
 mod tests;
 
+/// Test-only frame handoff probe installed by focused VM contract tests.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) enum FallbackProbe {
+    #[default]
+    Disabled,
+    RoundTripOnPush,
+}
+
 /// Virtual Machine.
 #[derive(Debug)]
 pub struct Vm {
+    /// Keeps the VM's native state registered as a root provider.
+    ///
+    /// The VM is boxed before this pointer is installed, so the address observed by
+    /// the collector remains stable even when the owning `Context` is moved.
+    /// Declared first so it is dropped before the state it points at.
+    root_provider: Option<RootProvider>,
+
     /// The current call frame.
     ///
     /// Whenever a new frame is pushed, it will be swaped into this field.
@@ -77,7 +104,11 @@ pub struct Vm {
     /// The stack for call frames.
     pub(crate) frames: Vec<CallFrame>,
 
-    pub(crate) stack: Stack,
+    /// The VM's value stack.
+    ///
+    /// Boxed so that its address is stable: the collector holds a pointer to it for as
+    /// long as this VM lives, and a [`Vm`] itself gets moved when a [`Context`] is built.
+    pub(crate) stack: Box<Stack>,
     pub(crate) return_value: JsValue,
 
     /// When an error is thrown, the pending exception is set.
@@ -91,6 +122,16 @@ pub struct Vm {
     pub(crate) pending_exception: Option<JsError>,
     pub(crate) environments: EnvironmentStack,
     pub(crate) runtime_limits: RuntimeLimits,
+
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
+
+    /// Non-zero while the current dispatch path must not enter arithmetic generated code.
+    ///
+    /// Budgeted async dispatch disables this around each instruction so a native
+    /// loop cannot consume work that is invisible to its cooperative budget.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) arithmetic_jit_suppression_depth: u8,
 
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
@@ -109,6 +150,9 @@ pub struct Vm {
     #[cfg(test)]
     pub(crate) instruction_count: Rc<Cell<u64>>,
 
+    #[cfg(test)]
+    pub(crate) fallback_probe: FallbackProbe,
+
     /// realm holds both the global object and the environment
     pub(crate) realm: Realm,
 
@@ -117,6 +161,40 @@ pub struct Vm {
     #[cfg(feature = "trace")]
     pub(crate) trace: bool,
 }
+
+// SAFETY: `Vm::new` installs this value as a root provider only after placing it in
+// a `Box`, and the provider is dropped before the VM fields it traces. The provider
+// is read by the collector at allocation safepoints, when no VM mutation may alias
+// the state being traced.
+unsafe impl Trace for Vm {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        // Rooted handles in frames, environments and the realm register themselves.
+        // The fields below are the native VM edges that are not inside a GC object.
+        unsafe {
+            self.stack.trace(tracer);
+            self.return_value.trace(tracer);
+            self.pending_exception.trace(tracer);
+            self.native_active_function.trace(tracer);
+            self.pending_native_call.trace(tracer);
+        }
+
+        unsafe { self.frame.trace_native_roots(tracer) };
+        for frame in &self.frames {
+            unsafe { frame.trace_native_roots(tracer) };
+        }
+        unsafe { self.environments.trace_native_roots(tracer) };
+
+        // Continuation closures are already rooted; their native-call placeholders
+        // are ordinary edges and still need to be marked.
+        for boundary in &self.native_call_continuations {
+            unsafe { boundary.target.trace(tracer) };
+        }
+    }
+
+    fn run_finalizer(&self) {}
+}
+
+impl Finalize for Vm {}
 
 /// The stack holds the [`JsValue`]s that the VM is operationg on.
 ///
@@ -482,8 +560,10 @@ impl ActiveRunnableEdge {
 
 impl Vm {
     /// Creates a new virtual machine.
-    pub(crate) fn new(realm: Realm) -> Self {
-        Self {
+    pub(crate) fn new(realm: Realm) -> Box<Self> {
+        let stack = Box::new(Stack::new(1024));
+        let mut vm = Box::new(Self {
+            root_provider: None,
             frames: Vec::with_capacity(16),
             frame: CallFrame::new_rooted(
                 Rooted::new(CodeBlock::new(JsString::default(), 0, true)),
@@ -491,11 +571,15 @@ impl Vm {
                 EnvironmentStack::new(realm.environment()),
                 realm.clone(),
             ),
-            stack: Stack::new(1024),
+            stack,
             return_value: JsValue::undefined(),
             environments: EnvironmentStack::new(realm.environment()),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
+            #[cfg(feature = "baseline-jit")]
+            arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
+            #[cfg(feature = "baseline-jit")]
+            arithmetic_jit_suppression_depth: 0,
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
@@ -503,11 +587,18 @@ impl Vm {
             native_call_continuation_active: false,
             #[cfg(test)]
             instruction_count: Rc::new(Cell::new(0)),
+            #[cfg(test)]
+            fallback_probe: FallbackProbe::Disabled,
             realm,
             shadow_stack: ShadowStack::default(),
             #[cfg(feature = "trace")]
             trace: false,
-        }
+        });
+
+        // SAFETY: `vm` is boxed before registration and is never moved until this
+        // provider is dropped with the VM itself.
+        vm.root_provider = Some(unsafe { RootProvider::register(NonNull::from(&*vm)) });
+        vm
     }
 
     #[track_caller]
@@ -548,6 +639,7 @@ impl Vm {
     }
 
     pub(crate) fn push_frame(&mut self, mut frame: CallFrame) {
+        frame.code_block.jit_metadata.record_interpreter_entry();
         let current_stack_length = self.stack.stack.len();
         frame.set_register_pointer(current_stack_length as u32);
         std::mem::swap(&mut self.environments, &mut frame.environments);
@@ -576,6 +668,19 @@ impl Vm {
 
         std::mem::swap(&mut self.frame, &mut frame);
         self.frames.push(frame);
+
+        #[cfg(test)]
+        if matches!(self.fallback_probe, FallbackProbe::RoundTripOnPush) {
+            let layout = self
+                .verify_interpreter_frame_layout()
+                .expect("test fallback probe must verify every pushed frame");
+            let mut registers = vec![JsValue::undefined(); layout.register_count() as usize];
+            let state = self
+                .capture_interpreter_frame(&layout, &mut registers)
+                .expect("test fallback probe must capture every pushed frame");
+            self.restore_interpreter_frame(state)
+                .expect("test fallback probe must restore every pushed frame");
+        }
     }
 
     pub(crate) fn push_frame_with_stack(
@@ -637,13 +742,13 @@ impl Vm {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Finalize)]
 pub(crate) struct NativeCallBoundary {
     pub(crate) target: NativeCallBoundaryTarget,
     pub(crate) continuation: NativeCallContinuation,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Trace, Finalize)]
 pub(crate) enum NativeCallBoundaryTarget {
     FrameDepth(usize),
     NativePlaceholder(JsObject),

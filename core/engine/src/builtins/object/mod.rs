@@ -536,6 +536,7 @@ impl OrdinaryObject {
 
         // 3. Let descriptors be OrdinaryObjectCreate(%Object.prototype%).
         let descriptors = JsObject::with_object_proto(context.intrinsics());
+        let _descriptors_root = descriptors.clone().root();
 
         // 4. For each element key of ownKeys, do
         for key in own_keys {
@@ -577,6 +578,7 @@ impl OrdinaryObject {
         // 2. Let obj be ! OrdinaryObjectCreate(%Object.prototype%).
         // 3. Assert: obj is an extensible ordinary object with no own properties.
         let obj = JsObject::with_object_proto(context.intrinsics());
+        let _obj_root = obj.clone().root();
 
         // 4. If Desc has a [[Value]] field, then
         if let Some(value) = desc.value() {

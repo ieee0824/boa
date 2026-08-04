@@ -77,20 +77,25 @@ impl StringIterator {
         let mut string_iterator = object
             .as_ref()
             .and_then(JsObject::downcast_mut::<Self>)
-            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
+            .ok_or_else(|| JsNativeError::typ().with_message("`this` is not a StringIterator"))?;
 
         if string_iterator.string.is_empty() {
+            // Released before building the result. Allocating can collect, and the
+            // collector cannot trace through a cell that is being written to, so this
+            // iterator's own fields would be invisible to it.
+            drop(string_iterator);
             return Ok(create_iter_result_object(
                 JsValue::undefined(),
                 true,
                 context,
             ));
         }
-        let native_string = &string_iterator.string;
+        let native_string = string_iterator.string.clone();
         let len = native_string.len();
         let position = string_iterator.next_index;
         if position >= len {
             string_iterator.string = js_string!();
+            drop(string_iterator);
             return Ok(create_iter_result_object(
                 JsValue::undefined(),
                 true,
@@ -99,9 +104,12 @@ impl StringIterator {
         }
         let code_point = native_string.code_point_at(position);
         string_iterator.next_index += code_point.code_unit_count();
+        let next_index = string_iterator.next_index;
+        drop(string_iterator);
+
         let result_string = crate::builtins::string::String::substring(
-            &string_iterator.string.clone().into(),
-            &[position.into(), string_iterator.next_index.into()],
+            &native_string.into(),
+            &[position.into(), next_index.into()],
             context,
         )?;
         Ok(create_iter_result_object(result_string, false, context))

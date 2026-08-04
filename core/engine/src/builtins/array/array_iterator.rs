@@ -107,6 +107,10 @@ impl ArrayIterator {
             .ok_or_else(|| JsNativeError::typ().with_message("`this` is not an ArrayIterator"))?;
         let index = array_iterator.next_index;
         if array_iterator.done {
+            // The iterator's borrow is released before building the result. Allocating
+            // can collect, and the collector cannot trace through a cell that is being
+            // written to, so this iterator's own fields would be invisible to it.
+            drop(array_iterator);
             return Ok(create_iter_result_object(
                 JsValue::undefined(),
                 true,
@@ -132,6 +136,7 @@ impl ArrayIterator {
 
         if index >= len {
             array_iterator.done = true;
+            drop(array_iterator);
             return Ok(create_iter_result_object(
                 JsValue::undefined(),
                 true,
@@ -139,14 +144,21 @@ impl ArrayIterator {
             ));
         }
         array_iterator.next_index = index + 1;
-        match array_iterator.kind {
+
+        // The state is already advanced, so the borrow can be released before the work
+        // that allocates — and before `get`, which can run arbitrary user code.
+        let kind = array_iterator.kind;
+        let array = array_iterator.array.clone();
+        drop(array_iterator);
+
+        match kind {
             PropertyNameKind::Key => Ok(create_iter_result_object(index.into(), false, context)),
             PropertyNameKind::Value => {
-                let element_value = array_iterator.array.get(index, context)?;
+                let element_value = array.get(index, context)?;
                 Ok(create_iter_result_object(element_value, false, context))
             }
             PropertyNameKind::KeyAndValue => {
-                let element_value = array_iterator.array.get(index, context)?;
+                let element_value = array.get(index, context)?;
                 let result = Array::create_array_from_list([index.into(), element_value], context);
                 Ok(create_iter_result_object(result.into(), false, context))
             }

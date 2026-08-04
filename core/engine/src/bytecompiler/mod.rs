@@ -478,6 +478,12 @@ pub struct ByteCompiler<'ctx> {
 
     pub(crate) constants: ThinVec<Constant>,
 
+    /// Native roots for function constants while this compiler is still building
+    /// the containing code block. The constant table stores heap edges because it
+    /// becomes traced data, but compilation itself can allocate after a nested
+    /// function is added and before the containing `CodeBlock` is published.
+    function_roots: Vec<Rooted<CodeBlock>>,
+
     /// Locators for all bindings in the codeblock.
     pub(crate) bindings: Vec<BindingLocator>,
 
@@ -585,6 +591,7 @@ impl<'ctx> ByteCompiler<'ctx> {
             bytecode: ByteCodeEmitter::new(),
             source_map_builder: SourceMapBuilder::default(),
             constants: ThinVec::default(),
+            function_roots: Vec::default(),
             bindings: Vec::default(),
             local_binding_registers: FxHashMap::default(),
             this_mode: ThisMode::Global,
@@ -742,8 +749,13 @@ impl<'ctx> ByteCompiler<'ctx> {
     #[must_use]
     pub(crate) fn push_function_to_constants(&mut self, function: Rooted<CodeBlock>) -> u32 {
         let index = self.constants.len() as u32;
+        self.function_roots.push(function);
+        let function = self
+            .function_roots
+            .last()
+            .expect("the function root was just stored");
         self.constants
-            .push(Constant::Function(function.into_edge()));
+            .push(Constant::Function(function.as_gc().clone().into()));
         index
     }
 
@@ -2102,6 +2114,8 @@ impl<'ctx> ByteCompiler<'ctx> {
         let source_map_entries = self.source_map_builder.build(final_bytecode_len);
 
         CodeBlock {
+            #[cfg(feature = "baseline-jit")]
+            jit_code_id: crate::vm::next_jit_code_id(),
             length: self.length,
             register_count,
             this_mode: self.this_mode,
@@ -2118,6 +2132,7 @@ impl<'ctx> ByteCompiler<'ctx> {
                 self.function_name,
                 self.spanned_source_text,
             ),
+            jit_metadata: crate::vm::bytecode_contract::JitMetadata::default(),
         }
     }
 

@@ -1,17 +1,17 @@
 //! A garbage collected cell implementation
 
 use crate::{
-    Tracer,
+    GcErasedPointer, Tracer, begin_collection_block, end_collection_block, remember_old_parent,
     trace::{Finalize, Trace},
 };
-use std::marker::PhantomData;
-use std::ptr::NonNull;
 use std::{
     cell::{Cell, UnsafeCell},
     cmp::Ordering,
     fmt::{self, Debug, Display},
     hash::Hash,
+    marker::PhantomData,
     ops::{Deref, DerefMut},
+    ptr::{self, NonNull},
 };
 
 /// `BorrowFlag` represent the internal state of a `GcCell` and
@@ -94,7 +94,23 @@ impl Debug for BorrowFlag {
 /// This object is a `RefCell` that can be used inside of a `Gc<T>`.
 pub struct GcRefCell<T: ?Sized + 'static> {
     borrow: Cell<BorrowFlag>,
+    barrier: BarrierState,
     cell: UnsafeCell<T>,
+}
+
+type BarrierFn = unsafe fn(*const ());
+
+struct BarrierState {
+    // Set when the cell is traced as part of an old allocation. Young parents
+    // do not need a write barrier, and promotion traces them once to install it.
+    // The state itself is sized even when T is a DST, which lets the
+    // mutable-borrow guard erase its pointer without losing metadata.
+    callback: Cell<Option<BarrierFn>>,
+    owner: Cell<Option<GcErasedPointer>>,
+    // Avoid hashing the same old parent on every write between collections. A
+    // minor collection resets this while consuming the remembered parent, so a
+    // later write can enqueue it for the next nursery pass.
+    dirty: Cell<bool>,
 }
 
 impl<T> GcRefCell<T> {
@@ -102,6 +118,11 @@ impl<T> GcRefCell<T> {
     pub const fn new(value: T) -> Self {
         Self {
             borrow: Cell::new(BORROWFLAG_INIT),
+            barrier: BarrierState {
+                callback: Cell::new(None),
+                owner: Cell::new(None),
+                dirty: Cell::new(false),
+            },
             cell: UnsafeCell::new(value),
         }
     }
@@ -183,17 +204,50 @@ impl<T: ?Sized> GcRefCell<T> {
     ///
     /// Returns an `Err` if the value is currently borrowed.
     pub fn try_borrow_mut(&self) -> Result<GcRefMut<'_, T>, BorrowMutError> {
+        self.try_borrow_mut_impl(true)
+    }
+
+    /// Mutably borrows the wrapped value without blocking garbage collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the value is already borrowed.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not allocate garbage-collected memory or otherwise
+    /// trigger collection until the returned guard is dropped.
+    #[must_use]
+    pub unsafe fn borrow_mut_no_gc(&self) -> GcRefMut<'_, T> {
+        match self.try_borrow_mut_impl(false) {
+            Ok(value) => value,
+            Err(e) => panic!("{}", e),
+        }
+    }
+
+    #[inline]
+    fn try_borrow_mut_impl(
+        &self,
+        blocks_collection: bool,
+    ) -> Result<GcRefMut<'_, T>, BorrowMutError> {
         if self.borrow.get().borrowed() != BorrowState::Unused {
             return Err(BorrowMutError);
         }
         self.borrow.set(self.borrow.get().set_writing());
+        if blocks_collection {
+            begin_collection_block();
+        }
 
         // SAFETY: This is safe as the value is rooted if it was not previously rooted,
         // so it cannot be dropped.
+        let barrier_state = ptr::from_ref(&self.barrier).cast::<()>();
         unsafe {
             Ok(GcRefMut {
                 borrow: BorrowGcRefMut {
                     borrow: &self.borrow,
+                    barrier: self.barrier.callback.get(),
+                    barrier_state,
+                    blocks_collection,
                 },
                 value: NonNull::new_unchecked(self.cell.get()),
                 marker: PhantomData,
@@ -230,18 +284,17 @@ impl<T: Trace + ?Sized> Finalize for GcRefCell<T> {}
 // on GcCell's value may cause Undefined Behavior
 unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
-        match self.borrow.get().borrowed() {
-            BorrowState::Writing => (),
-            // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { (*self.cell.get()).trace(tracer) },
+        if let Some(owner) = tracer.current_node() {
+            // SAFETY: the current node is live for the duration of tracing.
+            self.barrier.owner.set(Some(owner));
+            self.barrier.callback.set(Some(trace_barrier));
+            self.barrier.dirty.set(false);
         }
-    }
 
-    unsafe fn trace_non_roots(&self) {
         match self.borrow.get().borrowed() {
             BorrowState::Writing => (),
             // SAFETY: Please see GcCell's Trace impl Safety note.
-            _ => unsafe { (*self.cell.get()).trace_non_roots() },
+            _ => unsafe { (&*self.cell.get()).trace(tracer) },
         }
     }
 
@@ -252,6 +305,26 @@ unsafe impl<T: Trace + ?Sized> Trace for GcRefCell<T> {
             // SAFETY: Please see GcCell's Trace impl Safety note.
             _ => unsafe { (*self.cell.get()).run_finalizer() },
         }
+    }
+}
+
+unsafe fn trace_barrier(state: *const ()) {
+    // SAFETY: `state` is the stable BarrierState belonging to a traced cell,
+    // and its owner pointer was initialized by that cell's Trace method.
+    let state = unsafe { &*(state.cast::<BarrierState>()) };
+    let owner = state
+        .owner
+        .get()
+        .expect("traced cell barrier was missing its owner pointer");
+    // Young parents are collected through the ordinary nursery graph. The
+    // callback is nevertheless installed while tracing them so it remains
+    // valid if the parent is promoted before its next mutation.
+    // SAFETY: the owner remains live while its cell's mutable borrow exists.
+    if unsafe { owner.as_ref() }.header.is_young() {
+        return;
+    }
+    if !state.dirty.replace(true) {
+        remember_old_parent(owner);
     }
 }
 
@@ -322,9 +395,8 @@ impl<'a, T: ?Sized> GcRef<'a, T> {
     /// This is an associated function that needs to be used as `GcCellRef::try_map(...)`.
     /// A method would interfere with methods of the same name on the contents
     /// of a `GcCellRef` used through `Deref`.
-    pub fn try_map<U, F>(orig: Self, f: F) -> Option<GcRef<'a, U>>
+    pub fn try_map<U: ?Sized, F>(orig: Self, f: F) -> Option<GcRef<'a, U>>
     where
-        U: ?Sized,
         F: FnOnce(&T) -> Option<&U>,
     {
         let value = NonNull::from(f(&*orig)?);
@@ -344,9 +416,8 @@ impl<'a, T: ?Sized> GcRef<'a, T> {
     /// This is an associated function that needs to be used as `GcCellRef::map(...)`.
     /// A method would interfere with methods of the same name on the contents
     /// of a `GcCellRef` used through `Deref`.
-    pub fn map<U, F>(orig: Self, f: F) -> GcRef<'a, U>
+    pub fn map<U: ?Sized, F>(orig: Self, f: F) -> GcRef<'a, U>
     where
-        U: ?Sized,
         F: FnOnce(&T) -> &U,
     {
         let value = NonNull::from(f(&*orig));
@@ -363,10 +434,8 @@ impl<'a, T: ?Sized> GcRef<'a, T> {
     ///
     /// This is an associated function that needs to be used as `GcCellRef::map_split(...)`.
     /// A method would interfere with methods of the same name on the contents of a `GcCellRef` used through `Deref`.
-    pub fn map_split<U, V, F>(orig: Self, f: F) -> (GcRef<'a, U>, GcRef<'a, V>)
+    pub fn map_split<U: ?Sized, V: ?Sized, F>(orig: Self, f: F) -> (GcRef<'a, U>, GcRef<'a, V>)
     where
-        U: ?Sized,
-        V: ?Sized,
         F: FnOnce(&T) -> (&U, &V),
     {
         let (a, b) = f(&*orig);
@@ -407,12 +476,24 @@ impl<T: ?Sized + Display> Display for GcRef<'_, T> {
 
 struct BorrowGcRefMut<'a> {
     borrow: &'a Cell<BorrowFlag>,
+    barrier: Option<BarrierFn>,
+    barrier_state: *const (),
+    blocks_collection: bool,
 }
 
 impl Drop for BorrowGcRefMut<'_> {
     fn drop(&mut self) {
         debug_assert_eq!(self.borrow.get().borrowed(), BorrowState::Writing);
+        if let Some(barrier) = self.barrier {
+            // SAFETY: The pointer was captured from the cell while it was
+            // traced, and the mutable borrow keeps the allocation alive and
+            // stable until this guard releases it.
+            unsafe { barrier(self.barrier_state) };
+        }
         self.borrow.set(BorrowFlag(UNUSED));
+        if self.blocks_collection {
+            end_collection_block();
+        }
     }
 }
 
@@ -435,9 +516,10 @@ impl<'a, T: ?Sized> GcRefMut<'a, T> {
     #[must_use]
     pub unsafe fn cast<V>(orig: Self) -> GcRefMut<'a, V> {
         let value = orig.value.cast::<V>();
+        let borrow = orig.borrow;
 
         GcRefMut {
-            borrow: orig.borrow,
+            borrow,
             value,
             marker: PhantomData,
         }
@@ -451,15 +533,15 @@ impl<'a, T: ?Sized> GcRefMut<'a, T> {
     /// This is an associated function that needs to be used as
     /// `GcCellRefMut::map(...)`. A method would interfere with methods of the same
     /// name on the contents of a `GcCell` used through `Deref`.
-    pub fn try_map<V, F>(mut orig: GcRefMut<'a, T>, f: F) -> Option<GcRefMut<'a, V>>
+    pub fn try_map<V: ?Sized, F>(mut orig: GcRefMut<'a, T>, f: F) -> Option<GcRefMut<'a, V>>
     where
-        V: ?Sized,
         F: FnOnce(&mut T) -> Option<&mut V>,
     {
         let value = NonNull::from(f(&mut *orig)?);
+        let borrow = orig.borrow;
 
         let ret = GcRefMut {
-            borrow: orig.borrow,
+            borrow,
             value,
             marker: PhantomData,
         };
@@ -475,15 +557,15 @@ impl<'a, T: ?Sized> GcRefMut<'a, T> {
     /// This is an associated function that needs to be used as
     /// `GcCellRefMut::map(...)`. A method would interfere with methods of the same
     /// name on the contents of a `GcCell` used through `Deref`.
-    pub fn map<V, F>(mut orig: Self, f: F) -> GcRefMut<'a, V>
+    pub fn map<V: ?Sized, F>(mut orig: Self, f: F) -> GcRefMut<'a, V>
     where
-        V: ?Sized,
         F: FnOnce(&mut T) -> &mut V,
     {
         let value = NonNull::from(f(&mut *orig));
+        let borrow = orig.borrow;
 
         GcRefMut {
-            borrow: orig.borrow,
+            borrow,
             value,
             marker: PhantomData,
         }

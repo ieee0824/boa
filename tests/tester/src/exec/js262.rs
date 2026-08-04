@@ -74,9 +74,16 @@ pub(super) fn register_js262(
     console: bool,
     context: &mut Context,
 ) -> JsObject {
-    let global_obj = context.global_object();
-
+    // This setup passes objects through native locals between several builders.
+    // Keep the bounded registration window stable until all of those objects
+    // have been published to the realm.
+    let _no_gc = boa_gc::NoGcScope::new();
     let agent = agent_obj(handles, console, context);
+    // Keep this edge out of the native-local window while the agent object is
+    // being assembled. The ObjectInitializer below suspends collection once it
+    // owns the edge, but it cannot protect a value fetched before that builder
+    // exists.
+    let global_obj = context.global_object();
 
     let js262 = ObjectInitializer::new(context)
         .function(
@@ -295,6 +302,7 @@ fn register_js262_worker(
     tx: Sender<Vec<u16>>,
     context: &mut Context,
 ) {
+    let _no_gc = boa_gc::NoGcScope::new();
     let rx = RefCell::new(rx);
     let receive_broadcast = unsafe {
         // should technically also have a second numeric argument, but the test262 never uses it.

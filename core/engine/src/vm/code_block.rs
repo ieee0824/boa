@@ -13,11 +13,14 @@ use crate::{
 use bitflags::bitflags;
 use boa_ast::scope::{BindingLocator, Scope};
 use boa_gc::{Finalize, GcEdge, Rooted, Trace, empty_trace};
+#[cfg(feature = "baseline-jit")]
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{cell::Cell, fmt::Display, fmt::Write as _};
 use thin_vec::ThinVec;
 
 use super::{
     InlineCache,
+    bytecode_contract::JitMetadata,
     opcode::{ByteCode, Instruction, InstructionIterator},
     source_info::{SourceInfo, SourceMap, SourcePath},
 };
@@ -114,6 +117,9 @@ pub(crate) enum Constant {
 /// attributes of the function.
 #[derive(Clone, Debug, Trace, Finalize)]
 pub struct CodeBlock {
+    #[cfg(feature = "baseline-jit")]
+    #[unsafe_ignore_trace]
+    pub(crate) jit_code_id: u64,
     #[unsafe_ignore_trace]
     pub(crate) flags: Cell<CodeBlockFlags>,
 
@@ -150,6 +156,10 @@ pub struct CodeBlock {
 
     /// Bytecode to source code mapping.
     pub(crate) source_info: SourceInfo,
+
+    /// Gate 2 JIT adapter metadata. The interpreter remains authoritative.
+    #[unsafe_ignore_trace]
+    pub(crate) jit_metadata: JitMetadata,
 }
 
 /// ---- `CodeBlock` public API ----
@@ -160,6 +170,8 @@ impl CodeBlock {
         let mut flags = CodeBlockFlags::empty();
         flags.set(CodeBlockFlags::STRICT, strict);
         Self {
+            #[cfg(feature = "baseline-jit")]
+            jit_code_id: next_jit_code_id(),
             bytecode: ByteCode::default(),
             constants: ThinVec::default(),
             bindings: Box::default(),
@@ -176,6 +188,7 @@ impl CodeBlock {
                 name,
                 SpannedSourceText::new_empty(),
             ),
+            jit_metadata: JitMetadata::default(),
         }
     }
 
@@ -327,6 +340,14 @@ impl CodeBlock {
     pub(crate) fn source_info(&self) -> &SourceInfo {
         &self.source_info
     }
+}
+
+#[cfg(feature = "baseline-jit")]
+static NEXT_JIT_CODE_ID: AtomicU64 = AtomicU64::new(1);
+
+#[cfg(feature = "baseline-jit")]
+pub(crate) fn next_jit_code_id() -> u64 {
+    NEXT_JIT_CODE_ID.fetch_add(1, Ordering::Relaxed)
 }
 
 /// ---- `CodeBlock` private API ----
@@ -1060,7 +1081,7 @@ impl Display for CodeBlock {
 ///
 /// This is slower than direct object template construction that is done in [`create_function_object_fast`].
 pub(crate) fn create_function_object(
-    code: Rooted<CodeBlock>,
+    code: &Rooted<CodeBlock>,
     prototype: JsObject,
     context: &mut Context,
 ) -> JsObject {
@@ -1132,7 +1153,7 @@ pub(crate) fn create_function_object(
 /// because it constructs the function from a pre-initialized object template,
 /// with all the properties and prototype set.
 pub(crate) fn create_function_object_fast(
-    code: Rooted<CodeBlock>,
+    code: &Rooted<CodeBlock>,
     context: &mut Context,
 ) -> JsObject {
     let name: JsValue = code.name().clone().into();

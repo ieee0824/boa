@@ -2,6 +2,53 @@ use boa_macros::{Finalize, Trace};
 
 use super::{Harness, run_test};
 use crate::{GcBox, GcEdge, GcRefCell, Rooted, force_collect};
+#[cfg(feature = "gc-profile")]
+use crate::{force_minor_collect, profile, reset_profile};
+
+#[derive(Debug, Finalize, Trace)]
+struct EdgeHolder {
+    leaf: Option<GcEdge<u32>>,
+}
+
+#[test]
+fn only_rooted_allocations_start_the_mark_phase() {
+    run_test(|| {
+        let leaf = GcEdge::new(1_u32);
+        let holder = Rooted::new(EdgeHolder {
+            leaf: Some(leaf.clone()),
+        });
+        // Nothing roots this one, and no rooted allocation points at it.
+        let _orphan = GcEdge::new(2_u32);
+
+        Harness::assert_strong_allocations(3);
+
+        force_collect();
+
+        // The leaf survives because a rooted allocation has an edge to it. The orphan
+        // does not, even though a handle to it is still in scope: a heap edge is not a
+        // root. Its handle must not be dereferenced after this point.
+        Harness::assert_strong_allocations(2);
+        assert_eq!(**holder.leaf.as_ref().expect("the leaf is set"), 1);
+    });
+}
+
+#[test]
+fn an_allocation_survives_the_collection_it_triggers() {
+    run_test(|| {
+        Harness::collect_on_every_allocation();
+
+        // Allocating the holder runs a collection while the holder is the only thing
+        // pointing at the leaf, and while the holder itself is reachable only through the
+        // temporary root the allocator registers for it.
+        let holder = Rooted::new(EdgeHolder {
+            leaf: Some(GcEdge::new(41_u32)),
+        });
+
+        Harness::assert_collected_at_least(1);
+        Harness::assert_strong_allocations(2);
+        assert_eq!(**holder.leaf.as_ref().expect("the leaf is set"), 41);
+    });
+}
 
 #[test]
 fn gc_basic_cell_allocation() {
@@ -12,6 +59,27 @@ fn gc_basic_cell_allocation() {
         Harness::assert_collections(1);
         Harness::assert_bytes_allocated();
         assert_eq!(*gc_cell.borrow_mut(), 16);
+    });
+}
+
+#[test]
+fn collection_is_deferred_while_a_cell_is_mutably_borrowed() {
+    run_test(|| {
+        Harness::collect_on_every_allocation();
+        let holder = Rooted::new(GcRefCell::new(Vec::<GcEdge<u32>>::new()));
+        Harness::assert_collections(1);
+
+        let mut holder_value = holder.borrow_mut();
+        holder_value.push(GcEdge::new(42));
+        // The allocation above is allowed, but its collection is deferred because
+        // the holder's fields are invisible to `GcRefCell::trace` while borrowed.
+        force_collect();
+        Harness::assert_collections(1);
+        drop(holder_value);
+
+        force_collect();
+        Harness::assert_collections(2);
+        assert_eq!(*holder.borrow()[0], 42);
     });
 }
 
@@ -63,19 +131,16 @@ fn gc_recursion() {
     });
 }
 
-/// The collection threshold decides how much garbage piles up before a collection,
-/// and a collection walks the whole heap — everything allocated since the last one,
-/// live or not. Pinned because lowering it is a large slowdown that no other test
-/// would notice: measured on the omoikane benchmark, `1 MiB` put 40% of
-/// `closure-alloc`'s wall time inside the collector, and `4 MiB` took 21% off the shape.
-///
-/// Raising it further is not free either. `16 MiB` bought no more speed than `4 MiB` and
-/// cost 61% more peak RSS on an allocation-heavy workload, because a collection's cost
-/// grows with the garbage it has to walk past while the amount it reclaims does not.
+/// Pin the measured split between nursery and full-heap collection. A 4 `MiB` nursery
+/// cut Omoikane's allocation-shape collection counts by roughly 3-4x against 1 `MiB`.
+/// The 8 `MiB` major threshold avoids following every nursery pass with a full-heap
+/// traversal, while bounding old-generation growth sooner than the equally fast
+/// 16 `MiB` alternative.
 #[test]
-fn default_threshold_is_the_measured_one() {
+fn default_generation_thresholds_are_the_measured_ones() {
     run_test(|| {
-        Harness::assert_threshold(4 * 1024 * 1024);
+        Harness::assert_threshold(8 * 1024 * 1024);
+        Harness::assert_nursery_threshold(4 * 1024 * 1024);
     });
 }
 
@@ -85,7 +150,7 @@ fn default_threshold_is_the_measured_one() {
 #[cfg_attr(miri, ignore)]
 fn allocating_under_the_threshold_does_not_collect() {
     run_test(|| {
-        // 256 KiB of live data, comfortably inside a `4 MiB` threshold.
+        // 256 KiB of live data, comfortably inside the nursery threshold.
         let mut held = Vec::new();
         for _ in 0..256 {
             held.push(Rooted::new([0u8; 1024]));
@@ -109,5 +174,28 @@ fn allocating_past_the_threshold_collects() {
         }
 
         Harness::assert_collected_at_least(1);
+    });
+}
+
+#[test]
+#[cfg(feature = "gc-profile")]
+fn profiles_minor_and_major_collection_phases() {
+    run_test(|| {
+        reset_profile();
+
+        let value = Rooted::new(42_u32);
+        force_minor_collect();
+        force_collect();
+
+        let profile = profile();
+        assert_eq!(profile.minor.collections, 1);
+        assert_eq!(profile.major.collections, 1);
+        assert!(profile.minor.total >= profile.minor.mark);
+        assert!(profile.minor.total >= profile.minor.finalize);
+        assert!(profile.minor.total >= profile.minor.sweep);
+        assert!(profile.major.total >= profile.major.mark);
+        assert!(profile.major.total >= profile.major.finalize);
+        assert!(profile.major.total >= profile.major.sweep);
+        assert_eq!(*value, 42);
     });
 }

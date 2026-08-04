@@ -221,6 +221,10 @@ impl VaryingOperand {
         Self { value }
     }
 
+    pub(crate) const fn value(self) -> u32 {
+        self.value
+    }
+
     /// Return the variant of the [`VaryingOperand`].
     fn variant(self) -> VaryingOperandVariant {
         if let Ok(value) = u8::try_from(self.value) {
@@ -430,6 +434,31 @@ macro_rules! generate_opcodes {
             ),*
         }
 
+        impl Instruction {
+            pub(crate) fn contract_operands(
+                &self,
+            ) -> Vec<super::bytecode_contract::BytecodeOperand> {
+                match self {
+                    $(
+                        Self::$Variant $({ $($FieldName),* })? => {
+                            #[allow(unused_mut)]
+                            let mut operands = Vec::new();
+                            $(
+                                $(
+                                    super::bytecode_contract::ContractArgument::append_contract(
+                                        $FieldName,
+                                        stringify!($FieldName),
+                                        &mut operands,
+                                    );
+                                )*
+                            )?
+                            operands
+                        }
+                    ),*
+                }
+            }
+        }
+
         impl ByteCode {
             #[allow(unused_parens)]
             pub(crate) fn next_instruction(&self, pc: usize) -> (Instruction, usize) {
@@ -472,7 +501,15 @@ impl Context {
         let frame = self.vm.frame_mut();
         let pc = frame.pc as usize;
 
-        OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget)
+        #[cfg(feature = "baseline-jit")]
+        let arithmetic_jit_suppression_depth =
+            std::mem::replace(&mut self.vm.arithmetic_jit_suppression_depth, 1);
+        let result = OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget);
+        #[cfg(feature = "baseline-jit")]
+        {
+            self.vm.arithmetic_jit_suppression_depth = arithmetic_jit_suppression_depth;
+        }
+        result
     }
 }
 

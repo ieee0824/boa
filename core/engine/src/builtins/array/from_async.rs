@@ -116,13 +116,12 @@ impl Array {
                     from_array_like(Ok(JsValue::undefined()), &coroutine_state, context)
                 {
                     // Coroutine yielded. We need to allocate it for a future execution.
-                    JsPromise::resolve(value, context).await_native(
-                        &NativeCoroutine::from_copy_closure_with_captures(
-                            from_array_like,
-                            coroutine_state,
-                        ),
-                        context,
+                    let _value_root = value.as_object().map(JsObject::root);
+                    let coroutine = NativeCoroutine::from_copy_closure_with_captures(
+                        from_array_like,
+                        coroutine_state,
                     );
+                    JsPromise::resolve(value, context).await_native(&coroutine, context);
                 }
 
                 return Ok(());
@@ -161,13 +160,12 @@ impl Array {
             if let CoroutineState::Yielded(value) =
                 from_async_iterator(Ok(JsValue::undefined()), &coroutine_state, context)
             {
-                JsPromise::resolve(value, context).await_native(
-                    &NativeCoroutine::from_copy_closure_with_captures(
-                        from_async_iterator,
-                        coroutine_state,
-                    ),
-                    context,
+                let _value_root = value.as_object().map(JsObject::root);
+                let coroutine = NativeCoroutine::from_copy_closure_with_captures(
+                    from_async_iterator,
+                    coroutine_state,
                 );
+                JsPromise::resolve(value, context).await_native(&coroutine, context);
             }
 
             Ok(())
@@ -247,6 +245,8 @@ fn from_async_iterator(
                     k,
                     iterator_record,
                 } => {
+                    let _a_root = a.clone().root();
+
                     // Inverted conditional makes for a simpler code.
                     if k < 2u64.pow(53) - 1 {
                         // 2. Let Pk be ! ToString(𝔽(k)).
@@ -287,6 +287,8 @@ fn from_async_iterator(
                     k,
                     mut iterator_record,
                 } => {
+                    let _a_root = a.clone().root();
+
                     // `result` is `Await(nextResult)`.
                     let result = std::mem::replace(&mut result, Ok(JsValue::undefined()));
 
@@ -367,6 +369,15 @@ fn from_async_iterator(
                     iterator_record,
                     mapped_value,
                 } => {
+                    let _a_root = a.clone().root();
+                    let _mapped_value_root = mapped_value.as_ref().and_then(|value| {
+                        value
+                            .as_ref()
+                            .ok()
+                            .and_then(JsValue::as_object)
+                            .map(JsObject::root)
+                    });
+
                     // Either awaited `mappedValue` or directly set `mappedValue` to `nextValue`.
                     let result = std::mem::replace(&mut result, Ok(JsValue::undefined()));
 
@@ -408,6 +419,12 @@ fn from_async_iterator(
                 // https://tc39.es/ecma262/#sec-asynciteratorclose
                 // Simplified for only error completions.
                 AsyncIteratorStateMachine::AsyncIteratorCloseStart { err, iterator } => {
+                    let _iterator_root = iterator.clone().root();
+                    let _error_root = err
+                        .as_opaque()
+                        .and_then(JsValue::as_object)
+                        .map(JsObject::root);
+
                     // 1. Assert: iteratorRecord.[[Iterator]] is an Object.
                     // 2. Let iterator be iteratorRecord.[[Iterator]].
                     // 3. Let innerResult be Completion(GetMethod(iterator, "return")).
@@ -504,6 +521,9 @@ fn from_array_like(
                     len,
                     k,
                 } => {
+                    let _array_like_root = array_like.clone().root();
+                    let _a_root = a.clone().root();
+
                     // vii. Repeat, while k < len,
                     if k >= len {
                         // viii. Perform ? Set(A, "length", 𝔽(len), true).
@@ -547,6 +567,9 @@ fn from_array_like(
                     len,
                     k,
                 } => {
+                    let _array_like_root = array_like.clone().root();
+                    let _a_root = a.clone().root();
+
                     // Awaited kValue
                     let k_value = std::mem::replace(&mut result, Ok(JsValue::undefined()))?;
 
@@ -582,6 +605,13 @@ fn from_array_like(
                     k,
                     mapped_value,
                 } => {
+                    let _array_like_root = array_like.clone().root();
+                    let _a_root = a.clone().root();
+                    let _mapped_value_root = mapped_value
+                        .as_ref()
+                        .and_then(JsValue::as_object)
+                        .map(JsObject::root);
+
                     // Either awaited `mappedValue` or directly set this from `kValue`.
                     let result = std::mem::replace(&mut result, Ok(JsValue::undefined()))?;
                     let mapped_value = mapped_value.unwrap_or(result);

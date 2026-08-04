@@ -109,15 +109,10 @@ impl<T: Trace + ?Sized + fmt::Debug> fmt::Debug for GcEdge<T> {
 
 impl<T: Trace + ?Sized> Finalize for GcEdge<T> {}
 
-// SAFETY: The compatibility edge owns a valid Gc handle and delegates all
-// tracing operations to it until the inferred-root collector is removed.
+// SAFETY: The edge owns a valid Gc handle and delegates tracing to it.
 unsafe impl<T: Trace + ?Sized> Trace for GcEdge<T> {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         unsafe { self.inner.trace(tracer) };
-    }
-
-    unsafe fn trace_non_roots(&self) {
-        unsafe { self.inner.trace_non_roots() };
     }
 
     fn run_finalizer(&self) {

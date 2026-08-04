@@ -214,6 +214,7 @@ impl BuiltInConstructor for NumberFormat {
             StandardConstructors::number_format,
             context,
         )?;
+        let _prototype_root = prototype.clone().root();
 
         let number_format = Self::new(locales, options, context)?;
 
@@ -222,6 +223,7 @@ impl BuiltInConstructor for NumberFormat {
             prototype,
             number_format,
         );
+        let _number_format_root = number_format.clone().root();
 
         // 31. Return unused.
 
@@ -289,6 +291,7 @@ impl NumberFormat {
         let requested_locales = canonicalize_locale_list(locales, context)?;
         // 2. Set options to ? CoerceOptionsToObject(options).
         let options = coerce_options_to_object(options, context)?;
+        let _options_root = options.clone().root();
 
         // 3. Let opt be a new Record.
 

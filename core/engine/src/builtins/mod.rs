@@ -348,6 +348,12 @@ impl Realm {
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-setdefaultglobalbindings
 pub(crate) fn set_default_global_bindings(context: &mut Context) -> JsResult<()> {
+    // Global bindings are installed in a bounded bootstrap window. Several
+    // intrinsic handles are still being copied from the realm into the global
+    // object while property maps and built-in metadata are allocated, so defer
+    // collection until the graph is linked through the global object.
+    let _no_gc = boa_gc::NoGcScope::new();
+
     let global_object = context.global_object();
 
     global_object.define_property_or_throw(

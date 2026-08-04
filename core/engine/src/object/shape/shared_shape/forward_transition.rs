@@ -55,6 +55,11 @@ pub(super) struct ForwardTransition {
 impl ForwardTransition {
     /// Insert a property transition.
     pub(super) fn insert_property(&self, key: TransitionKey, value: &Rooted<SharedShapeInner>) {
+        // Allocated before the borrow on purpose. Allocating can collect, and the tracer
+        // skips a `GcRefCell` that is being written to, so a collection inside the borrow
+        // would leave every transition in this map unmarked and reclaim all of them.
+        let value = WeakGcEdge::new_rooted(value);
+
         let mut this = self.inner.borrow_mut();
         let properties = this.properties.get_or_insert_with(Box::default);
 
@@ -62,11 +67,14 @@ impl ForwardTransition {
             properties.map.retain(|_, v| v.is_upgradable());
         }
 
-        properties.map.insert(key, WeakGcEdge::new_rooted(value));
+        properties.map.insert(key, value);
     }
 
     /// Insert a prototype transition.
     pub(super) fn insert_prototype(&self, key: JsPrototype, value: &Rooted<SharedShapeInner>) {
+        // Allocated before the borrow, for the reason given in `insert_property`.
+        let value = WeakGcEdge::new_rooted(value);
+
         let mut this = self.inner.borrow_mut();
         let prototypes = this.prototypes.get_or_insert_with(Box::default);
 
@@ -74,7 +82,7 @@ impl ForwardTransition {
             prototypes.map.retain(|_, v| v.is_upgradable());
         }
 
-        prototypes.map.insert(key, WeakGcEdge::new_rooted(value));
+        prototypes.map.insert(key, value);
     }
 
     /// Get a property transition, return [`None`] otherwise.

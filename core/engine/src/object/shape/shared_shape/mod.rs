@@ -7,7 +7,7 @@ mod tests;
 use std::{collections::hash_map::RandomState, hash::Hash};
 
 use bitflags::bitflags;
-use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGcEdge, custom_trace, empty_trace};
+use boa_gc::{Finalize, GcEdge, Rooted, Trace, WeakGc, WeakGcEdge, custom_trace, empty_trace};
 use indexmap::IndexMap;
 
 use crate::{JsObject, object::JsPrototype, property::PropertyKey};
@@ -508,16 +508,25 @@ where
     }
 }
 
-/// Represents a weak reference to [`SharedShape`].
-#[derive(Debug, Trace, Finalize, Clone, PartialEq)]
-pub(crate) struct WeakSharedShape {
-    inner: WeakGcEdge<Inner>,
+/// A weak reference whose ephemeron allocation is kept in the external root set.
+///
+/// This is used by inline caches, which may be installed into an already-old
+/// code block after the cache cell's write barrier was initialized.
+#[derive(Debug, Trace, Finalize, Clone)]
+pub(crate) struct RootedWeakSharedShape {
+    inner: WeakGc<Inner>,
 }
 
-impl WeakSharedShape {
-    /// Return location in memory of the [`WeakSharedShape`].
-    ///
-    /// Returns `0` if the inner [`SharedShape`] has been freed.
+impl From<&SharedShape<GcEdge<Inner>>> for RootedWeakSharedShape {
+    fn from(value: &SharedShape<GcEdge<Inner>>) -> Self {
+        Self {
+            inner: WeakGc::from_edge(WeakGcEdge::new_edge(&value.inner)),
+        }
+    }
+}
+
+impl RootedWeakSharedShape {
+    /// Return the address of the live key, or `0` if the key was collected.
     #[inline]
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
@@ -525,27 +534,5 @@ impl WeakSharedShape {
             let ptr: *const _ = &raw const *inner;
             ptr as usize
         })
-    }
-
-    /// Upgrade returns a [`SharedShape`] pointer for the internal value if the pointer is still live,
-    /// or [`None`] if the value was already garbage collected.
-    #[inline]
-    #[must_use]
-    pub(crate) fn upgrade(&self) -> Option<SharedShape> {
-        Some(SharedShape {
-            inner: self.inner.upgrade()?.root(),
-        })
-    }
-}
-
-impl<H> From<&SharedShape<H>> for WeakSharedShape
-where
-    H: super::ShapeGcHandle<Inner>,
-{
-    fn from(value: &SharedShape<H>) -> Self {
-        let rooted = value.inner.clone_rooted();
-        WeakSharedShape {
-            inner: WeakGcEdge::new_rooted(&rooted),
-        }
     }
 }

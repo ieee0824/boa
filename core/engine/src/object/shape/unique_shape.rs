@@ -1,6 +1,6 @@
 use std::{cell::RefCell, fmt::Debug};
 
-use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGcEdge, custom_trace};
+use boa_gc::{Finalize, GcEdge, GcRefCell, Rooted, Trace, WeakGc, WeakGcEdge, custom_trace};
 
 use crate::property::PropertyKey;
 
@@ -270,16 +270,27 @@ where
     }
 }
 
-/// Represents a weak reference to [`UniqueShape`].
-#[derive(Debug, Clone, Trace, Finalize, PartialEq)]
-pub(crate) struct WeakUniqueShape {
-    inner: WeakGcEdge<Inner>,
+/// A weak reference whose ephemeron allocation is kept in the external root set.
+///
+/// Inline caches can be installed into an already-old code block after the
+/// cache's `GcRefCell` was traced, so they cannot rely on that cell's write
+/// barrier to keep a newly-created ephemeron allocation alive. The key remains
+/// weak, but the ephemeron itself is rooted for as long as this handle exists.
+#[derive(Debug, Trace, Finalize, Clone)]
+pub(crate) struct RootedWeakUniqueShape {
+    inner: WeakGc<Inner>,
 }
 
-impl WeakUniqueShape {
-    /// Return location in memory of the [`WeakUniqueShape`].
-    ///
-    /// Returns `0` if the inner [`UniqueShape`] has been freed.
+impl From<&UniqueShape<GcEdge<Inner>>> for RootedWeakUniqueShape {
+    fn from(value: &UniqueShape<GcEdge<Inner>>) -> Self {
+        Self {
+            inner: WeakGc::from_edge(WeakGcEdge::new_edge(&value.inner)),
+        }
+    }
+}
+
+impl RootedWeakUniqueShape {
+    /// Return the address of the live key, or `0` if the key was collected.
     #[inline]
     #[must_use]
     pub(crate) fn to_addr_usize(&self) -> usize {
@@ -287,27 +298,5 @@ impl WeakUniqueShape {
             let ptr: *const _ = &raw const *inner;
             ptr as usize
         })
-    }
-
-    /// Upgrade returns a [`UniqueShape`] pointer for the internal value if the pointer is still live,
-    /// or [`None`] if the value was already garbage collected.
-    #[inline]
-    #[must_use]
-    pub(crate) fn upgrade(&self) -> Option<UniqueShape> {
-        Some(UniqueShape {
-            inner: self.inner.upgrade()?.root(),
-        })
-    }
-}
-
-impl<H> From<&UniqueShape<H>> for WeakUniqueShape
-where
-    H: super::ShapeGcHandle<Inner>,
-{
-    fn from(value: &UniqueShape<H>) -> Self {
-        let rooted = value.inner.clone_rooted();
-        WeakUniqueShape {
-            inner: WeakGcEdge::new_rooted(&rooted),
-        }
     }
 }

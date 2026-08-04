@@ -1,7 +1,7 @@
 use super::{
     JsPrototype, ObjectStorage, PropertyDescriptor, PropertyKey,
     shape::{
-        ChangeTransitionAction, RootShape, Shape, ShapeEdge, UniqueShape,
+        ChangeTransition, ChangeTransitionAction, RootShape, Shape, ShapeEdge, UniqueShape,
         property_table::PropertyTableInner,
         shared_shape::TransitionKey,
         slot::{Slot, SlotAttributes},
@@ -373,6 +373,23 @@ pub struct PropertyMap {
     pub(crate) storage: ObjectStorage,
 }
 
+/// The shape transition an insert needs, computed before the borrow that applies it.
+///
+/// See [`PropertyMap::plan_insert`] for why the two are separated. The variants hold
+/// rooted shapes, so a plan keeps the shape it names alive for as long as it is held.
+pub(crate) enum InsertPlan {
+    /// Nothing was planned ahead, because there was nothing to hoist: an indexed key, a
+    /// property that already exists with the same attributes, or a unique shape, whose
+    /// transition mutates in place and allocates no garbage collected memory.
+    Inline,
+
+    /// The property does not exist yet, and the map transitions to this shared shape.
+    Insert(Shape),
+
+    /// The property exists with different attributes, on a shared shape.
+    ChangeAttributes(ChangeTransition<Shape>),
+}
+
 impl PropertyMap {
     /// Create a new [`PropertyMap`].
     #[must_use]
@@ -482,21 +499,79 @@ impl PropertyMap {
         property: PropertyDescriptor,
         out_slot: &mut Slot,
     ) -> bool {
+        let plan = self.plan_insert(key, &property);
+        self.apply_insert(key, property, plan, out_slot)
+    }
+
+    /// Computes the shape transition that [`Self::apply_insert`] will apply for this
+    /// insert.
+    ///
+    /// This is the part of an insert that allocates. A caller that reaches this map
+    /// through a [`boa_gc::GcRefCell`] must plan the insert under a shared borrow and
+    /// only then take the mutable borrow that applies it: the collector cannot trace
+    /// through a cell that is being written to, so an allocation inside that borrow runs
+    /// a collection that cannot see this object's own property values. Holding the plan
+    /// also keeps the new shape alive across the borrow.
+    pub(crate) fn plan_insert(
+        &self,
+        key: &PropertyKey,
+        property: &PropertyDescriptor,
+    ) -> InsertPlan {
+        // A unique shape transitions by mutating its own property table and handing back
+        // the same shape. That must not be done ahead of the storage update that belongs
+        // with it — the shape would report a slot the storage does not have yet — and it
+        // allocates no garbage collected memory, so there is nothing to hoist.
+        if matches!(key, PropertyKey::Index(_)) || !self.shape.is_shared() {
+            return InsertPlan::Inline;
+        }
+
+        let attributes = property.to_slot_attributes();
+        let transition_key = || TransitionKey {
+            property_key: key.clone(),
+            attributes,
+        };
+
+        match self.shape.lookup(key) {
+            Some(slot) if slot.attributes != attributes => InsertPlan::ChangeAttributes(
+                self.shape.change_attributes_transition(transition_key()),
+            ),
+            Some(_) => InsertPlan::Inline,
+            None => InsertPlan::Insert(self.shape.insert_property_transition(transition_key())),
+        }
+    }
+
+    /// Applies an insert planned by [`Self::plan_insert`].
+    ///
+    /// The shape and the storage are updated together, so the map is never observable
+    /// with a shape that reports a slot the storage does not have. Nothing here allocates
+    /// garbage collected memory when the plan covers the transition.
+    pub(crate) fn apply_insert(
+        &mut self,
+        key: &PropertyKey,
+        property: PropertyDescriptor,
+        plan: InsertPlan,
+        out_slot: &mut Slot,
+    ) -> bool {
         if let PropertyKey::Index(index) = key {
             return self.indexed_properties.insert(index.get(), property);
         }
 
         let attributes = property.to_slot_attributes();
+        let transition_key = || TransitionKey {
+            property_key: key.clone(),
+            attributes,
+        };
 
         if let Some(slot) = self.shape.lookup(key) {
             let index = slot.index as usize;
 
             if slot.attributes != attributes {
-                let key = TransitionKey {
-                    property_key: key.clone(),
-                    attributes,
+                let transition = match plan {
+                    InsertPlan::ChangeAttributes(transition) => transition,
+                    // A unique shape, which transitions in place without allocating.
+                    _ => self.shape.change_attributes_transition(transition_key()),
                 };
-                let transition = self.shape.change_attributes_transition(key);
+
                 self.shape = transition.shape.into_edge();
                 match transition.action {
                     ChangeTransitionAction::Nothing => {}
@@ -534,14 +609,12 @@ impl PropertyMap {
             return true;
         }
 
-        let transition_key = TransitionKey {
-            property_key: key.clone(),
-            attributes,
+        let shape = match plan {
+            InsertPlan::Insert(shape) => shape,
+            // A unique shape, which transitions in place without allocating.
+            _ => self.shape.insert_property_transition(transition_key()),
         };
-        self.shape = self
-            .shape
-            .insert_property_transition(transition_key)
-            .into_edge();
+        self.shape = shape.into_edge();
 
         // Make Sure that if we are inserting, it has the correct slot index.
         debug_assert_eq!(

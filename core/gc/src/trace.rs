@@ -14,24 +14,141 @@ use std::{
     sync::atomic,
 };
 
-use crate::GcErasedPointer;
+use crate::{EphemeronPointer, GcErasedPointer};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceMode {
+    Major,
+    Minor,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StrongEntry {
+    pointer: GcErasedPointer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EphemeronEntry {
+    pointer: EphemeronPointer,
+}
+
+struct CurrentNodeGuard {
+    slot: *mut Option<GcErasedPointer>,
+    previous: Option<GcErasedPointer>,
+}
+
+impl Drop for CurrentNodeGuard {
+    fn drop(&mut self) {
+        // SAFETY: `slot` points into the tracer that created this guard. The
+        // guard cannot outlive that tracer and only restores the field after
+        // the nested trace call has returned or unwound.
+        unsafe { *self.slot = self.previous };
+    }
+}
 
 /// A queue used to trace [`crate::Gc<T>`] non-recursively.
 #[doc(hidden)]
 #[allow(missing_debug_implementations)]
 pub struct Tracer {
-    queue: VecDeque<GcErasedPointer>,
+    queue: VecDeque<StrongEntry>,
+    ephemeron_queue: VecDeque<EphemeronEntry>,
+    discovered_ephemerons: Vec<EphemeronPointer>,
+    discovered_ephemeron_set: HashSet<EphemeronPointer>,
+    // Promotion tracing may inspect old allocations reachable from a young
+    // object in order to install their write barriers. Keep this local visited
+    // set so those old nodes are scanned once without marking them as nursery
+    // survivors.
+    scanned_old: HashSet<GcErasedPointer>,
+    // Whether this tracer is being used to install remembered-set barriers
+    // while an allocation is promoted. Ordinary minor collections keep the
+    // nursery bounded by skipping old allocations entirely.
+    scan_old: bool,
+    // Young allocations discovered while recursively scanning a promoted
+    // allocation. They become direct remembered roots for later minors.
+    marked_young: Vec<GcErasedPointer>,
+    current_node: Option<GcErasedPointer>,
+    mode: TraceMode,
 }
 
 impl Tracer {
     pub(crate) fn new() -> Self {
         Self {
             queue: VecDeque::default(),
+            ephemeron_queue: VecDeque::default(),
+            discovered_ephemerons: Vec::default(),
+            discovered_ephemeron_set: HashSet::default(),
+            scanned_old: HashSet::default(),
+            scan_old: false,
+            marked_young: Vec::default(),
+            current_node: None,
+            mode: TraceMode::Major,
+        }
+    }
+
+    pub(crate) fn new_minor() -> Self {
+        Self {
+            mode: TraceMode::Minor,
+            ..Self::new()
+        }
+    }
+
+    pub(crate) fn new_minor_scan_old() -> Self {
+        Self {
+            scan_old: true,
+            ..Self::new_minor()
         }
     }
 
     pub(crate) fn enqueue(&mut self, node: GcErasedPointer) {
-        self.queue.push_back(node);
+        self.queue.push_back(StrongEntry { pointer: node });
+    }
+
+    pub(crate) fn enqueue_root(&mut self, node: GcErasedPointer) {
+        self.enqueue(node);
+    }
+
+    /// Queues an ephemeron allocation without tracing through its weak value.
+    /// The collector performs the ephemeron fixed point after strong roots have
+    /// been processed.
+    pub(crate) fn enqueue_ephemeron(&mut self, node: EphemeronPointer) {
+        self.ephemeron_queue
+            .push_back(EphemeronEntry { pointer: node });
+    }
+
+    pub(crate) fn enqueue_ephemeron_root(&mut self, node: EphemeronPointer) {
+        self.ephemeron_queue
+            .push_back(EphemeronEntry { pointer: node });
+    }
+
+    /// Traces a heap-external provider as a root. Direct pointers emitted by
+    /// the provider are roots; pointers emitted later while tracing a heap node
+    /// are ordinary edges.
+    pub(crate) unsafe fn trace_root(&mut self, provider: &dyn Trace) {
+        // SAFETY: forwarded from the collector's Trace invariant.
+        unsafe { provider.trace(self) };
+    }
+
+    /// Returns the allocation whose `Trace` implementation is currently
+    /// running. Heap-external root providers have no current allocation.
+    pub(crate) fn current_node(&self) -> Option<GcErasedPointer> {
+        self.current_node
+    }
+
+    /// Traces one allocation shallowly without draining edges it emits.
+    ///
+    /// # Safety
+    ///
+    /// `node` must point to a live allocation owned by this collector.
+    pub(crate) unsafe fn trace_shallow_node(&mut self, node: GcErasedPointer) {
+        let node_ref = unsafe { node.as_ref() };
+        let previous = self.current_node.replace(node);
+        let _current_node_guard = CurrentNodeGuard {
+            slot: std::ptr::addr_of_mut!(self.current_node),
+            previous,
+        };
+        let trace_fn = node_ref.trace_fn();
+        // SAFETY: the function pointer comes from this allocation's vtable.
+        unsafe { trace_fn(node, self) };
     }
 
     /// Traces through all the queued nodes until the queue is empty.
@@ -40,22 +157,86 @@ impl Tracer {
     ///
     /// All the pointers inside of the queue must point to valid memory.
     pub(crate) unsafe fn trace_until_empty(&mut self) {
-        while let Some(node) = self.queue.pop_front() {
-            let node_ref = unsafe { node.as_ref() };
-            if node_ref.is_marked() {
-                continue;
-            }
-            node_ref.header.mark();
-            let trace_fn = node_ref.trace_fn();
+        while !self.queue.is_empty() || !self.ephemeron_queue.is_empty() {
+            while let Some(entry) = self.queue.pop_front() {
+                let node = entry.pointer;
+                let node_ref = unsafe { node.as_ref() };
+                match self.mode {
+                    TraceMode::Major => {
+                        if node_ref.is_marked() {
+                            continue;
+                        }
+                        node_ref.header.mark();
+                    }
+                    TraceMode::Minor => {
+                        if node_ref.header.is_young() {
+                            if node_ref.header.is_minor_marked() {
+                                if self.scan_old {
+                                    // The main minor mark may have reached a
+                                    // young child before its parent was
+                                    // promoted. It still becomes an old-to-young
+                                    // remembered root even though no new trace
+                                    // walk is needed here.
+                                    self.marked_young.push(node);
+                                }
+                                continue;
+                            }
+                            node_ref.header.minor_mark();
+                            if self.scan_old {
+                                self.marked_young.push(node);
+                            }
+                        } else if !self.scan_old {
+                            continue;
+                        } else {
+                            // Old allocations are never reclaimed by a minor
+                            // collection. Promotion tracing only visits each
+                            // old allocation once for the lifetime of its
+                            // barriers, while this local set still breaks
+                            // cycles within the current walk.
+                            let header = &node_ref.header;
+                            if header.barriers_installed() || !self.scanned_old.insert(node) {
+                                continue;
+                            }
+                            header.mark_barriers_installed();
+                        }
+                    }
+                }
 
-            // SAFETY: The function pointer is appropriate for this node type because we extract it from it's VTable.
-            // Additionally, the node pointer is valid per the caller's guarantee.
-            unsafe { trace_fn(node, self) }
+                // SAFETY: the queued node is valid by this function's contract.
+                unsafe { self.trace_shallow_node(node) }
+            }
+
+            while let Some(entry) = self.ephemeron_queue.pop_front() {
+                let eph = entry.pointer;
+                let header = unsafe { eph.as_ref() }.header();
+
+                match self.mode {
+                    TraceMode::Major => header.mark(),
+                    TraceMode::Minor => {
+                        if header.is_young() {
+                            header.minor_mark();
+                        }
+                    }
+                }
+
+                if self.discovered_ephemeron_set.insert(eph) {
+                    self.discovered_ephemerons.push(eph);
+                }
+            }
         }
     }
 
+    pub(crate) fn take_marked_young(&mut self) -> Vec<GcErasedPointer> {
+        std::mem::take(&mut self.marked_young)
+    }
+
+    /// Takes the ephemerons discovered while a collection was tracing.
+    pub(crate) fn take_discovered_ephemerons(&mut self) -> Vec<EphemeronPointer> {
+        std::mem::take(&mut self.discovered_ephemerons)
+    }
+
     pub(crate) fn is_empty(&mut self) -> bool {
-        self.queue.is_empty()
+        self.queue.is_empty() && self.ephemeron_queue.is_empty()
     }
 }
 
@@ -82,13 +263,6 @@ pub unsafe trait Trace: Finalize {
     /// See [`Trace`].
     unsafe fn trace(&self, tracer: &mut Tracer);
 
-    /// Trace handles located in GC heap, and mark them as non root.
-    ///
-    /// # Safety
-    ///
-    /// See [`Trace`].
-    unsafe fn trace_non_roots(&self);
-
     /// Runs [`Finalize::finalize`] on this object and all
     /// contained subobjects.
     fn run_finalizer(&self);
@@ -102,8 +276,6 @@ macro_rules! empty_trace {
     () => {
         #[inline]
         unsafe fn trace(&self, _tracer: &mut $crate::Tracer) {}
-        #[inline]
-        unsafe fn trace_non_roots(&self) {}
         #[inline]
         fn run_finalizer(&self) {
             $crate::Finalize::finalize(self)
@@ -131,17 +303,6 @@ macro_rules! custom_trace {
                     $crate::Trace::trace(it, tracer);
                 }
             };
-            let $this = self;
-            $body
-        }
-        #[inline]
-        unsafe fn trace_non_roots(&self) {
-            fn $marker<T: $crate::Trace + ?Sized>(it: &T) {
-                // SAFETY: The implementor must ensure that `trace` is correctly implemented.
-                unsafe {
-                    $crate::Trace::trace_non_roots(it);
-                }
-            }
             let $this = self;
             $body
         }
@@ -316,13 +477,6 @@ unsafe impl<T: Trace + ?Sized> Trace for Box<T> {
         // SAFETY: The implementor must ensure that `trace` is correctly implemented.
         unsafe {
             Trace::trace(&**self, tracer);
-        }
-    }
-    #[inline]
-    unsafe fn trace_non_roots(&self) {
-        // SAFETY: The implementor must ensure that `trace_non_roots` is correctly implemented.
-        unsafe {
-            Trace::trace_non_roots(&**self);
         }
     }
     #[inline]

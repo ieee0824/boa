@@ -15,7 +15,9 @@ use crate::{
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     error::JsNativeError,
     js_string,
-    object::{CONSTRUCTOR, JsObject, internal_methods::get_prototype_from_constructor},
+    object::{
+        CONSTRUCTOR, JsObject, RootedJsObject, internal_methods::get_prototype_from_constructor,
+    },
     property::Attribute,
     realm::Realm,
     string::{CodePoint, JsStrVariant, StaticJsStrings},
@@ -1031,6 +1033,7 @@ impl RegExp {
         // 20. Let A be ! ArrayCreate(n + 1).
         // 21. Assert: The mathematical value of A's "length" property is n + 1.
         let a = Array::array_create(n + 1, None, context)?;
+        let _a_root = a.clone().root();
 
         // 22. Perform ! CreateDataPropertyOrThrow(A, "index", 𝔽(lastIndex)).
         a.create_data_property_or_throw(js_string!("index"), last_index, context)
@@ -1048,9 +1051,11 @@ impl RegExp {
             [match_value.start().into(), match_value.end().into()],
             context,
         );
+        let _match_record_root = match_record.clone().root();
 
         // 25. Let indices be a new empty List.
         let indices = Array::array_create(n + 1, None, context)?;
+        let _indices_root = indices.clone().root();
 
         // 27. Append match to indices.
         indices
@@ -1079,7 +1084,9 @@ impl RegExp {
         let (groups, group_names) = if !named_groups.clone().is_empty() {
             // a. Let groups be OrdinaryObjectCreate(null).
             let groups = JsObject::with_null_proto();
+            let _groups_root = groups.clone().root();
             let group_names = JsObject::with_null_proto();
+            let _group_names_root = group_names.clone().root();
 
             // e. If the ith capture of R was defined with a GroupName, then
             // i. Let s be the CapturingGroupName of that GroupName.
@@ -1232,6 +1239,7 @@ impl RegExp {
 
         // c. Let A be ! ArrayCreate(0).
         let a = Array::array_create(0, None, context).expect("this ArrayCreate call must not fail");
+        let _a_root = a.clone().root();
 
         // d. Let n be 0.
         let mut n = 0;
@@ -1244,6 +1252,7 @@ impl RegExp {
             // ii. If result is null, then
             // iii. Else,
             if let Some(result) = result {
+                let _result_root = result.clone().root();
                 // 1. Let matchStr be ? ToString(? Get(result, "0")).
                 let match_str = result.get(0, context)?.to_string(context)?;
 
@@ -1356,6 +1365,7 @@ impl RegExp {
 
         // 6. Let matcher be ? Construct(C, « R, flags »).
         let matcher = c.construct(&[this.clone(), flags.clone().into()], Some(&c), context)?;
+        let _matcher_root = matcher.clone().root();
 
         // 7. Let lastIndex be ? ToLength(? Get(R, "lastIndex")).
         let last_index = regexp
@@ -1413,6 +1423,7 @@ impl RegExp {
                 "RegExp.prototype[Symbol.replace] method called on incompatible value",
             )
         })?;
+        let _rx_root = rx.clone().root();
 
         // 3. Let S be ? ToString(string).
         let s = args.get_or_undefined(0).to_string(context)?;
@@ -1453,7 +1464,7 @@ impl RegExp {
         };
 
         // 10. Let results be a new empty List.
-        let mut results = Vec::new();
+        let mut results: Vec<RootedJsObject> = Vec::new();
 
         // SKIPPED: 11. Let done be false.
         //
@@ -1472,6 +1483,11 @@ impl RegExp {
 
             // c. Else,
             //  i. Append result to results.
+            //
+            // The later replacement loop invokes user-visible operations while
+            // these match objects are still retained. Keep every result rooted
+            // across those calls, since they may trigger a collection.
+            let result = result.root();
             results.push(result.clone());
 
             //  ii. If global is false, then
@@ -1592,6 +1608,9 @@ impl RegExp {
                         // 1. Set namedCaptures to ? ToObject(namedCaptures).
                         named_captures = named_captures.to_object(context)?.into();
                     }
+                    let _named_captures_root = named_captures
+                        .as_object()
+                        .map(|object| object.clone().root());
 
                     // ii. Let replacement be ? GetSubstitution(matched, S, position, captures, namedCaptures, replaceValue).
                     string::get_substitution(
@@ -1716,6 +1735,7 @@ impl RegExp {
 
         // 4. Let C be ? SpeciesConstructor(rx, %RegExp%).
         let constructor = rx.species_constructor(StandardConstructors::regexp, context)?;
+        let _constructor_root = constructor.clone().root();
 
         // 5. Let flags be ? ToString(? Get(rx, "flags")).
         let flags = rx.get(js_string!("flags"), context)?.to_string(context)?;
@@ -1738,9 +1758,11 @@ impl RegExp {
             Some(&constructor),
             context,
         )?;
+        let _splitter_root = splitter.clone().root();
 
         // 11. Let A be ! ArrayCreate(0).
         let a = Array::array_create(0, None, context).expect("this ArrayCreate call must not fail");
+        let _a_root = a.clone().root();
 
         // 12. Let lengthA be 0.
         let mut length_a = 0;
@@ -1795,6 +1817,7 @@ impl RegExp {
             // c. If z is null, set q to AdvanceStringIndex(S, q, unicodeMatching).
             // d. Else,
             if let Some(result) = result {
+                let _result_root = result.clone().root();
                 // i. Let e be ℝ(? ToLength(? Get(splitter, "lastIndex"))).
                 let mut e = splitter
                     .get(js_string!("lastIndex"), context)?

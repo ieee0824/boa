@@ -9,7 +9,7 @@ use crate::{
         promise::{PromiseState, ResolvingFunctions},
     },
     job::{AsyncContext, NativeAsyncJob},
-    object::JsObject,
+    object::{JsObject, RootedJsObject},
     value::TryFromJs,
 };
 use boa_gc::{Finalize, GcRefCell, Rooted, Trace};
@@ -109,9 +109,17 @@ use std::{future::Future, pin::Pin, task};
 #[derive(Debug, Clone, Trace, Finalize)]
 pub struct JsPromise {
     inner: JsObject,
+    _owner: RootedJsObject,
 }
 
 impl JsPromise {
+    fn from_owned_object(object: JsObject) -> Self {
+        Self {
+            _owner: object.clone().root(),
+            inner: object,
+        }
+    }
+
     /// Creates a new promise object from an executor function.
     ///
     /// It is equivalent to calling the [`Promise()`] constructor, which makes it share the same
@@ -170,6 +178,7 @@ impl JsPromise {
             context.intrinsics().constructors().promise().prototype(),
             Promise::new(),
         );
+        let _promise_root = promise.clone().root();
         let resolvers = Promise::create_resolving_functions(&promise, context);
 
         if let Err(e) = executor(&resolvers, context) {
@@ -180,7 +189,7 @@ impl JsPromise {
                 .expect("default `reject` function cannot throw");
         }
 
-        Self { inner: promise }
+        Self::from_owned_object(promise)
     }
 
     /// Creates a new pending promise and returns it and its associated `ResolvingFunctions`.
@@ -221,6 +230,7 @@ impl JsPromise {
             context.intrinsics().constructors().promise().prototype(),
             Promise::new(),
         );
+        let _promise_root = promise.clone().root();
         let resolvers = Promise::create_resolving_functions(&promise, context);
         let promise =
             Self::from_object(promise).expect("this shouldn't fail with a newly created promise");
@@ -267,7 +277,7 @@ impl JsPromise {
                 .with_message("`object` is not a Promise")
                 .into());
         }
-        Ok(Self { inner: object })
+        Ok(Self::from_owned_object(object))
     }
 
     /// Creates a new `JsPromise` from a [`Future`]-like.
@@ -1220,7 +1230,7 @@ impl JsPromise {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     let frame = r#gen
                         .call_frame
                         .take()
@@ -1233,11 +1243,12 @@ impl JsPromise {
                     if let crate::native_function::CoroutineState::Yielded(value) =
                         continuation.call(Ok(args.get_or_undefined(0).clone()), context)
                     {
+                        let _value_root = value.as_object().map(JsObject::root);
                         JsPromise::resolve(value, context)
                             .await_native(&continuation.to_rooted(), context);
                     }
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     r#gen.call_frame = context.vm.pop_frame().map(crate::vm::CallFrame::into_edge);
                     assert!(r#gen.call_frame.is_some());
 
@@ -1281,7 +1292,7 @@ impl JsPromise {
                     // NOTE: We need to get the object before resuming, since it could clear the stack.
                     let async_generator = r#gen.async_generator_object();
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     let frame = r#gen
                         .call_frame
                         .take()
@@ -1297,11 +1308,12 @@ impl JsPromise {
                             context,
                         )
                     {
+                        let _value_root = value.as_object().map(JsObject::root);
                         JsPromise::resolve(value, context)
                             .await_native(&continuation.to_rooted(), context);
                     }
 
-                    std::mem::swap(&mut context.vm.stack, &mut r#gen.stack);
+                    std::mem::swap(&mut *context.vm.stack, &mut r#gen.stack);
                     r#gen.call_frame = context.vm.pop_frame().map(crate::vm::CallFrame::into_edge);
                     assert!(r#gen.call_frame.is_some());
 

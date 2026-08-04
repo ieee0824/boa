@@ -1,5 +1,62 @@
 # VM
 
+## Versioned bytecode contract
+
+`CodeBlock::bytecode_contract()` is the supported read-only boundary for code
+that needs to inspect interpreter bytecode. Consumers must call `verify()` and
+use the returned owned snapshot; the compact byte array, compiler structures,
+VM stack, call frames, and inline-cache storage remain private.
+
+The snapshot is tagged with `BYTECODE_CONTRACT_VERSION` and contains verified
+instruction boundaries, numeric opcode and name, named operands, register and
+index limits, constants (including recursively verified function code),
+exception handlers, inline-cache count, and source line/column data. Verification
+rejects reserved or undecodable instructions, out-of-range register/constant/
+binding/cache operands, non-instruction jump targets, and malformed handlers.
+Changing an opcode meaning, operand encoding, or snapshot invariant requires a
+contract version bump.
+
+`CodeBlock::jit_metadata()` exposes a copy of interpreter-entry hotness and the
+compiled-entry/fallback state. Gate 2 stores no executable pointer: the existing
+interpreter is authoritative, and failed or unsupported compilation must remain
+on that path. Executable memory and native entry installation belong to Gate 3.
+
+## Interpreter fallback frame
+
+The crate-private Gate 2 frame contract verifies a reusable code-block layout
+once, then captures the current program counter, register file, call depth,
+argument/register pointers, lexical environment bounds, loop counter, return
+value, and pending exception without decoding bytecode again. Restore
+is accepted only for the same active frame, the same bytecode contract version,
+an instruction-boundary program counter, an exact-size register file, and an
+environment depth that can be reached by truncation. Iterator, binding-update,
+constructor, async/generator, module, active-native-call, and native-continuation
+state is rejected instead of being approximated.
+The consumed token returns an explicit continue, return, or throw disposition
+to the dispatcher, so fallback cannot infer control flow from a value slot. The
+same verified layout supplies PC boundaries and register count at capture and
+restore, keeping the hot fallback handoff linear only in the live register file.
+
+The token is a bounded no-safepoint handoff: all copied GC edges remain owned by
+the active Boa VM stack. Capture writes into an exact-size register slice owned
+and reusable by the caller, so Gate 3 can keep the hot handoff allocation-free.
+It must consume the token before interpreter re-entry. Letting a native frame
+survive a GC safepoint still requires the independently rooted frame/stack-map
+work in Gate 4.
+
+Each verified `ic_index` addresses the same immutable `CodeBlock` cache slot for
+the lifetime of that block. Boa owns the receiver/prototype shape guards and slot
+actions so raw GC identities never escape to an embedding or compiled-code
+adapter. `CodeBlock::inline_cache_metadata()` exposes a read-only diagnostic
+snapshot for every slot: empty/monomorphic/polymorphic/megamorphic state, live
+bounded entries, hits, misses, installs (including relinks), and victim
+replacements. Gate 3 can use
+the stable bytecode index and Boa-owned guard operation while telemetry and
+fallback decisions remain observable without making cache internals mutable.
+Hit/miss/install counters are opt-in per code block, so normal property accesses
+do not perform counter updates; bounded-cache replacement state is always kept.
+Counters can be reset without discarding warmed guards for repeatable sampling.
+
 ## Architecture
 
 ![image](img/boa_architecture.png)

@@ -166,7 +166,8 @@ fn eph_self_referential() {
             *root.inner.inner.borrow_mut() = Some(eph.clone().into_edge());
 
             assert!(eph.value().is_some());
-            Harness::assert_exact_bytes_allocated(56);
+            let eph_size = size_of::<EphemeronBox<InnerCell, TestCell>>();
+            Harness::assert_exact_bytes_allocated(root_size + eph_size);
         }
 
         *root.inner.inner.borrow_mut() = None;
@@ -184,6 +185,7 @@ fn eph_self_referential_chain() {
         inner: GcEdge<GcRefCell<Option<EphemeronEdge<u8, TestCell>>>>,
     }
     run_test(|| {
+        type ChainCell = GcRefCell<Option<EphemeronEdge<u8, TestCell>>>;
         let root = Rooted::new(GcRefCell::new(None));
         let root_size = size_of::<GcBox<GcRefCell<Option<Ephemeron<u8, TestCell>>>>>();
 
@@ -212,7 +214,11 @@ fn eph_self_referential_chain() {
 
             assert!(eph_start.value().is_some());
             assert!(eph_chain2.value().is_some());
-            Harness::assert_exact_bytes_allocated(168);
+            let chain_cell_size = size_of::<GcBox<ChainCell>>();
+            let eph_size = size_of::<EphemeronBox<u8, TestCell>>();
+            let watched_size = size_of::<GcBox<u8>>();
+            let expected = root_size + watched_size + 2 * (chain_cell_size + eph_size);
+            Harness::assert_exact_bytes_allocated(expected);
         }
 
         *root.borrow_mut() = None;

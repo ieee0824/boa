@@ -44,8 +44,10 @@ impl TemplateCreate {
         let count = values.len() / 2;
         let template =
             Array::array_create(count as u64, None, context).expect("cannot fail per spec");
+        let _template_root = template.clone().root();
         let raw_obj =
             Array::array_create(count as u64, None, context).expect("cannot fail per spec");
+        let _raw_obj_root = raw_obj.clone().root();
 
         let mut index = 0;
         let mut cooked = true;

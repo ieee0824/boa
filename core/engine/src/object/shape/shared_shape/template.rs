@@ -4,7 +4,7 @@ use thin_vec::ThinVec;
 use crate::{
     JsValue,
     object::{
-        IndexedProperties, JsObject, NativeObject, Object, ObjectData, PropertyMap,
+        IndexedProperties, JsObject, NativeObject, Object, ObjectData, PropertyMap, RootedJsObject,
         shape::slot::SlotAttributes,
     },
     property::{Attribute, PropertyKey},
@@ -28,8 +28,8 @@ impl ObjectTemplate {
     }
 
     /// Create and [`ObjectTemplate`] with a prototype.
-    pub(crate) fn with_prototype(shape: &SharedShape, prototype: JsObject) -> Self {
-        let shape = shape.change_prototype_transition(Some(prototype));
+    pub(crate) fn with_prototype(shape: &SharedShape, prototype: &RootedJsObject) -> Self {
+        let shape = shape.change_prototype_transition(Some(prototype.to_edge()));
         Self {
             shape: shape.into_edge(),
         }
@@ -47,6 +47,15 @@ impl ObjectTemplate {
         self.shape = self
             .shape
             .change_prototype_transition(Some(prototype))
+            .into_edge();
+        self
+    }
+
+    /// Set the prototype while keeping an external root alive during allocation.
+    pub(crate) fn set_rooted_prototype(&mut self, prototype: &RootedJsObject) -> &mut Self {
+        self.shape = self
+            .shape
+            .change_prototype_transition(Some(prototype.to_edge()))
             .into_edge();
         self
     }

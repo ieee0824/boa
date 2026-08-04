@@ -3,8 +3,9 @@
 //! [`NativeFunction`] is the main type of this module, providing APIs to create native callables
 //! from native Rust functions and closures.
 
-use boa_gc::{Finalize, GcEdge, Rooted, Trace, custom_trace};
+use boa_gc::{Finalize, GcEdge, RootProvider, Rooted, Trace, custom_trace};
 use boa_string::JsString;
+use std::ptr::NonNull;
 
 use crate::job::{AsyncContext, NativeAsyncJob};
 use crate::object::internal_methods::InternalMethodCallContext;
@@ -45,6 +46,19 @@ pub(crate) use continuation::{CoroutineState, NativeCoroutine};
 ///
 /// - The last argument is the engine [`Context`].
 pub type NativeFunctionPointer = fn(&JsValue, &[JsValue], &mut Context) -> JsResult<JsValue>;
+
+/// Roots the values moved out of the VM stack for the duration of one native call.
+///
+/// Native builtins are allowed to allocate while inspecting their arguments. Once
+/// the calling convention removes those values from the VM stack, the VM's stack
+/// provider cannot see them anymore, so the call installs this short-lived provider.
+#[derive(Trace, Finalize)]
+struct NativeCallRoots {
+    function: JsObject,
+    this: JsValue,
+    new_target: Option<JsValue>,
+    args: Vec<JsValue>,
+}
 
 trait TraceableClosure: Trace {
     fn call(&self, this: &JsValue, args: &[JsValue], context: &mut Context) -> JsResult<JsValue>;
@@ -377,10 +391,20 @@ pub(crate) fn native_function_call(
     let _func = context.vm.stack.pop();
     let this = context.vm.stack.pop();
 
+    let native_roots = Box::new(NativeCallRoots {
+        function: obj.clone(),
+        this,
+        new_target: None,
+        args,
+    });
+    // SAFETY: The box keeps the provider at a stable address until it is dropped
+    // after the native call returns.
+    let _native_roots = unsafe { RootProvider::register(NonNull::from(&*native_roots)) };
+
     // We technically don't need this since native functions don't push any new frames to the
     // vm, but we'll eventually have to combine the native stack with the vm stack.
     context.check_runtime_limits()?;
-    let this_function_object = obj.clone();
+    let this_function_object = native_roots.function.clone();
 
     let NativeFunctionObject {
         f: function,
@@ -413,9 +437,9 @@ pub(crate) fn native_function_call(
 
     let continuation_depth = context.vm.native_call_continuations.len();
     let result = if constructor.is_some() {
-        function.call(&JsValue::undefined(), &args, context)
+        function.call(&JsValue::undefined(), &native_roots.args, context)
     } else {
-        function.call(&this, &args, context)
+        function.call(&native_roots.this, &native_roots.args, context)
     }
     .map_err(|err| err.inject_realm(context.realm()));
 
@@ -505,10 +529,6 @@ fn native_function_construct(
     let mut realm = realm.map_or_else(|| context.realm().clone(), |realm| realm.to_rooted());
 
     context.swap_realm(&mut realm);
-    let previous_active_function = context
-        .vm
-        .native_active_function
-        .replace(this_function_object);
     let previous_is_constructor_call = std::mem::replace(
         &mut context.vm.native_active_function_is_constructor_call,
         true,
@@ -520,17 +540,41 @@ fn native_function_construct(
         .stack
         .calling_convention_pop_arguments(argument_count);
     let _func = context.vm.stack.pop();
-    let _this = context.vm.stack.pop();
+    let this = context.vm.stack.pop();
+
+    let native_roots = Box::new(NativeCallRoots {
+        function: this_function_object.clone(),
+        this,
+        new_target: Some(new_target),
+        args,
+    });
+    // SAFETY: The box keeps the provider at a stable address until the native
+    // constructor and result conversion have completed.
+    let _native_roots = unsafe { RootProvider::register(NonNull::from(&*native_roots)) };
+    let previous_active_function = context
+        .vm
+        .native_active_function
+        .replace(this_function_object.clone());
 
     let result = function
-        .call(&new_target, &args, context)
+        .call(
+            native_roots
+                .new_target
+                .as_ref()
+                .expect("construct root must contain new.target"),
+            &native_roots.args,
+            context,
+        )
         .map_err(|err| err.inject_realm(context.realm()))
         .and_then(|v| match v.variant() {
             JsVariant::Object(o) => Ok(o.clone()),
             val => {
                 if constructor.expect("must be a constructor").is_base() || val.is_undefined() {
                     let prototype = get_prototype_from_constructor(
-                        &new_target,
+                        native_roots
+                            .new_target
+                            .as_ref()
+                            .expect("construct root must contain new.target"),
                         StandardConstructors::object,
                         context,
                     )?;

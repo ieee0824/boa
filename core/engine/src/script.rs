@@ -177,9 +177,7 @@ impl Script {
     ///
     /// This is a no-op if this has been called previously.
     pub fn codeblock(&self, context: &mut Context) -> JsResult<Rooted<CodeBlock>> {
-        let mut codeblock = self.inner.codeblock.borrow_mut();
-
-        if let Some(codeblock) = &*codeblock {
+        if let Some(codeblock) = &*self.inner.codeblock.borrow() {
             return Ok(codeblock.clone().root());
         }
 
@@ -218,7 +216,7 @@ impl Script {
 
         let cb = Rooted::new(compiler.finish());
 
-        *codeblock = Some(cb.clone().into_edge());
+        *self.inner.codeblock.borrow_mut() = Some(cb.clone().into_edge());
 
         Ok(cb)
     }

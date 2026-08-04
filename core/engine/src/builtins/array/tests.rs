@@ -1,6 +1,7 @@
 use super::Array;
 use crate::{
-    Context, JsNativeErrorKind, JsValue, TestAction, builtins::Number, js_string, run_test_actions,
+    Context, JsNativeErrorKind, JsValue, NativeFunction, TestAction, builtins::Number, js_string,
+    run_test_actions,
 };
 use boa_macros::js_str;
 use indoc::indoc;
@@ -248,6 +249,56 @@ fn unshift() {
         TestAction::assert_eq("arr.unshift()", 2),
         TestAction::assert_eq("arr.unshift(1, 2)", 4),
         TestAction::assert("arrayEquals(arr, [1, 2, 3, 4])"),
+    ]);
+}
+
+#[test]
+fn array_receiver_stays_rooted_during_property_callbacks() {
+    run_test_actions([
+        TestAction::run(indoc! {r#"
+            function churn() {
+                let garbage = [];
+                for (let i = 0; i < 128; i++) garbage.push({value: i});
+            }
+
+            let joinValues = [];
+            for (let i = 0; i < 32; i++) {
+                Object.defineProperty(joinValues, i, {
+                    configurable: true,
+                    get() {
+                        churn();
+                        return String(i);
+                    }
+                });
+            }
+            joinValues.length = 32;
+            let joined = joinValues.join(',');
+
+            let unshiftValues = [];
+            for (let i = 0; i < 32; i++) unshiftValues[i] = i;
+            let observed = 0;
+            Object.defineProperty(unshiftValues, 0, {
+                configurable: true,
+                get() {
+                    churn();
+                    return 0;
+                },
+                set(value) {
+                    churn();
+                    observed = value;
+                }
+            });
+            unshiftValues.unshift(-1);
+        "#}),
+        TestAction::assert(indoc! {r#"
+            joined.split(',').length === 32 &&
+            joined.startsWith('0,1,2,3') &&
+            joined.endsWith('28,29,30,31') &&
+            observed === -1 &&
+            unshiftValues[1] === 0 &&
+            unshiftValues[31] === 30 &&
+            unshiftValues[32] === 31
+        "#}),
     ]);
 }
 
@@ -549,6 +600,58 @@ fn filter() {
         // assert the old arrays have not been modified
         TestAction::assert("arrayEquals(one, ['1'])"),
         TestAction::assert("arrayEquals(many, ['1', '0', '1'])"),
+    ]);
+}
+
+#[test]
+fn filter_roots_result_during_callback_allocations() {
+    run_test_actions([
+        TestAction::run_harness(),
+        TestAction::assert(indoc! {r#"
+            const input = Array.from({ length: 32 }, (_, index) => index);
+            const result = input.filter(() => {
+                // Force the callback to allocate while `filter` retains its
+                // destination array in a native local.
+                Array.from({ length: 4096 }, () => ({}));
+                return true;
+            });
+            arrayEquals(result, input)
+        "#}),
+    ]);
+}
+
+#[test]
+fn filter_species_callback_can_collect() {
+    run_test_actions([
+        TestAction::inspect_context(|ctx| {
+            ctx.register_global_callable(
+                js_string!("forceCollect"),
+                0,
+                NativeFunction::from_fn_ptr(|_, _, _| {
+                    boa_gc::force_collect();
+                    Ok(JsValue::undefined())
+                }),
+            )
+            .unwrap();
+        }),
+        TestAction::assert(indoc! {r#"
+                class FilterSpeciesArray extends Array {
+                    static get [Symbol.species]() {
+                        return function () {
+                            return function result() {};
+                        };
+                    }
+                }
+
+                const input = new FilterSpeciesArray(1);
+                input[0] = 7;
+                const filtered = input.filter((_) => {
+                    forceCollect();
+                    return true;
+                });
+
+                typeof filtered === "function" && filtered[0] === 7;
+            "#}),
     ]);
 }
 

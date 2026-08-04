@@ -1,8 +1,9 @@
-use crate::BOA_GC;
+use crate::{BOA_GC, REMEMBERED_EPHEMERONS};
 
 mod allocation;
 mod cell;
 mod erased;
+mod generational;
 mod rooted;
 mod weak;
 mod weak_map;
@@ -27,6 +28,14 @@ impl Harness {
     }
 
     #[track_caller]
+    fn assert_nursery_threshold(bytes: usize) {
+        BOA_GC.with(|current| {
+            let gc = current.borrow();
+            assert_eq!(gc.config.nursery_threshold, bytes);
+        });
+    }
+
+    #[track_caller]
     fn assert_collected_at_least(collections: usize) {
         BOA_GC.with(|current| {
             let gc = current.borrow();
@@ -43,7 +52,10 @@ impl Harness {
         BOA_GC.with(|current| {
             let gc = current.borrow();
 
-            assert!(gc.strongs.is_empty());
+            assert!(gc.youngs.is_empty());
+            assert!(gc.old_strongs.is_empty());
+            assert!(gc.young_weaks.is_empty());
+            assert!(gc.old_weaks.is_empty());
             assert_eq!(gc.runtime.bytes_allocated, 0);
         });
     }
@@ -61,6 +73,47 @@ impl Harness {
         BOA_GC.with(|current| {
             let gc = current.borrow();
             assert_eq!(gc.runtime.bytes_allocated, bytes);
+        });
+    }
+
+    /// Asserts how many strong allocations the collector is still holding.
+    #[track_caller]
+    fn assert_strong_allocations(count: usize) {
+        BOA_GC.with(|current| {
+            let gc = current.borrow();
+            assert_eq!(
+                gc.youngs.len() + gc.old_strongs.len(),
+                count,
+                "expected {count} strong allocations, got {}",
+                gc.youngs.len() + gc.old_strongs.len()
+            );
+        });
+    }
+
+    #[track_caller]
+    fn assert_ephemeron_allocations(count: usize) {
+        BOA_GC.with(|current| {
+            let gc = current.borrow();
+            assert_eq!(
+                gc.young_weaks.len() + gc.old_weaks.len(),
+                count,
+                "expected {count} ephemeron allocations, got {}",
+                gc.young_weaks.len() + gc.old_weaks.len()
+            );
+        });
+    }
+
+    #[track_caller]
+    fn assert_remembered_ephemerons(count: usize) {
+        REMEMBERED_EPHEMERONS.with(|remembered| {
+            assert_eq!(remembered.borrow().len(), count);
+        });
+    }
+
+    /// Makes every subsequent allocation trigger a collection.
+    fn collect_on_every_allocation() {
+        BOA_GC.with(|current| {
+            current.borrow_mut().config.threshold = 0;
         });
     }
 }
