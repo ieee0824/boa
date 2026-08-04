@@ -165,18 +165,39 @@ impl ArithmeticCode {
             }
             assembler.resolve()?;
             safepoints.sort_unstable_by_key(|point| point.machine_offset);
+            let valid_program_counters = snapshot
+                .instructions
+                .iter()
+                .map(|instruction| instruction.offset)
+                .collect::<Vec<_>>();
+            let exception_metadata = super::JitExceptionMetadata::new(
+                valid_program_counters.iter().copied(),
+                snapshot
+                    .handlers
+                    .iter()
+                    .map(|handler| super::JitExceptionHandler {
+                        start: handler.start,
+                        end: handler.end,
+                        handler: handler.end,
+                        environment_count: handler.environment_count,
+                    }),
+                snapshot
+                    .instructions
+                    .iter()
+                    .map(|instruction| super::JitSourceLocation {
+                        bytecode_offset: instruction.offset,
+                        line: instruction.source_line,
+                        column: instruction.source_column,
+                    }),
+            )?;
             let frame_descriptor = JitFrameDescriptor::new(
                 JitFrameDescriptorId(NEXT_FRAME_DESCRIPTOR_ID.fetch_add(1, Ordering::Relaxed)),
                 u32::try_from(assembler.code.len()).map_err(|_| JitError::InvalidCodeSize)?,
                 u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
                 snapshot.register_count,
                 safepoints,
-            )?;
-            let valid_program_counters = snapshot
-                .instructions
-                .iter()
-                .map(|instruction| instruction.offset)
-                .collect::<Vec<_>>();
+            )?
+            .with_exception_metadata(exception_metadata);
             let deopt_layout = DeoptFrameLayout::new(
                 &valid_program_counters,
                 snapshot.register_count,
@@ -848,9 +869,6 @@ fn resolve_property_object_register(
 
 impl LoopRegion {
     fn find(snapshot: &BytecodeContractSnapshot, bytecode_resume: u32) -> Option<Self> {
-        if !snapshot.handlers.is_empty() {
-            return None;
-        }
         let increment = snapshot.instructions.iter().position(|instruction| {
             instruction.name == "IncrementLoopIteration"
                 && instruction.next_offset == bytecode_resume
@@ -1874,5 +1892,86 @@ mod tests {
         assert_eq!(diagnostics.successful_compilations, 2);
         assert!(diagnostics.property_guard_hits >= 1);
         assert!(diagnostics.compiled_entries >= 1);
+    }
+
+    #[test]
+    fn mixed_jit_interpreter_exception_preserves_handler_finally_rethrow_and_stack() {
+        const SOURCE: &str = "let log=[];\
+            function leaf(n,start,fail){let s=start;for(let i=0;i<n;i++)s=s+i*3;\
+                if(fail)throw new TypeError('boom:'+s);return s}\
+            function middle(fail){try{return leaf(100,9007199254740980,fail)}\
+                finally{log.push('finally')}}\
+            function top(){try{middle(true)}catch(error){log.push(error.name);\
+                log.push(error.message);log.push(String(error.stack).includes('leaf'));\
+                try{throw error}catch(same){log.push(same===error)}}return log.join('|')}\
+            leaf(200,1,false);top()";
+
+        fn run(source: &str, jit_enabled: bool) -> (JsValue, ArithmeticJitDiagnostics) {
+            let mut context = Context::default();
+            context.set_baseline_jit_enabled(jit_enabled);
+            let value = context.eval(Source::from_bytes(source)).unwrap();
+            (value, context.arithmetic_jit_diagnostics())
+        }
+
+        let (expected, _) = run(SOURCE, false);
+        let (actual, diagnostics) = run(SOURCE, true);
+        assert_eq!(actual, expected);
+        let rendered = actual.display().to_string();
+        assert!(rendered.starts_with("\"finally|TypeError|boom:"));
+        assert!(rendered.ends_with("|true\""));
+        assert!(diagnostics.compiled_entries >= 1);
+
+        let contract = arithmetic_contract(
+            "function f(n){try{let s=0;for(let i=0;i<n;i++)s+=i;throw Error(s)}\
+             catch(error){return error.message}}f(100)",
+        );
+        let code = compile_arithmetic(&contract);
+        assert!(
+            !code
+                .frame_descriptor
+                .exception_metadata()
+                .handlers()
+                .is_empty()
+        );
+        assert!(code.frame_descriptor.safepoints().iter().all(|point| {
+            code.frame_descriptor
+                .exception_metadata()
+                .source_location(point.bytecode_offset)
+                .is_some()
+        }));
+        let handler = code.frame_descriptor.exception_metadata().handlers()[0];
+        let safepoint = code
+            .frame_descriptor
+            .safepoints()
+            .iter()
+            .find(|point| handler.contains(point.bytecode_offset))
+            .expect("compiled protected loop has an exact exception safepoint");
+        let code_start = code.memory.as_ptr() as usize;
+        let descriptor = std::sync::Arc::new(code.frame_descriptor.clone());
+        let mut pc_table = crate::jit::JitPcTable::default();
+        pc_table
+            .install(code_start, std::sync::Arc::clone(&descriptor))
+            .unwrap();
+        let mut chain = crate::jit::JitFrameChain::default();
+        chain
+            .push(crate::jit::ActiveJitFrame {
+                header: JitFrameHeader {
+                    frame_id: 99,
+                    descriptor_id: descriptor.id(),
+                    caller: FrameCaller::Interpreter { frame_depth: 2 },
+                },
+                safepoint_pc: code_start + safepoint.machine_offset as usize,
+            })
+            .unwrap();
+        let plan = crate::jit::JitExceptionUnwindPlan::build(&chain, &pc_table).unwrap();
+        assert_eq!(
+            plan.target(),
+            crate::jit::JitExceptionUnwindTarget::Handler {
+                frame_id: 99,
+                bytecode_offset: handler.handler,
+                environment_count: handler.environment_count,
+            }
+        );
+        assert!(plan.popped_frame_ids().is_empty());
     }
 }
