@@ -2239,7 +2239,7 @@ fn runtime_limit_can_be_materialized_without_panicking() {
 }
 
 #[test]
-fn recursion_runtime_limit() {
+fn recursion_range_error() {
     run_test_actions([
         TestAction::run(indoc! {r#"
             function factorial(n) {

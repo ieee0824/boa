@@ -8,7 +8,7 @@
 //! [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date
 
 use crate::{
-    Context, JsArgs, JsData, JsError, JsResult, JsString,
+    Context, JsArgs, JsData, JsResult, JsString,
     builtins::{
         BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject,
         date::utils::{
@@ -1619,13 +1619,14 @@ impl Date {
     /// [spec]: https://tc39.es/ecma262/#sec-date.prototype.tolocaledatestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleDateString
     pub(crate) fn to_locale_date_string(
-        _this: &JsValue,
-        _args: &[JsValue],
-        _context: &mut Context,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        Err(JsError::from_opaque(JsValue::new(js_string!(
-            "Function Unimplemented"
-        ))))
+        // Without the optional Intl feature, return the engine's stable date
+        // representation instead of rejecting. Browser bundles commonly call
+        // this method as a harmless feature probe during startup.
+        Self::to_date_string(this, args, context)
     }
 
     /// [`Date.prototype.toLocaleString()`][spec].
@@ -1638,13 +1639,11 @@ impl Date {
     /// [spec]: https://tc39.es/ecma262/#sec-date.prototype.tolocalestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleString
     pub(crate) fn to_locale_string(
-        _this: &JsValue,
-        _: &[JsValue],
-        _context: &mut Context,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        Err(JsError::from_opaque(JsValue::new(js_string!(
-            "Function Unimplemented]"
-        ))))
+        Self::to_string(this, args, context)
     }
 
     /// [`Date.prototype.toLocaleTimeString()`][spec].
@@ -1658,13 +1657,11 @@ impl Date {
     /// [spec]: https://tc39.es/ecma262/#sec-date.prototype.tolocaletimestring
     /// [mdn]: https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Date/toLocaleTimeString
     pub(crate) fn to_locale_time_string(
-        _this: &JsValue,
-        _args: &[JsValue],
-        _context: &mut Context,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context,
     ) -> JsResult<JsValue> {
-        Err(JsError::from_opaque(JsValue::new(js_string!(
-            "Function Unimplemented]"
-        ))))
+        Self::to_time_string(this, args, context)
     }
 
     /// [`Date.prototype.toString()`][spec].
