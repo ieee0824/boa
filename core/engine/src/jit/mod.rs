@@ -8,6 +8,7 @@
 //! while Gate 3 is in progress.
 
 mod arithmetic;
+mod deopt;
 mod lowering;
 mod platform;
 mod runtime_call;
@@ -15,6 +16,12 @@ mod stack_map;
 
 pub use arithmetic::ArithmeticJitDiagnostics;
 pub(crate) use arithmetic::ArithmeticRuntime;
+
+pub use deopt::{
+    DeoptEnvironment, DeoptFrameLayout, DeoptMaterialization, DeoptMaterializationError,
+    DeoptMetadataError, DeoptPendingCall, DeoptReason, DeoptRecipe, DeoptResumePoint,
+    DeoptSourceValue, DeoptValueRepresentation,
+};
 
 pub use lowering::{
     BaselineBlock, BaselineBlockKind, BaselineController, BaselineDiagnostics, BaselineEntry,
@@ -54,6 +61,8 @@ pub enum JitError {
     StaleCodeHandle,
     /// An emitter produced an invalid frame descriptor or stack map.
     FrameMetadata(FrameMetadataError),
+    /// An emitter produced an invalid interpreter reconstruction recipe.
+    DeoptMetadata(DeoptMetadataError),
 }
 
 impl fmt::Display for JitError {
@@ -66,6 +75,7 @@ impl fmt::Display for JitError {
             Self::Os(error) => write!(formatter, "JIT code memory operation failed: {error}"),
             Self::StaleCodeHandle => formatter.write_str("JIT code handle is stale or invalidated"),
             Self::FrameMetadata(error) => error.fmt(formatter),
+            Self::DeoptMetadata(error) => error.fmt(formatter),
         }
     }
 }
@@ -75,6 +85,7 @@ impl std::error::Error for JitError {
         match self {
             Self::Os(error) => Some(error),
             Self::FrameMetadata(error) => Some(error),
+            Self::DeoptMetadata(error) => Some(error),
             _ => None,
         }
     }
@@ -89,6 +100,12 @@ impl From<io::Error> for JitError {
 impl From<FrameMetadataError> for JitError {
     fn from(error: FrameMetadataError) -> Self {
         Self::FrameMetadata(error)
+    }
+}
+
+impl From<DeoptMetadataError> for JitError {
+    fn from(error: DeoptMetadataError) -> Self {
+        Self::DeoptMetadata(error)
     }
 }
 

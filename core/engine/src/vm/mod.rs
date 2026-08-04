@@ -82,6 +82,13 @@ pub(crate) enum FallbackProbe {
     RoundTripOnPush,
 }
 
+#[cfg(feature = "baseline-jit")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BaselineJitPolicy {
+    Enabled,
+    Disabled,
+}
+
 /// Virtual Machine.
 #[derive(Debug)]
 pub struct Vm {
@@ -125,6 +132,10 @@ pub struct Vm {
 
     #[cfg(feature = "baseline-jit")]
     pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
+
+    /// Persistent embedder policy, independent of temporary dispatch suppression.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) baseline_jit_policy: BaselineJitPolicy,
 
     /// Non-zero while the current dispatch path must not enter arithmetic generated code.
     ///
@@ -578,6 +589,8 @@ impl Vm {
             runtime_limits: RuntimeLimits::default(),
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
+            #[cfg(feature = "baseline-jit")]
+            baseline_jit_policy: BaselineJitPolicy::Enabled,
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit_suppression_depth: 0,
             native_active_function: None,

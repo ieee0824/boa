@@ -22,8 +22,10 @@ use crate::{
 };
 
 use super::{
-    BytecodeCodeMap, ExecutableMemory, FrameCaller, JitError, JitFrameDescriptor,
-    JitFrameDescriptorId, JitFrameHeader, Safepoint, SafepointKind, StackMap, WritableMemory,
+    BytecodeCodeMap, DeoptEnvironment, DeoptFrameLayout, DeoptMaterialization, DeoptPendingCall,
+    DeoptReason, DeoptRecipe, DeoptResumePoint, DeoptSourceValue, DeoptValueRepresentation,
+    ExecutableMemory, FrameCaller, JitError, JitFrameDescriptor, JitFrameDescriptorId,
+    JitFrameHeader, Safepoint, SafepointKind, StackMap, ValueLocation, WritableMemory,
 };
 
 static NEXT_FRAME_DESCRIPTOR_ID: AtomicU64 = AtomicU64::new(1);
@@ -64,6 +66,7 @@ pub(crate) struct ArithmeticCode {
     properties: Box<[PropertyBinding]>,
     pub(crate) code_map: BytecodeCodeMap,
     frame_descriptor: JitFrameDescriptor,
+    deopt_recipes: BTreeMap<u32, DeoptRecipe>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +82,7 @@ struct PropertyBinding {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ArithmeticExit {
     Completed(u32),
-    Bailout(u32),
+    Bailout { pc: u32, reason: DeoptReason },
 }
 
 impl ArithmeticCode {
@@ -150,15 +153,15 @@ impl ArithmeticCode {
             }
             assembler.bind(Label::Bytecode(region.exit));
             emit_exit(&mut assembler, region.exit, 0);
-            for pc in bailouts {
-                assembler.bind(Label::Bailout(pc));
+            for &(pc, reason) in &bailouts {
+                assembler.bind(Label::Bailout(pc, reason));
                 safepoints.push(Safepoint {
                     machine_offset: assembler.position(),
                     bytecode_offset: pc,
                     kind: SafepointKind::Bailout,
                     stack_map: StackMap::new([]),
                 });
-                emit_exit(&mut assembler, pc, 1);
+                emit_exit(&mut assembler, pc, reason.status());
             }
             assembler.resolve()?;
             safepoints.sort_unstable_by_key(|point| point.machine_offset);
@@ -169,6 +172,48 @@ impl ArithmeticCode {
                 snapshot.register_count,
                 safepoints,
             )?;
+            let valid_program_counters = snapshot
+                .instructions
+                .iter()
+                .map(|instruction| instruction.offset)
+                .collect::<Vec<_>>();
+            let deopt_layout = DeoptFrameLayout::new(
+                &valid_program_counters,
+                snapshot.register_count,
+                snapshot.register_count,
+                0,
+                u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
+                0,
+            );
+            let materializations = (0..snapshot.register_count)
+                .map(|register| DeoptMaterialization {
+                    destination: register,
+                    source: ValueLocation::FrameRegister(register),
+                    representation: DeoptValueRepresentation::NativeTagged,
+                })
+                .collect::<Vec<_>>();
+            let recipe_pcs = bailouts
+                .iter()
+                .map(|&(pc, _)| pc)
+                .chain(std::iter::once(
+                    snapshot.instructions[region.increment].next_offset,
+                ))
+                .collect::<BTreeSet<_>>();
+            let deopt_recipes = recipe_pcs
+                .into_iter()
+                .map(|pc| {
+                    DeoptRecipe::new(
+                        pc,
+                        deopt_layout,
+                        DeoptResumePoint::BeforeOperation,
+                        materializations.iter().copied(),
+                        DeoptEnvironment::Preserve,
+                        DeoptPendingCall::Preserve,
+                    )
+                    .map(|recipe| (pc, recipe))
+                    .map_err(JitError::from)
+                })
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
             let mut writable = WritableMemory::allocate(assembler.code.len())?;
             writable.write(0, &assembler.code)?;
             let memory = writable.publish()?;
@@ -180,6 +225,7 @@ impl ArithmeticCode {
                 properties: properties.into_boxed_slice(),
                 code_map,
                 frame_descriptor,
+                deopt_recipes,
             }))
         }
     }
@@ -263,7 +309,11 @@ impl ArithmeticCode {
         Some(if frame.status == 0 {
             ArithmeticExit::Completed(frame.pc)
         } else {
-            ArithmeticExit::Bailout(frame.pc)
+            ArithmeticExit::Bailout {
+                pc: frame.pc,
+                reason: DeoptReason::from_status(frame.status)
+                    .expect("generated exit status is emitted from a deopt reason"),
+            }
         })
     }
 }
@@ -301,6 +351,81 @@ pub struct ArithmeticJitDiagnostics {
     pub property_guard_misses: u64,
     /// Property-enabled native entries that resumed at an exact bytecode PC.
     pub property_bailouts: u64,
+    /// Deopts caused by stale property shape or inline-cache guards.
+    pub shape_deopts: u64,
+    /// Deopts caused by entry values outside the baseline representation contract,
+    /// including negative zero supplied by the interpreter.
+    pub type_deopts: u64,
+    /// Deopts caused when generated arithmetic overflows, creates negative zero,
+    /// or reaches another unsupported Number result.
+    pub arithmetic_deopts: u64,
+    /// Deopts caused by cooperative interruption at a loop safepoint.
+    pub interrupt_deopts: u64,
+    /// Deopts that entered interpreter exception handling.
+    pub exception_deopts: u64,
+    /// Explicitly requested interpreter reconstructions.
+    pub explicit_deopts: u64,
+}
+
+impl ArithmeticJitDiagnostics {
+    fn record_deopt(&mut self, reason: DeoptReason) {
+        self.bailouts = self.bailouts.saturating_add(1);
+        let counter = match reason {
+            DeoptReason::ShapeGuard => &mut self.shape_deopts,
+            DeoptReason::TypeGuard => &mut self.type_deopts,
+            DeoptReason::ArithmeticGuard => &mut self.arithmetic_deopts,
+            DeoptReason::Interrupt => &mut self.interrupt_deopts,
+            DeoptReason::Exception => &mut self.exception_deopts,
+            DeoptReason::Explicit => &mut self.explicit_deopts,
+        };
+        *counter = counter.saturating_add(1);
+    }
+}
+
+fn reconstruct_deopt(
+    code: &ArithmeticCode,
+    vm: &mut Vm,
+    diagnostics: &mut ArithmeticJitDiagnostics,
+    values: &[Option<i64>],
+    write_kinds: &[u8],
+    pc: u32,
+    reason: DeoptReason,
+) {
+    let recipe = code
+        .deopt_recipes
+        .get(&pc)
+        .expect("generated and entry exits have verified deopt recipes");
+    debug_assert_eq!(recipe.bytecode_offset(), pc);
+    debug_assert_eq!(recipe.resume_point(), DeoptResumePoint::BeforeOperation);
+    debug_assert_eq!(recipe.environment(), DeoptEnvironment::Preserve);
+    debug_assert_eq!(recipe.pending_call(), DeoptPendingCall::Preserve);
+
+    let register_count = vm.frame.code_block.register_count as usize;
+    let mut reconstructed = (0..register_count)
+        .map(|register| vm.get_register(register).clone())
+        .collect::<Vec<_>>();
+    recipe
+        .materialize(&mut reconstructed, |location| {
+            let ValueLocation::FrameRegister(source) = location else {
+                unreachable!("the arithmetic tier only emits frame-register recipes");
+            };
+            let source = source as usize;
+            match write_kinds[source] {
+                0 => Some(DeoptSourceValue::Preserve),
+                1 | 2 => Some(DeoptSourceValue::NativeTagged {
+                    value: values[source].expect("a dirty generated register has a value"),
+                    is_boolean: write_kinds[source] == 2,
+                }),
+                _ => unreachable!("emitter only writes validated arithmetic value kinds"),
+            }
+        })
+        .expect("installed arithmetic deopt recipes match the generated frame");
+    for (register, value) in reconstructed.into_iter().enumerate() {
+        vm.set_register(register, value);
+    }
+    vm.frame.pc = recipe.bytecode_offset();
+    vm.frame.code_block.jit_metadata.record_reusable_fallback();
+    diagnostics.record_deopt(reason);
 }
 
 #[derive(Debug)]
@@ -428,6 +553,7 @@ impl ArithmeticRuntime {
             .unwrap_or(register_count)
             .max(register_count);
         values.resize(scratch_count, None);
+        let mut write_kinds = vec![0; values.len()];
         let mut property_guard_miss = false;
         for (binding_index, binding) in code.properties.iter().enumerate() {
             let Some(ic) = vm.frame.code_block.ic.get(binding.ic_index as usize) else {
@@ -472,20 +598,41 @@ impl ArithmeticRuntime {
                 break;
             };
             let Some(number) = slot_value.as_number() else {
-                vm.frame.code_block.jit_metadata.record_reusable_fallback();
-                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                reconstruct_deopt(
+                    code,
+                    vm,
+                    &mut self.diagnostics,
+                    &values,
+                    &write_kinds,
+                    pc,
+                    DeoptReason::TypeGuard,
+                );
                 return false;
             };
             if number == 0.0 && number.is_sign_negative() {
-                vm.frame.code_block.jit_metadata.record_reusable_fallback();
-                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                reconstruct_deopt(
+                    code,
+                    vm,
+                    &mut self.diagnostics,
+                    &values,
+                    &write_kinds,
+                    pc,
+                    DeoptReason::TypeGuard,
+                );
                 return false;
             }
             let Some(value) = (number.fract() == 0.0 && number.abs() <= 9_007_199_254_740_991.0)
                 .then_some(number as i64)
             else {
-                vm.frame.code_block.jit_metadata.record_reusable_fallback();
-                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+                reconstruct_deopt(
+                    code,
+                    vm,
+                    &mut self.diagnostics,
+                    &values,
+                    &write_kinds,
+                    pc,
+                    DeoptReason::TypeGuard,
+                );
                 return false;
             };
             let scratch = binding.scratch_register as usize;
@@ -502,8 +649,15 @@ impl ArithmeticRuntime {
         if property_guard_miss {
             self.diagnostics.property_guard_misses =
                 self.diagnostics.property_guard_misses.saturating_add(1);
-            vm.frame.code_block.jit_metadata.record_reusable_fallback();
-            self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+            reconstruct_deopt(
+                code,
+                vm,
+                &mut self.diagnostics,
+                &values,
+                &write_kinds,
+                pc,
+                DeoptReason::ShapeGuard,
+            );
             *entry = RuntimeEntry::Warming(0);
             return false;
         }
@@ -511,7 +665,6 @@ impl ArithmeticRuntime {
             self.diagnostics.property_guard_hits =
                 self.diagnostics.property_guard_hits.saturating_add(1);
         }
-        let mut write_kinds = vec![0; values.len()];
         let interpreter_frame_depth = vm.frames.len();
         let Some(exit) = code.execute_after_increment_typed(
             &mut values,
@@ -520,25 +673,19 @@ impl ArithmeticRuntime {
             vm.runtime_limits.loop_iteration_limit(),
             interpreter_frame_depth,
         ) else {
-            vm.frame.code_block.jit_metadata.record_reusable_fallback();
-            self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+            reconstruct_deopt(
+                code,
+                vm,
+                &mut self.diagnostics,
+                &values,
+                &write_kinds,
+                pc,
+                DeoptReason::TypeGuard,
+            );
             return false;
         };
         vm.frame.code_block.jit_metadata.record_compiled_entry();
         self.diagnostics.compiled_entries = self.diagnostics.compiled_entries.saturating_add(1);
-        for (index, (&value, &write_kind)) in values
-            .iter()
-            .zip(&write_kinds)
-            .take(register_count)
-            .enumerate()
-        {
-            match (value, write_kind) {
-                (Some(value), 1) => vm.set_register(index, JsValue::from(value as f64)),
-                (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
-                (_, 0) => {}
-                _ => unreachable!("emitter only writes validated arithmetic value kinds"),
-            }
-        }
         for (binding_index, binding) in code.properties.iter().enumerate() {
             if !binding.writable || write_kinds[binding.scratch_register as usize] == 0 {
                 continue;
@@ -553,13 +700,32 @@ impl ArithmeticRuntime {
         }
         match exit {
             ArithmeticExit::Completed(pc) => {
+                for (index, (&value, &write_kind)) in values
+                    .iter()
+                    .zip(&write_kinds)
+                    .take(register_count)
+                    .enumerate()
+                {
+                    match (value, write_kind) {
+                        (Some(value), 1) => vm.set_register(index, JsValue::from(value as f64)),
+                        (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
+                        (_, 0) => {}
+                        _ => unreachable!("emitter only writes validated arithmetic value kinds"),
+                    }
+                }
                 vm.frame.pc = pc;
                 true
             }
-            ArithmeticExit::Bailout(pc) => {
-                vm.frame.pc = pc;
-                vm.frame.code_block.jit_metadata.record_reusable_fallback();
-                self.diagnostics.bailouts = self.diagnostics.bailouts.saturating_add(1);
+            ArithmeticExit::Bailout { pc, reason } => {
+                reconstruct_deopt(
+                    code,
+                    vm,
+                    &mut self.diagnostics,
+                    &values,
+                    &write_kinds,
+                    pc,
+                    reason,
+                );
                 if !code.properties.is_empty() {
                     self.diagnostics.property_bailouts =
                         self.diagnostics.property_bailouts.saturating_add(1);
@@ -861,7 +1027,7 @@ fn register_operand(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Label {
     Bytecode(u32),
-    Bailout(u32),
+    Bailout(u32, DeoptReason),
     Internal(u32, u8),
 }
 #[derive(Default)]
@@ -934,19 +1100,25 @@ fn immediate(a: &mut Assembler, value: i64) {
     a.bytes(&[0x48, 0xb8]);
     a.bytes(&value.to_le_bytes());
 }
-fn bailout(a: &mut Assembler, opcode: &[u8], pc: u32, set: &mut BTreeSet<u32>) {
-    set.insert(pc);
-    a.jump(opcode, Label::Bailout(pc));
+fn bailout(
+    a: &mut Assembler,
+    opcode: &[u8],
+    pc: u32,
+    reason: DeoptReason,
+    set: &mut BTreeSet<(u32, DeoptReason)>,
+) {
+    set.insert((pc, reason));
+    a.jump(opcode, Label::Bailout(pc, reason));
 }
 
-fn guard_safe_integer(a: &mut Assembler, pc: u32, bailouts: &mut BTreeSet<u32>) {
+fn guard_safe_integer(a: &mut Assembler, pc: u32, bailouts: &mut BTreeSet<(u32, DeoptReason)>) {
     a.bytes(&[0x49, 0x89, 0xc0]); // mov r8, rax
     immediate(a, 9_007_199_254_740_991);
     a.bytes(&[0x49, 0x39, 0xc0]); // cmp r8, rax
-    bailout(a, &[0x0f, 0x8f], pc, bailouts);
+    bailout(a, &[0x0f, 0x8f], pc, DeoptReason::ArithmeticGuard, bailouts);
     immediate(a, -9_007_199_254_740_991);
     a.bytes(&[0x49, 0x39, 0xc0]); // cmp r8, rax
-    bailout(a, &[0x0f, 0x8c], pc, bailouts);
+    bailout(a, &[0x0f, 0x8c], pc, DeoptReason::ArithmeticGuard, bailouts);
     a.bytes(&[0x4c, 0x89, 0xc0]); // mov rax, r8
 }
 
@@ -955,7 +1127,7 @@ fn emit_instruction(
     i: &crate::vm::BytecodeInstruction,
     properties: &[PropertyBinding],
     object_move_offsets: &BTreeSet<u32>,
-    bailouts: &mut BTreeSet<u32>,
+    bailouts: &mut BTreeSet<(u32, DeoptReason)>,
 ) -> Result<(), JitError> {
     let dst = || {
         unsigned(i, "dst")
@@ -970,7 +1142,7 @@ fn emit_instruction(
     match i.name {
         "IncrementLoopIteration" => {
             a.bytes(&[0x48, 0x8b, 0x47, 0x10, 0x48, 0x3b, 0x47, 0x18]);
-            bailout(a, &[0x0f, 0x87], i.offset, bailouts);
+            bailout(a, &[0x0f, 0x87], i.offset, DeoptReason::Interrupt, bailouts);
             a.bytes(&[0x48, 0x83, 0x47, 0x10, 0x01]);
         }
         "Move" => {
@@ -996,7 +1168,13 @@ fn emit_instruction(
         "Inc" => {
             load(a, src("src")?, false);
             a.bytes(&[0x48, 0x83, 0xc0, 0x01]);
-            bailout(a, &[0x0f, 0x80], i.offset, bailouts);
+            bailout(
+                a,
+                &[0x0f, 0x80],
+                i.offset,
+                DeoptReason::ArithmeticGuard,
+                bailouts,
+            );
             guard_safe_integer(a, i.offset, bailouts);
             store_rax(a, dst()?, 1);
         }
@@ -1023,14 +1201,26 @@ fn emit_instruction(
                 let lhs_nonzero = Label::Internal(i.offset, 2);
                 a.jump(&[0x0f, 0x85], lhs_nonzero);
                 a.bytes(&[0x48, 0x85, 0xc9]);
-                bailout(a, &[0x0f, 0x88], i.offset, bailouts);
+                bailout(
+                    a,
+                    &[0x0f, 0x88],
+                    i.offset,
+                    DeoptReason::ArithmeticGuard,
+                    bailouts,
+                );
                 let safe = Label::Internal(i.offset, 3);
                 a.jump(&[0xe9], safe);
                 a.bind(lhs_nonzero);
                 a.bytes(&[0x48, 0x85, 0xc9]);
                 a.jump(&[0x0f, 0x85], safe);
                 a.bytes(&[0x48, 0x85, 0xc0]);
-                bailout(a, &[0x0f, 0x88], i.offset, bailouts);
+                bailout(
+                    a,
+                    &[0x0f, 0x88],
+                    i.offset,
+                    DeoptReason::ArithmeticGuard,
+                    bailouts,
+                );
                 a.bind(safe);
             }
             a.bytes(match i.name {
@@ -1038,7 +1228,13 @@ fn emit_instruction(
                 "Sub" => &[0x48, 0x29, 0xc8][..],
                 _ => &[0x48, 0x0f, 0xaf, 0xc1][..],
             });
-            bailout(a, &[0x0f, 0x80], i.offset, bailouts);
+            bailout(
+                a,
+                &[0x0f, 0x80],
+                i.offset,
+                DeoptReason::ArithmeticGuard,
+                bailouts,
+            );
             guard_safe_integer(a, i.offset, bailouts);
             store_rax(a, output, 1);
         }
@@ -1046,7 +1242,13 @@ fn emit_instruction(
             load(a, src("lhs")?, false);
             load(a, src("rhs")?, true);
             a.bytes(&[0x48, 0x85, 0xc9]);
-            bailout(a, &[0x0f, 0x84], i.offset, bailouts);
+            bailout(
+                a,
+                &[0x0f, 0x84],
+                i.offset,
+                DeoptReason::ArithmeticGuard,
+                bailouts,
+            );
             // Inputs are bounded to safe integers, so signed division cannot
             // encounter the i64::MIN / -1 hardware trap.
             a.bytes(&[0x49, 0x89, 0xc0, 0x48, 0x99, 0x48, 0xf7, 0xf9]);
@@ -1055,7 +1257,13 @@ fn emit_instruction(
             let nonzero = Label::Internal(i.offset, 1);
             a.jump(&[0x0f, 0x85], nonzero);
             a.bytes(&[0x4d, 0x85, 0xc0]);
-            bailout(a, &[0x0f, 0x88], i.offset, bailouts);
+            bailout(
+                a,
+                &[0x0f, 0x88],
+                i.offset,
+                DeoptReason::ArithmeticGuard,
+                bailouts,
+            );
             a.bind(nonzero);
             a.bytes(&[0x48, 0x89, 0xd0]);
             store_rax(a, dst()?, 1);
@@ -1274,13 +1482,22 @@ mod tests {
         let exit = code
             .execute_after_increment(&mut values, &mut iterations, u64::MAX)
             .unwrap();
-        assert!(matches!(exit, ArithmeticExit::Bailout(_)));
+        assert!(matches!(
+            exit,
+            ArithmeticExit::Bailout {
+                reason: DeoptReason::ArithmeticGuard,
+                ..
+            }
+        ));
 
         let mut values = vec![Some(-1_000_006), Some(2), Some(0), None, None, None];
         let mut iterations = 1;
         assert!(matches!(
             code.execute_after_increment(&mut values, &mut iterations, u64::MAX),
-            Some(ArithmeticExit::Bailout(_))
+            Some(ArithmeticExit::Bailout {
+                reason: DeoptReason::ArithmeticGuard,
+                ..
+            })
         ));
     }
 
@@ -1303,6 +1520,7 @@ mod tests {
         assert_eq!(diagnostics.successful_compilations, 1);
         assert!(diagnostics.compiled_entries >= 1);
         assert!(diagnostics.bailouts >= 1);
+        assert!(diagnostics.arithmetic_deopts >= 1);
     }
 
     #[test]
@@ -1414,6 +1632,7 @@ mod tests {
         let diagnostics = context.arithmetic_jit_diagnostics();
         assert!(diagnostics.property_guard_hits >= 1);
         assert!(diagnostics.property_guard_misses >= 1);
+        assert!(diagnostics.shape_deopts >= 1);
         assert!(diagnostics.compile_rejections >= 1);
     }
 
@@ -1503,7 +1722,7 @@ mod tests {
     fn property_loop_matches_jit_suppressed_execution() {
         const SOURCE: &str = "(function(n){let o={x:3},s=1;for(let i=0;i<n;i++){s=(s+o.x*3)%1000003;o.x=o.x+1}return s+o.x})(2000)";
         let mut interpreted = Context::default();
-        interpreted.vm.arithmetic_jit_suppression_depth = 1;
+        interpreted.set_baseline_jit_enabled(false);
         let expected = Script::parse(Source::from_bytes(SOURCE), None, &mut interpreted)
             .unwrap()
             .evaluate(&mut interpreted)
@@ -1535,6 +1754,7 @@ mod tests {
         assert_eq!(result.as_number(), Some(100.0));
         let diagnostics = context.arithmetic_jit_diagnostics();
         assert!(diagnostics.property_bailouts >= 1);
+        assert!(diagnostics.arithmetic_deopts >= 1);
     }
 
     #[test]
@@ -1575,6 +1795,7 @@ mod tests {
         .unwrap();
         let expected = (0..40_i64).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003);
         assert_eq!(result.as_number(), Some(expected as f64));
+        assert!(context.arithmetic_jit_diagnostics().type_deopts >= 1);
     }
 
     #[test]
@@ -1608,6 +1829,7 @@ mod tests {
         .unwrap()
         .evaluate(&mut context);
         assert!(result.is_err());
+        assert!(context.arithmetic_jit_diagnostics().interrupt_deopts >= 1);
     }
 
     #[test]

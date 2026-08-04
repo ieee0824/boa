@@ -191,6 +191,20 @@ impl Context {
         self.vm.arithmetic_jit.diagnostics()
     }
 
+    /// Enables or suppresses baseline JIT entry for subsequent bytecode dispatch.
+    ///
+    /// Disabling entry keeps already compiled code cached, allowing embedders and
+    /// differential tests to compare interpreter and generated execution in the
+    /// same engine build.
+    #[cfg(feature = "baseline-jit")]
+    pub fn set_baseline_jit_enabled(&mut self, enabled: bool) {
+        self.vm.baseline_jit_policy = if enabled {
+            crate::vm::BaselineJitPolicy::Enabled
+        } else {
+            crate::vm::BaselineJitPolicy::Disabled
+        };
+    }
+
     pub(crate) fn set_pending_async_resume(
         &mut self,
         pending: builtins::generator::PendingAsyncResume,
