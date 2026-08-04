@@ -198,7 +198,11 @@ impl Context {
     /// same engine build.
     #[cfg(feature = "baseline-jit")]
     pub fn set_baseline_jit_enabled(&mut self, enabled: bool) {
-        self.vm.baseline_jit_enabled = enabled;
+        self.vm.baseline_jit_policy = if enabled {
+            crate::vm::BaselineJitPolicy::Enabled
+        } else {
+            crate::vm::BaselineJitPolicy::Disabled
+        };
     }
 
     pub(crate) fn set_pending_async_resume(
