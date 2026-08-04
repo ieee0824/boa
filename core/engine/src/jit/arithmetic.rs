@@ -1722,7 +1722,7 @@ mod tests {
     fn property_loop_matches_jit_suppressed_execution() {
         const SOURCE: &str = "(function(n){let o={x:3},s=1;for(let i=0;i<n;i++){s=(s+o.x*3)%1000003;o.x=o.x+1}return s+o.x})(2000)";
         let mut interpreted = Context::default();
-        interpreted.vm.arithmetic_jit_suppression_depth = 1;
+        interpreted.set_baseline_jit_enabled(false);
         let expected = Script::parse(Source::from_bytes(SOURCE), None, &mut interpreted)
             .unwrap()
             .evaluate(&mut interpreted)

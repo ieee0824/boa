@@ -126,6 +126,10 @@ pub struct Vm {
     #[cfg(feature = "baseline-jit")]
     pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
 
+    /// Persistent embedder policy, independent of temporary dispatch suppression.
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) baseline_jit_enabled: bool,
+
     /// Non-zero while the current dispatch path must not enter arithmetic generated code.
     ///
     /// Budgeted async dispatch disables this around each instruction so a native
@@ -578,6 +582,8 @@ impl Vm {
             runtime_limits: RuntimeLimits::default(),
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
+            #[cfg(feature = "baseline-jit")]
+            baseline_jit_enabled: true,
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit_suppression_depth: 0,
             native_active_function: None,

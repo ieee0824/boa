@@ -198,7 +198,7 @@ impl Context {
     /// same engine build.
     #[cfg(feature = "baseline-jit")]
     pub fn set_baseline_jit_enabled(&mut self, enabled: bool) {
-        self.vm.arithmetic_jit_suppression_depth = u8::from(!enabled);
+        self.vm.baseline_jit_enabled = enabled;
     }
 
     pub(crate) fn set_pending_async_resume(
