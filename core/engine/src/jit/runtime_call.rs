@@ -512,7 +512,7 @@ impl JitRuntimeCall {
         {
             let plan = JitExceptionUnwindPlan::build(&state.active_frames, &state.pc_table)
                 .expect("active generated exception frames resolve at exact safepoints");
-            debug_assert!(matches!(
+            assert!(matches!(
                 plan.target(),
                 JitExceptionUnwindTarget::Interpreter { .. }
             ));
