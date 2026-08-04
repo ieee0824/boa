@@ -191,6 +191,16 @@ impl Context {
         self.vm.arithmetic_jit.diagnostics()
     }
 
+    /// Enables or suppresses baseline JIT entry for subsequent bytecode dispatch.
+    ///
+    /// Disabling entry keeps already compiled code cached, allowing embedders and
+    /// differential tests to compare interpreter and generated execution in the
+    /// same engine build.
+    #[cfg(feature = "baseline-jit")]
+    pub fn set_baseline_jit_enabled(&mut self, enabled: bool) {
+        self.vm.arithmetic_jit_suppression_depth = u8::from(!enabled);
+    }
+
     pub(crate) fn set_pending_async_resume(
         &mut self,
         pending: builtins::generator::PendingAsyncResume,
