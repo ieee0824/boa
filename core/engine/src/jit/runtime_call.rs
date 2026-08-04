@@ -167,19 +167,14 @@ impl Finalize for RuntimeStateCell {}
 unsafe impl Trace for RuntimeStateCell {
     unsafe fn trace(&self, tracer: &mut Tracer) {
         let state = unsafe { &*self.0.get() };
-        let safepoints = state
-            .active_frames
-            .resolve_safepoints(&state.pc_table)
-            .expect("active JIT frames must resolve while the collector scans roots");
-        assert_eq!(safepoints.len(), state.active_roots.len());
-        for ((frame, roots), lookup) in state
-            .active_frames
-            .frames()
-            .iter()
-            .zip(&state.active_roots)
-            .zip(safepoints)
-        {
+        assert_eq!(state.active_frames.frames().len(), state.active_roots.len());
+        for (frame, roots) in state.active_frames.frames().iter().zip(&state.active_roots) {
             assert_eq!(frame.header.frame_id, roots.frame_id);
+            let lookup = state
+                .pc_table
+                .lookup(frame.safepoint_pc)
+                .filter(|lookup| lookup.descriptor.id() == frame.header.descriptor_id)
+                .expect("active JIT frames must resolve while the collector scans roots");
             for location in lookup.safepoint.stack_map.live_values() {
                 let ValueLocation::FrameRegister(register) = *location else {
                     panic!("runtime-call stack maps may only name spilled frame registers");
