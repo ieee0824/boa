@@ -851,6 +851,44 @@ fn date_proto_to_string() {
 }
 
 #[test]
+fn date_proto_to_locale_date_string() {
+    run_test_actions([TestAction::assert_eq(
+        "new Date(2020, 6, 8, 9, 16, 15, 779).toLocaleDateString()",
+        js_str!("Wed Jul 08 2020"),
+    )]);
+}
+
+#[test]
+fn date_proto_to_locale_string() {
+    let to_string_format = format_description!(
+        "[weekday repr:short] [month repr:short] [day] [year] [hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]"
+    );
+    let t = from_local(2020, 7, 8, 9, 16, 15, 779)
+        .format(to_string_format)
+        .unwrap();
+
+    run_test_actions([TestAction::assert_eq(
+        "new Date(2020, 6, 8, 9, 16, 15, 779).toLocaleString()",
+        js_string!(t),
+    )]);
+}
+
+#[test]
+fn date_proto_to_locale_time_string() {
+    let to_time_string_format = format_description!(
+        "[hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]"
+    );
+    let t = from_local(2020, 7, 8, 9, 16, 15, 779)
+        .format(to_time_string_format)
+        .unwrap();
+
+    run_test_actions([TestAction::assert_eq(
+        "new Date(2020, 6, 8, 9, 16, 15, 779).toLocaleTimeString()",
+        js_string!(t),
+    )]);
+}
+
+#[test]
 fn date_proto_to_time_string() {
     let to_time_string_format = format_description!(
         "[hour]:[minute]:[second] GMT[offset_hour sign:mandatory][offset_minute][end]"

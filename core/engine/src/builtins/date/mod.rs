@@ -1626,7 +1626,7 @@ impl Date {
         // Without the optional Intl feature, return the engine's stable date
         // representation instead of rejecting. Browser bundles commonly call
         // this method as a harmless feature probe during startup.
-        Self::to_string(this, args, context)
+        Self::to_date_string(this, args, context)
     }
 
     /// [`Date.prototype.toLocaleString()`][spec].
@@ -1661,7 +1661,7 @@ impl Date {
         args: &[JsValue],
         context: &mut Context,
     ) -> JsResult<JsValue> {
-        Self::to_string(this, args, context)
+        Self::to_time_string(this, args, context)
     }
 
     /// [`Date.prototype.toString()`][spec].
