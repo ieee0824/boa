@@ -181,6 +181,7 @@ impl ArithmeticCode {
                 &valid_program_counters,
                 snapshot.register_count,
                 snapshot.register_count,
+                0,
                 u32::try_from(size_of::<NativeFrame>()).map_err(|_| JitError::InvalidCodeSize)?,
                 0,
             );

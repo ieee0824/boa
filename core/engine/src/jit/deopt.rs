@@ -200,6 +200,7 @@ pub struct DeoptFrameLayout<'a> {
     valid_program_counters: &'a [u32],
     interpreter_register_count: u32,
     frame_register_count: u32,
+    machine_register_count: u8,
     frame_size: u32,
     frame_environment_base: u32,
 }
@@ -211,18 +212,15 @@ impl<'a> DeoptFrameLayout<'a> {
         valid_program_counters: &'a [u32],
         interpreter_register_count: u32,
         frame_register_count: u32,
+        machine_register_count: u8,
         frame_size: u32,
         frame_environment_base: u32,
     ) -> Self {
-        debug_assert!(
-            valid_program_counters
-                .windows(2)
-                .all(|pair| pair[0] < pair[1])
-        );
         Self {
             valid_program_counters,
             interpreter_register_count,
             frame_register_count,
+            machine_register_count,
             frame_size,
             frame_environment_base,
         }
@@ -249,11 +247,7 @@ impl DeoptRecipe {
         environment: DeoptEnvironment,
         pending_call: DeoptPendingCall,
     ) -> Result<Self, DeoptMetadataError> {
-        if layout
-            .valid_program_counters
-            .binary_search(&bytecode_offset)
-            .is_err()
-        {
+        if !layout.valid_program_counters.contains(&bytecode_offset) {
             return Err(DeoptMetadataError::InvalidProgramCounter {
                 pc: bytecode_offset,
             });
@@ -288,7 +282,9 @@ impl DeoptRecipe {
                 ValueLocation::StackSlot(offset) if offset.unsigned_abs() >= layout.frame_size => {
                     return Err(DeoptMetadataError::StackSlotOutOfBounds { offset });
                 }
-                ValueLocation::MachineRegister(register) if register >= 32 => {
+                ValueLocation::MachineRegister(register)
+                    if register >= layout.machine_register_count =>
+                {
                     return Err(DeoptMetadataError::MachineRegisterOutOfBounds { register });
                 }
                 _ => {}
@@ -398,7 +394,7 @@ mod tests {
     fn recipe_preserves_exact_resume_and_reconstruction_contract() {
         let recipe = DeoptRecipe::new(
             12,
-            DeoptFrameLayout::new(&[0, 4, 12, 20], 4, 3, 64, 2),
+            DeoptFrameLayout::new(&[0, 4, 12, 20], 4, 3, 4, 64, 2),
             DeoptResumePoint::AfterOperation,
             [
                 materialization(0, ValueLocation::MachineRegister(1)),
@@ -420,7 +416,7 @@ mod tests {
     fn malformed_recipe_is_rejected_before_installation() {
         let duplicate = DeoptRecipe::new(
             4,
-            DeoptFrameLayout::new(&[4], 2, 1, 16, 1),
+            DeoptFrameLayout::new(&[4], 2, 1, 0, 16, 1),
             DeoptResumePoint::BeforeOperation,
             [
                 materialization(0, ValueLocation::FrameRegister(0)),
@@ -436,7 +432,7 @@ mod tests {
 
         let invalid_source = DeoptRecipe::new(
             4,
-            DeoptFrameLayout::new(&[4], 2, 1, 16, 1),
+            DeoptFrameLayout::new(&[4], 2, 1, 0, 16, 1),
             DeoptResumePoint::BeforeOperation,
             [materialization(1, ValueLocation::FrameRegister(1))],
             DeoptEnvironment::Preserve,
@@ -449,7 +445,7 @@ mod tests {
 
         let invalid_environment = DeoptRecipe::new(
             4,
-            DeoptFrameLayout::new(&[4], 2, 1, 16, 2),
+            DeoptFrameLayout::new(&[4], 2, 1, 0, 16, 2),
             DeoptResumePoint::BeforeOperation,
             [],
             DeoptEnvironment::TruncateTo(1),
@@ -465,7 +461,7 @@ mod tests {
     fn machine_register_and_stack_values_materialize_into_interpreter_registers() {
         let recipe = DeoptRecipe::new(
             8,
-            DeoptFrameLayout::new(&[8], 3, 1, 64, 0),
+            DeoptFrameLayout::new(&[8], 3, 1, 3, 64, 0),
             DeoptResumePoint::BeforeOperation,
             [
                 DeoptMaterialization {
