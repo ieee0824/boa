@@ -7,12 +7,15 @@ use std::{
     fmt,
     marker::PhantomData,
     mem::{offset_of, size_of},
+    ptr::NonNull,
     rc::Rc,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
 };
+
+use boa_gc::{Finalize, RootProvider, Trace, Tracer};
 
 use crate::{
     Context, JsResult, JsValue, NativeFunction,
@@ -125,14 +128,72 @@ enum RuntimeRequest {
     Allocate(JitAllocationKind),
     Throw,
     NestedAllocate(JitAllocationKind),
+    CollectMinor,
+    CollectMajor,
 }
 
+#[derive(Debug)]
 struct RuntimeState {
     active_frames: JitFrameChain,
+    active_roots: Vec<ActiveFrameRoots>,
+    pc_table: JitPcTable,
     fast_capacity: u32,
     fast_remaining: u32,
     allocation_budget: Option<u64>,
     diagnostics: JitRuntimeCallDiagnostics,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActiveFrameRoots {
+    frame_id: u64,
+    values: *const JsValue,
+    len: usize,
+}
+
+#[derive(Debug)]
+struct RuntimeStateCell(UnsafeCell<RuntimeState>);
+
+impl RuntimeStateCell {
+    fn get(&self) -> *mut RuntimeState {
+        self.0.get()
+    }
+}
+
+impl Finalize for RuntimeStateCell {}
+
+// SAFETY: the cell is boxed before it is registered as a root provider. Runtime
+// mutation is deliberately ended before any helper can allocate. Every root
+// pointer names the argument slice retained by the corresponding generated call.
+unsafe impl Trace for RuntimeStateCell {
+    unsafe fn trace(&self, tracer: &mut Tracer) {
+        let state = unsafe { &*self.0.get() };
+        let safepoints = state
+            .active_frames
+            .resolve_safepoints(&state.pc_table)
+            .expect("active JIT frames must resolve while the collector scans roots");
+        assert_eq!(safepoints.len(), state.active_roots.len());
+        for ((frame, roots), lookup) in state
+            .active_frames
+            .frames()
+            .iter()
+            .zip(&state.active_roots)
+            .zip(safepoints)
+        {
+            assert_eq!(frame.header.frame_id, roots.frame_id);
+            for location in lookup.safepoint.stack_map.live_values() {
+                let ValueLocation::FrameRegister(register) = *location else {
+                    panic!("runtime-call stack maps may only name spilled frame registers");
+                };
+                let index = register as usize;
+                assert!(index < roots.len);
+                // SAFETY: the generated frame remains active, and the stack map
+                // proves this initialized argument slot is live at this PC.
+                unsafe { (&*roots.values.add(index)).trace(tracer) };
+            }
+        }
+    }
+
+    fn run_finalizer(&self) {}
 }
 
 #[repr(C)]
@@ -219,11 +280,12 @@ impl RuntimeCallCode {
 /// construction and supports nested generated helper calls on the same runtime.
 #[derive(Debug)]
 pub struct JitRuntimeCall {
+    // Dropped first, so the collector cannot observe `state` during teardown.
+    _root_provider: RootProvider,
     frame_register_capacity: u32,
     call_code: Vec<RuntimeCallCode>,
     allocation_code: Vec<RuntimeCallCode>,
-    pc_table: JitPcTable,
-    state: UnsafeCell<RuntimeState>,
+    state: Box<RuntimeStateCell>,
     _not_send_or_sync: PhantomData<Rc<()>>,
 }
 
@@ -253,18 +315,24 @@ impl JitRuntimeCall {
                 .install(code.memory.as_ptr() as usize, Arc::clone(&code.descriptor))
                 .map_err(JitError::from)?;
         }
+        let state = Box::new(RuntimeStateCell(UnsafeCell::new(RuntimeState {
+            active_frames: JitFrameChain::default(),
+            active_roots: Vec::new(),
+            pc_table,
+            fast_capacity: fast_allocation_capacity,
+            fast_remaining: fast_allocation_capacity,
+            allocation_budget: None,
+            diagnostics: JitRuntimeCallDiagnostics::default(),
+        })));
+        // SAFETY: `state` is boxed and the registration guard is dropped before
+        // the box, so the provider address remains valid for the registration.
+        let root_provider = unsafe { RootProvider::register(NonNull::from(&*state)) };
         Ok(Self {
+            _root_provider: root_provider,
             frame_register_capacity: frame_register_count,
             call_code,
             allocation_code,
-            pc_table,
-            state: UnsafeCell::new(RuntimeState {
-                active_frames: JitFrameChain::default(),
-                fast_capacity: fast_allocation_capacity,
-                fast_remaining: fast_allocation_capacity,
-                allocation_budget: None,
-                diagnostics: JitRuntimeCallDiagnostics::default(),
-            }),
+            state,
             _not_send_or_sync: PhantomData,
         })
     }
@@ -272,7 +340,7 @@ impl JitRuntimeCall {
     /// Sets a deterministic remaining-allocation budget for failure handling.
     #[doc(hidden)]
     pub fn set_allocation_budget(&mut self, budget: Option<u64>) {
-        self.state.get_mut().allocation_budget = budget;
+        self.state.0.get_mut().allocation_budget = budget;
     }
 
     /// Returns runtime-call counters.
@@ -313,6 +381,26 @@ impl JitRuntimeCall {
         self.invoke(RuntimeRequest::NestedAllocate(kind), arguments, context)
     }
 
+    /// Forces a nursery collection while generated frame roots are live.
+    #[doc(hidden)]
+    pub fn collect_minor_for_test(
+        &self,
+        arguments: &[JsValue],
+        context: &mut Context,
+    ) -> Result<JsResult<JsValue>, RuntimeCallError> {
+        self.invoke(RuntimeRequest::CollectMinor, arguments, context)
+    }
+
+    /// Forces a whole-heap collection while generated frame roots are live.
+    #[doc(hidden)]
+    pub fn collect_major_for_test(
+        &self,
+        arguments: &[JsValue],
+        context: &mut Context,
+    ) -> Result<JsResult<JsValue>, RuntimeCallError> {
+        self.invoke(RuntimeRequest::CollectMajor, arguments, context)
+    }
+
     fn invoke(
         &self,
         request: RuntimeRequest,
@@ -328,8 +416,8 @@ impl JitRuntimeCall {
         }
         let frame_id = NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed);
         let caller = {
-            // End this mutable borrow before generated code enters the
-            // trampoline, which may recursively access the same runtime state.
+            // This mutation ends before generated code can enter an allocating
+            // helper and invoke the root provider.
             let state = unsafe { &mut *self.state.get() };
             let caller = state.active_frames.frames().last().map_or(
                 FrameCaller::Interpreter {
@@ -347,7 +435,10 @@ impl JitRuntimeCall {
         };
 
         let code = match request {
-            RuntimeRequest::Throw | RuntimeRequest::NestedAllocate(_) => &self.call_code,
+            RuntimeRequest::Throw
+            | RuntimeRequest::NestedAllocate(_)
+            | RuntimeRequest::CollectMinor
+            | RuntimeRequest::CollectMajor => &self.call_code,
             RuntimeRequest::Allocate(_) => &self.allocation_code,
         }
         .get(arguments.len())
@@ -372,15 +463,29 @@ impl JitRuntimeCall {
             spilled_values: arguments.as_ptr(),
             spilled_len: arguments.len(),
         };
-        unsafe { &mut *self.state.get() }
-            .active_frames
-            .push(ActiveJitFrame {
-                header: frame.header,
-                safepoint_pc: code.memory.as_ptr() as usize + RUNTIME_CALL_RETURN_PC as usize,
-            })
-            .expect("the runtime constructs a valid nested frame chain");
+        {
+            let state = unsafe { &mut *self.state.get() };
+            state
+                .active_frames
+                .push(ActiveJitFrame {
+                    header: frame.header,
+                    safepoint_pc: code.memory.as_ptr() as usize + RUNTIME_CALL_RETURN_PC as usize,
+                })
+                .expect("the runtime constructs a valid nested frame chain");
+            state.active_roots.push(ActiveFrameRoots {
+                frame_id,
+                values: arguments.as_ptr(),
+                len: arguments.len(),
+            });
+        }
         code.enter(&mut frame);
-        let popped = unsafe { &mut *self.state.get() }
+        let state = unsafe { &mut *self.state.get() };
+        let popped_roots = state
+            .active_roots
+            .pop()
+            .expect("every generated frame has a root record");
+        assert_eq!(popped_roots.frame_id, frame_id);
+        let popped = state
             .active_frames
             .pop(frame_id)
             .expect("generated calls return in stack order");
@@ -408,6 +513,14 @@ impl JitRuntimeCall {
             RuntimeRequest::NestedAllocate(kind) => {
                 self.invoke(RuntimeRequest::Allocate(kind), arguments, context)
             }
+            RuntimeRequest::CollectMinor => {
+                boa_gc::force_minor_collect();
+                Ok(Ok(arguments.first().cloned().unwrap_or_default()))
+            }
+            RuntimeRequest::CollectMajor => {
+                boa_gc::force_collect();
+                Ok(Ok(arguments.first().cloned().unwrap_or_default()))
+            }
         }
     }
 
@@ -418,8 +531,8 @@ impl JitRuntimeCall {
         context: &mut Context,
     ) -> Result<JsResult<JsValue>, RuntimeCallError> {
         let slow_path = {
-            // Collection below can re-enter GC root providers, so runtime state
-            // must not remain mutably borrowed across that safepoint.
+            // Finish mutating runtime bookkeeping before collection invokes the
+            // root provider and reads the active frame/root vectors.
             let state = unsafe { &mut *self.state.get() };
             if let Some(remaining) = &mut state.allocation_budget {
                 if *remaining == 0 {
@@ -441,16 +554,6 @@ impl JitRuntimeCall {
             slow_path
         };
         if slow_path {
-            // Until Gate 4-3 teaches the collector to scan JIT stack maps
-            // directly, promote object-valued spills to temporary native roots.
-            // The generated frame and its exact stack map remain active during
-            // collection, so Gate 4-3 can replace this bridge without changing
-            // the runtime-call ABI.
-            let _argument_roots = arguments
-                .iter()
-                .filter_map(JsValue::as_object)
-                .map(JsObject::root)
-                .collect::<Vec<_>>();
             boa_gc::force_collect();
             let state = unsafe { &mut *self.state.get() };
             state.fast_remaining = state.fast_capacity;
@@ -486,10 +589,11 @@ unsafe extern "C" fn runtime_call_trampoline(frame: *mut RuntimeCallFrame) {
     let frame = unsafe { &mut *frame };
     let pending = unsafe { &mut *frame.state.cast::<PendingCall>() };
     let runtime = unsafe { &*pending.runtime };
+    let state = unsafe { &*runtime.state.get() };
     debug_assert!(
-        unsafe { &*runtime.state.get() }
+        state
             .active_frames
-            .resolve_safepoints(&runtime.pc_table)
+            .resolve_safepoints(&state.pc_table)
             .is_ok(),
         "every active runtime-call frame must resolve at its exact safepoint"
     );
@@ -507,7 +611,8 @@ unsafe extern "C" fn runtime_call_trampoline(frame: *mut RuntimeCallFrame) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Source;
+    use crate::{Source, js_string};
+    use boa_gc::WeakGc;
 
     #[test]
     fn excessive_frame_capacity_is_rejected_before_code_allocation() {
@@ -641,5 +746,72 @@ mod tests {
                 .unwrap(),
             JsValue::from(42)
         );
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    fn stack_map_roots_survive_minor_and_major_collection_then_die() {
+        let mut context = Context::default();
+        let runtime = JitRuntimeCall::new(2, 1).unwrap();
+        let object = JsObject::with_null_proto();
+        let weak = WeakGc::new(&object.root_inner());
+
+        for _ in 0..2 {
+            let returned = runtime
+                .collect_minor_for_test(&[object.clone().into()], &mut context)
+                .unwrap()
+                .unwrap();
+            assert!(JsObject::equals(&returned.as_object().unwrap(), &object));
+            assert!(weak.is_upgradable());
+        }
+        let returned = runtime
+            .collect_major_for_test(&[object.clone().into()], &mut context)
+            .unwrap()
+            .unwrap();
+        assert!(JsObject::equals(&returned.as_object().unwrap(), &object));
+        assert!(weak.is_upgradable());
+
+        drop(returned);
+        drop(object);
+        runtime
+            .collect_major_for_test(&[], &mut context)
+            .unwrap()
+            .unwrap();
+        assert!(!weak.is_upgradable());
+    }
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    fn old_to_young_store_survives_minor_collection_from_jit_root() {
+        let mut context = Context::default();
+        let runtime = JitRuntimeCall::new(1, 1).unwrap();
+        let parent = JsObject::with_null_proto();
+
+        // Surviving two nursery collections promotes the parent to old.
+        for _ in 0..2 {
+            runtime
+                .collect_minor_for_test(&[parent.clone().into()], &mut context)
+                .unwrap()
+                .unwrap();
+        }
+
+        let child = JsObject::with_null_proto();
+        let weak_child = WeakGc::new(&child.root_inner());
+        parent
+            .set(js_string!("child"), child.clone(), true, &mut context)
+            .unwrap();
+        drop(child);
+
+        let returned = runtime
+            .collect_minor_for_test(&[parent.clone().into()], &mut context)
+            .unwrap()
+            .unwrap();
+        assert!(weak_child.is_upgradable());
+        let stored = returned
+            .as_object()
+            .unwrap()
+            .get(js_string!("child"), &mut context)
+            .unwrap();
+        assert!(stored.is_object());
     }
 }

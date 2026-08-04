@@ -1593,9 +1593,12 @@ pub fn force_collect() {
     });
 }
 
-/// Forcefully runs a nursery collection of all young allocations.
-#[cfg(test)]
-pub(crate) fn force_minor_collect() {
+/// Forces a nursery-only collection at an explicit engine safepoint.
+///
+/// This is primarily exposed for validating external root providers and
+/// generational write barriers; ordinary allocation uses collector heuristics.
+#[doc(hidden)]
+pub fn force_minor_collect() {
     BOA_GC.with(|current| {
         let mut gc = current.borrow_mut();
 
