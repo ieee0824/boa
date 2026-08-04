@@ -1,8 +1,5 @@
 use crate::JsNativeError;
-use crate::{
-    Context, JsResult,
-    vm::{BaselineJitPolicy, opcode::Operation},
-};
+use crate::{Context, JsResult, vm::opcode::Operation};
 
 /// `IncrementLoopIteration` implements the Opcode Operation for `Opcode::IncrementLoopIteration`.
 ///
@@ -27,7 +24,7 @@ impl IncrementLoopIteration {
         frame.loop_iteration_count = previous_iteration_count.wrapping_add(1);
 
         #[cfg(feature = "baseline-jit")]
-        if context.vm.baseline_jit_policy == BaselineJitPolicy::Enabled
+        if context.vm.baseline_jit_policy == crate::vm::BaselineJitPolicy::Enabled
             && context.vm.arithmetic_jit_suppression_depth == 0
             && !context.vm.frame.code_block.jit_metadata.is_disabled()
         {
