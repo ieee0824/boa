@@ -494,12 +494,12 @@ mod tests {
     }
 
     #[test]
-    fn fallback_round_trip_preserves_uncaught_exception_and_recursion_limit() {
+    fn fallback_round_trip_preserves_uncaught_exception_and_recursion_error() {
         let error = evaluate_with_fallback_probe("throw new TypeError('fallback')").unwrap_err();
         assert!(error.is_catchable());
 
         let error =
             evaluate_with_fallback_probe("function recurse(){recurse()} recurse()").unwrap_err();
-        assert!(!error.is_catchable());
+        assert!(error.is_catchable());
     }
 }

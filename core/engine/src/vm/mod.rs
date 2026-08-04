@@ -1282,7 +1282,12 @@ impl Context {
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
         // Must throw if the number of recursive calls exceeds the defined limit.
         if self.vm.runtime_limits.recursion_limit() <= self.vm.frames.len() {
-            return Err(JsNativeError::runtime_limit()
+            // A recursion overflow is a normal JavaScript exception. In particular,
+            // code such as feature probes on x.com deliberately recurses inside a
+            // `try`/`catch` block to measure the available stack depth. Keep the
+            // non-catchable RuntimeLimit error for host safety limits (loop and
+            // stack-size checks), but expose recursion overflow as RangeError.
+            return Err(JsNativeError::range()
                 .with_message("exceeded maximum number of recursive calls")
                 .into());
         }

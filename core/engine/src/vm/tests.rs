@@ -2257,7 +2257,7 @@ fn recursion_runtime_limit() {
         }),
         TestAction::assert_native_error(
             "factorial(11)",
-            JsNativeErrorKind::RuntimeLimit,
+            JsNativeErrorKind::Range,
             "exceeded maximum number of recursive calls",
         ),
         TestAction::assert_eq("factorial(8)", JsValue::new(40_320)),
@@ -2269,8 +2269,32 @@ fn recursion_runtime_limit() {
 
                 x()
             "#},
-            JsNativeErrorKind::RuntimeLimit,
+            JsNativeErrorKind::Range,
             "exceeded maximum number of recursive calls",
+        ),
+    ]);
+}
+
+#[test]
+fn recursion_limit_is_catchable_as_range_error() {
+    run_test_actions([
+        TestAction::inspect_context(|context| {
+            context.runtime_limits_mut().set_recursion_limit(10);
+        }),
+        TestAction::assert_eq(
+            indoc! {r#"
+                function probe() {
+                    probe();
+                }
+                try {
+                    probe();
+                    false;
+                } catch (error) {
+                    error instanceof RangeError &&
+                        error.message === "exceeded maximum number of recursive calls";
+                }
+            "#},
+            JsValue::new(true),
         ),
     ]);
 }
