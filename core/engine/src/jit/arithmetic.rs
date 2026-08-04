@@ -353,9 +353,11 @@ pub struct ArithmeticJitDiagnostics {
     pub property_bailouts: u64,
     /// Deopts caused by stale property shape or inline-cache guards.
     pub shape_deopts: u64,
-    /// Deopts caused by values outside the baseline representation contract.
+    /// Deopts caused by entry values outside the baseline representation contract,
+    /// including negative zero supplied by the interpreter.
     pub type_deopts: u64,
-    /// Deopts caused by arithmetic overflow, negative zero, or another Number edge case.
+    /// Deopts caused when generated arithmetic overflows, creates negative zero,
+    /// or reaches another unsupported Number result.
     pub arithmetic_deopts: u64,
     /// Deopts caused by cooperative interruption at a loop safepoint.
     pub interrupt_deopts: u64,
