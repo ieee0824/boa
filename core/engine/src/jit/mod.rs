@@ -9,6 +9,7 @@
 
 mod arithmetic;
 mod deopt;
+mod exception;
 mod lowering;
 mod platform;
 mod runtime_call;
@@ -21,6 +22,10 @@ pub use deopt::{
     DeoptEnvironment, DeoptFrameLayout, DeoptMaterialization, DeoptMaterializationError,
     DeoptMetadataError, DeoptPendingCall, DeoptReason, DeoptRecipe, DeoptResumePoint,
     DeoptSourceValue, DeoptValueRepresentation,
+};
+pub use exception::{
+    JitExceptionHandler, JitExceptionMetadata, JitExceptionMetadataError, JitExceptionTraceFrame,
+    JitExceptionUnwindPlan, JitExceptionUnwindTarget, JitSourceLocation,
 };
 
 pub use lowering::{
@@ -63,6 +68,8 @@ pub enum JitError {
     FrameMetadata(FrameMetadataError),
     /// An emitter produced an invalid interpreter reconstruction recipe.
     DeoptMetadata(DeoptMetadataError),
+    /// An emitter produced invalid exception handler or source metadata.
+    ExceptionMetadata(JitExceptionMetadataError),
 }
 
 impl fmt::Display for JitError {
@@ -76,6 +83,7 @@ impl fmt::Display for JitError {
             Self::StaleCodeHandle => formatter.write_str("JIT code handle is stale or invalidated"),
             Self::FrameMetadata(error) => error.fmt(formatter),
             Self::DeoptMetadata(error) => error.fmt(formatter),
+            Self::ExceptionMetadata(error) => error.fmt(formatter),
         }
     }
 }
@@ -86,6 +94,7 @@ impl std::error::Error for JitError {
             Self::Os(error) => Some(error),
             Self::FrameMetadata(error) => Some(error),
             Self::DeoptMetadata(error) => Some(error),
+            Self::ExceptionMetadata(error) => Some(error),
             _ => None,
         }
     }
@@ -106,6 +115,12 @@ impl From<FrameMetadataError> for JitError {
 impl From<DeoptMetadataError> for JitError {
     fn from(error: DeoptMetadataError) -> Self {
         Self::DeoptMetadata(error)
+    }
+}
+
+impl From<JitExceptionMetadataError> for JitError {
+    fn from(error: JitExceptionMetadataError) -> Self {
+        Self::ExceptionMetadata(error)
     }
 }
 
