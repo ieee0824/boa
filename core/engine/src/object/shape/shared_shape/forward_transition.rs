@@ -41,7 +41,7 @@ impl<T: Debug + Trace + Finalize> TransitionMap<T> {
 #[derive(Default, Debug, Trace, Finalize)]
 struct Inner {
     properties: Option<Box<TransitionMap<TransitionKey>>>,
-    prototypes: Option<Box<TransitionMap<JsPrototype>>>,
+    prototypes: Option<Box<TransitionMap<Option<usize>>>>,
 }
 
 /// Holds a forward reference to a previously created transition.
@@ -72,6 +72,12 @@ impl ForwardTransition {
 
     /// Insert a prototype transition.
     pub(super) fn insert_prototype(&self, key: JsPrototype, value: &Rooted<SharedShapeInner>) {
+        // Store only the address as the lookup key. A strong prototype key
+        // would retain its entire Realm through a shared root shape, even
+        // though the target shape is weak. A live target shape itself owns
+        // the prototype, so its address cannot be reused while that target
+        // can still be upgraded; dead targets are discarded on lookup.
+        let key = prototype_key(&key);
         // Allocated before the borrow, for the reason given in `insert_property`.
         let value = WeakGcEdge::new_rooted(value);
 
@@ -96,7 +102,7 @@ impl ForwardTransition {
     pub(super) fn get_prototype(&self, key: &JsPrototype) -> Option<WeakGcEdge<SharedShapeInner>> {
         let this = self.inner.borrow();
         let transitions = this.prototypes.as_ref()?;
-        transitions.map.get(key).cloned()
+        transitions.map.get(&prototype_key(key)).cloned()
     }
 
     /// Prunes the [`WeakGcEdge`]s that have been garbage collected.
@@ -142,4 +148,11 @@ impl ForwardTransition {
             )
         })
     }
+}
+
+/// Non-owning identity used only for equality and hashing, never dereferenced.
+fn prototype_key(prototype: &JsPrototype) -> Option<usize> {
+    prototype
+        .as_ref()
+        .map(|object| std::ptr::from_ref(object.as_ref()).addr())
 }
