@@ -3,8 +3,6 @@ name: Test262 platform and profile diagnosis
 on:
   push:
     branches: [ci/issue539-test262-platform-matrix]
-  pull_request:
-    paths: [.github/workflows/test262-platform-matrix.yml]
   workflow_dispatch:
     inputs:
       revision:
