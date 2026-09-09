@@ -1,0 +1,145 @@
+name: Test262 allocator diagnosis
+
+on:
+  push:
+    branches: [ci/issue638-test262-heap]
+    paths: [.github/workflows/test262-heap-diagnosis.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    name: Test262 allocator (${{ matrix.revision_name }}, ${{ matrix.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - revision_name: before-541
+            revision: ef6ef4f19a8b18c018746996bb6b8bc33a2d89c6
+            mode: release
+            stack: '2097152'
+          - revision_name: issue-541
+            revision: bac265c262b1bf92553f43302bc9d9465eb0c2ad
+            mode: release
+            stack: '2097152'
+          - revision_name: before-541
+            revision: ef6ef4f19a8b18c018746996bb6b8bc33a2d89c6
+            mode: asan
+            stack: '8388608'
+          - revision_name: issue-541
+            revision: bac265c262b1bf92553f43302bc9d9465eb0c2ad
+            mode: asan
+            stack: '8388608'
+    env:
+      TEST_REVISION: ${{ matrix.revision }}
+      MODE: ${{ matrix.mode }}
+      RUST_MIN_STACK: ${{ matrix.stack }}
+      RAYON_NUM_THREADS: '4'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      RUST_BACKTRACE: full
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ matrix.revision }}
+          path: boa
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: boa -> target
+          key: test262-heap-${{ matrix.mode }}-${{ matrix.revision_name }}
+      - name: Record environment and suite revision
+        id: suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts/results
+          {
+            uname -a
+            rustc -vV
+            git -C boa show --no-patch --format=fuller HEAD
+            echo "mode=$MODE stack=$RUST_MIN_STACK threads=$RAYON_NUM_THREADS"
+            free -m
+          } > artifacts/environment.txt
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          revision = tomllib.loads(pathlib.Path('boa/test262_config.toml').read_text())['commit']
+          assert re.fullmatch('[0-9a-f]{40}', revision)
+          pathlib.Path('artifacts/suite-revision.txt').write_text(revision + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Build tester and record enabled features
+        working-directory: boa
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" = asan ]]; then
+            export RUSTC_BOOTSTRAP=1
+            export RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes'
+            export CARGO_PROFILE_DEV_OPT_LEVEL=1
+            export CARGO_PROFILE_DEV_DEBUG=1
+            cargo build --locked -j 1 --target x86_64-unknown-linux-gnu --bin boa_tester \
+              > ../artifacts/build.log 2>&1
+          else
+            cargo build --locked --release --bin boa_tester > ../artifacts/build.log 2>&1
+          fi
+          cargo tree --locked -p boa_tester -e features > ../artifacts/features.txt
+          if rg 'boa_engine feature "baseline-jit"' ../artifacts/features.txt; then
+            echo 'This diagnosis requires the ordinary non-JIT tester' >&2
+            exit 1
+          fi
+      - name: Run diagnosis once and preserve the actual exit status
+        working-directory: boa
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          git -C ../test262 update-ref refs/heads/main '${{ steps.suite.outputs.revision }}'
+          export GITHUB_SHA="$TEST_REVISION"
+          export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allow_addr2line=1
+          if [[ "$MODE" = asan ]]; then
+            binary=target/x86_64-unknown-linux-gnu/debug/boa_tester
+            # Include both declaration/expression class forms and constructor
+            # suites observed near the abort. Each process has a fresh GC heap.
+            suites=(test/language/statements/class test/language/expressions/class test/built-ins/Function test/built-ins/GeneratorFunction)
+          else
+            binary=target/release/boa_tester
+            suites=(test)
+          fi
+          sha256sum "$binary" > ../artifacts/tester-sha256.txt
+          status=0
+          for suite in "${suites[@]}"; do
+            label=${suite//\//_}
+            echo "START $suite" >> ../artifacts/progress.txt
+            if "$binary" run --test262-path ../test262 --suite "$suite" -vv \
+              -o "../artifacts/results/$label" > "../artifacts/$label.log" 2>&1; then
+              code=0
+            else
+              code=$?
+              status=$code
+            fi
+            echo "$suite $code" >> ../artifacts/exit-status.txt
+            echo "COMPLETE $suite exit=$code" >> ../artifacts/progress.txt
+          done
+          exit "$status"
+      - name: Upload all diagnosis evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-heap-${{ matrix.revision_name }}-${{ matrix.mode }}
+          path: artifacts/
+          if-no-files-found: error
