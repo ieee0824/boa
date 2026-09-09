@@ -301,8 +301,8 @@ async fn load_dyn_import(
 
     // 1. If result is a normal completion, then
     match referrer {
-        Referrer::Module(module) => {
-            let ModuleKind::SourceText(src) = module.kind() else {
+        Referrer::Module(referrer_module) => {
+            let ModuleKind::SourceText(src) = referrer_module.kind() else {
                 panic!("referrer cannot be a synthetic module");
             };
 

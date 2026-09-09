@@ -796,6 +796,83 @@ mod tests {
     use crate::{Context, JsValue, NativeFunction, Source};
 
     #[test]
+    fn synchronous_ancestor_error_after_async_dependency_rejects_the_ancestor() {
+        use super::MapModuleLoader;
+        use std::rc::Rc;
+
+        let loader = Rc::new(MapModuleLoader::default());
+        let mut context = Context::builder()
+            .module_loader(loader.clone())
+            .build()
+            .unwrap();
+        let dependency = Module::parse(Source::from_bytes("await 0;"), None, &mut context).unwrap();
+        loader.insert("dependency.js", dependency);
+        let importer = Module::parse(
+            Source::from_bytes("import 'dependency.js'; throw 42;"),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let result = importer.load_link_evaluate(&mut context);
+        context.run_jobs().unwrap();
+        assert_eq!(result.state().as_rejected(), Some(&JsValue::from(42)));
+        assert_eq!(
+            context.eval(Source::from_bytes("6 * 7")).unwrap(),
+            JsValue::from(42)
+        );
+    }
+
+    #[test]
+    fn dynamic_import_reuses_the_loaded_module_in_its_referrers_cache() {
+        use super::{MapModuleLoader, ModuleKind};
+        use std::rc::Rc;
+
+        for static_import in [false, true] {
+            let loader = Rc::new(MapModuleLoader::default());
+            let mut context = Context::builder()
+                .module_loader(loader.clone())
+                .build()
+                .unwrap();
+            let dependency = Module::parse(
+                Source::from_bytes("export const answer = 42;"),
+                None,
+                &mut context,
+            )
+            .unwrap();
+            loader.insert("dependency.js", dependency.clone());
+            let prefix = if static_import {
+                "import * as ns from 'dependency.js';"
+            } else {
+                "let ns;"
+            };
+            let source = format!(
+                "{prefix}
+                Promise.all([import('dependency.js'), import('dependency.js')])
+                    .then(([a, b]) => {{
+                        globalThis.importsMatch = a === b && a.answer === 42
+                            && (ns === undefined || a === ns);
+                    }});"
+            );
+            let importer = Module::parse(Source::from_bytes(&source), None, &mut context).unwrap();
+            let result = importer.load_link_evaluate(&mut context);
+            context.run_jobs().unwrap();
+            assert!(result.state().as_fulfilled().is_some());
+            assert_eq!(
+                context.eval(Source::from_bytes("importsMatch")).unwrap(),
+                JsValue::from(true)
+            );
+            let ModuleKind::SourceText(src) = importer.kind() else {
+                unreachable!();
+            };
+            let cache = src.loaded_modules().borrow();
+            assert!(
+                cache.get(&crate::js_string!("dependency.js")) == Some(&dependency.to_edge()),
+                "the referrer must cache the imported module, not itself"
+            );
+        }
+    }
+
+    #[test]
     fn native_capture_keeps_module_alive_across_collection() {
         let mut context = Context::default();
         let module = Module::parse(
