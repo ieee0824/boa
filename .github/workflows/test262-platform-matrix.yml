@@ -1,0 +1,182 @@
+name: Test262 platform and profile diagnosis
+
+on:
+  push:
+    branches: [ci/issue539-test262-platform-matrix]
+    paths: [.github/workflows/test262-platform-matrix.yml]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact Boa commit to compare on every environment
+        type: string
+        default: 21dde73e068e2051fe63863d743e3e067731976c
+        required: true
+      stack_bytes:
+        description: Rust worker stack size; 2 MiB reproduces the existing debug parser overflow
+        type: choice
+        options: ['8388608', '2097152']
+        default: '8388608'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test262:
+    name: Test262 (${{ matrix.arch }}, ${{ matrix.profile }}, ${{ matrix.scope }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-24.04, profile: dev, scope: probes, timeout: 20}
+          - {arch: x86_64, runner: ubuntu-24.04, profile: release, scope: full, timeout: 30}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: dev, scope: probes, timeout: 20}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: release, scope: full, timeout: 30}
+    env:
+      RAYON_NUM_THREADS: "2"
+      RUST_MIN_STACK: ${{ inputs.stack_bytes || '8388608' }}
+      RUST_BACKTRACE: full
+      TEST_REVISION: ${{ inputs.revision || '21dde73e068e2051fe63863d743e3e067731976c' }}
+      TEST_SCOPE: ${{ matrix.scope }}
+    steps:
+      - name: Require the same exact commit on every runner
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['TEST_REVISION'])
+          assert os.environ['RUST_MIN_STACK'] in ('2097152', '8388608')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TEST_REVISION }}
+          path: boa
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: boa -> target
+          key: test262-${{ matrix.arch }}-${{ matrix.profile }}
+      - name: Record environment and pinned suite
+        id: suite
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          {
+            uname -a
+            cat /etc/os-release
+            rustc --version --verbose
+            cargo --version
+            gcc --version
+            ldd --version
+            git -C boa show --no-patch --format=fuller HEAD
+            echo "profile=${{ matrix.profile }} scope=${{ matrix.scope }} rayon_threads=$RAYON_NUM_THREADS rust_min_stack=$RUST_MIN_STACK"
+            echo "main_stack_kib=$(ulimit -s)"
+          } > artifacts/environment.txt
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          revision = tomllib.loads(pathlib.Path('boa/test262_config.toml').read_text())['commit']
+          assert re.fullmatch(r'[0-9a-f]{40}', revision), revision
+          pathlib.Path('artifacts/test262-revision.txt').write_text(revision + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Run Test262 diagnosis without retries
+        working-directory: boa
+        shell: bash
+        run: |
+          set -euo pipefail
+          # boa_tester reads this loose ref when recording the suite revision.
+          git -C "$GITHUB_WORKSPACE/test262" update-ref refs/heads/main \
+            '${{ steps.suite.outputs.revision }}'
+          export GITHUB_SHA="$TEST_REVISION"
+          log="$GITHUB_WORKSPACE/artifacts/test262.log"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/results"
+          run_suite() {
+            local suite=$1
+            local verbosity=$2
+            local output=$3
+            if cargo run --locked --profile '${{ matrix.profile }}' --bin boa_tester -- \
+              run --test262-path "$GITHUB_WORKSPACE/test262" "$verbosity" \
+              --suite "$suite" -o "$output" >> "$log" 2>&1; then
+              return 0
+            fi
+            local status=$?
+            tail -200 "$log"
+            return "$status"
+          }
+          run_single_test() {
+            local suite=$1
+            local verbosity=$2
+            local output=$3
+            if cargo run --locked --profile '${{ matrix.profile }}' --bin boa_tester -- \
+              run --test262-path "$GITHUB_WORKSPACE/test262" "$verbosity" \
+              --suite "$suite" >> "$log" 2>&1; then
+              mkdir -p "$output"
+              printf '{"suite":"%s","passed":true}\n' "$suite" > "$output/single-passed.json"
+              return 0
+            fi
+            local status=$?
+            tail -200 "$log"
+            return "$status"
+          }
+          if [[ "$TEST_SCOPE" == full ]]; then
+            run_suite test -v "$GITHUB_WORKSPACE/artifacts/results"
+          else
+            cat > "$GITHUB_WORKSPACE/artifacts/dev-probes.txt" <<'EOF'
+          test/language/expressions/dynamic-import
+          test/language/module-code/top-level-await
+          test/staging/sm/regress/regress-672893.js
+          EOF
+            while IFS= read -r suite; do
+              label=${suite//[^A-Za-z0-9_.-]/_}
+              echo "suite=$suite" >> "$log"
+              if [[ "$suite" == *.js ]]; then
+                run_single_test "$suite" -vv "$GITHUB_WORKSPACE/artifacts/results/$label"
+              else
+                run_suite "$suite" -vv "$GITHUB_WORKSPACE/artifacts/results/$label"
+              fi
+            done < "$GITHUB_WORKSPACE/artifacts/dev-probes.txt"
+          fi
+      - name: Require diagnostic results without Rust panics
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          reports = list(pathlib.Path('artifacts/results').rglob('latest.json'))
+          expected = 1 if os.environ['TEST_SCOPE'] == 'full' else 2
+          assert len(reports) == expected, reports
+          markers = list(pathlib.Path('artifacts/results').rglob('single-passed.json'))
+          assert len(markers) == (0 if os.environ['TEST_SCOPE'] == 'full' else 1), markers
+          suite_revision = pathlib.Path('artifacts/test262-revision.txt').read_text().strip()
+          summaries = []
+          for path in sorted(reports):
+              report = json.loads(path.read_text())
+              assert report['c'] == os.environ['TEST_REVISION']
+              assert report['u'] == suite_revision
+              stats = report['r']['a']
+              assert stats['t'] > 0, 'test262 must execute tests'
+              assert stats['p'] == 0, f'{path} caught {stats["p"]} Rust panics'
+              summaries.append({'path': str(path), 'stats': stats})
+          for marker in sorted(markers):
+              summaries.append({'path': str(marker), 'single': json.loads(marker.read_text())})
+          pathlib.Path('artifacts/summary.json').write_text(json.dumps(summaries, indent=2) + '\n')
+          print(json.dumps(summaries, sort_keys=True))
+          PY
+      - name: Upload environment, per-test log and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-${{ matrix.arch }}-${{ matrix.profile }}-${{ matrix.scope }}
+          path: artifacts/
+          if-no-files-found: error

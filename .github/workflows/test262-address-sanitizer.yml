@@ -1,0 +1,158 @@
+name: Test262 AddressSanitizer diagnosis
+
+on:
+  push:
+    branches: [ci/issue539-test262-platform-matrix]
+    paths: [.github/workflows/test262-address-sanitizer.yml]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact Boa commit to check
+        type: string
+        default: 21dde73e068e2051fe63863d743e3e067731976c
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test262-asan:
+    name: Test262 (x86_64, AddressSanitizer probes)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      TEST_REVISION: ${{ inputs.revision || '21dde73e068e2051fe63863d743e3e067731976c' }}
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: -Zsanitizer=address -Cforce-frame-pointers=yes
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG: "1"
+      CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "8388608"
+      RAYON_NUM_THREADS: "2"
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:allow_addr2line=1
+    steps:
+      - name: Validate candidate
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['TEST_REVISION'])
+          PY
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TEST_REVISION }}
+          path: boa
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: boa -> target
+          key: test262-x86_64-address-sanitizer
+      - name: Record environment and pinned suite
+        id: suite
+        run: |
+          mkdir -p artifacts
+          {
+            uname -a
+            rustc --version --verbose
+            cargo --version
+            free -m
+            git -C boa show --no-patch --format=fuller HEAD
+            echo "rust_min_stack=$RUST_MIN_STACK rayon_threads=$RAYON_NUM_THREADS"
+            echo "rustflags=$RUSTFLAGS asan_options=$ASAN_OPTIONS"
+          } > artifacts/environment.txt
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          revision = tomllib.loads(pathlib.Path('boa/test262_config.toml').read_text())['commit']
+          assert re.fullmatch(r'[0-9a-f]{40}', revision)
+          pathlib.Path('artifacts/test262-revision.txt').write_text(revision + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Run instrumented Test262 probes without retries
+        working-directory: boa
+        run: |
+          set -euo pipefail
+          git -C "$GITHUB_WORKSPACE/test262" update-ref refs/heads/main \
+            '${{ steps.suite.outputs.revision }}'
+          export GITHUB_SHA="$TEST_REVISION"
+          log="$GITHUB_WORKSPACE/artifacts/test262.log"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/results"
+          run_suite() {
+            local suite=$1
+            local output=$2
+            if cargo run --locked --target x86_64-unknown-linux-gnu --bin boa_tester -- \
+              run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
+              --suite "$suite" -o "$output" >> "$log" 2>&1; then
+              return 0
+            fi
+            local status=$?
+            tail -200 "$log"
+            return "$status"
+          }
+          run_single_test() {
+            local suite=$1
+            local output=$2
+            if cargo run --locked --target x86_64-unknown-linux-gnu --bin boa_tester -- \
+              run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
+              --suite "$suite" >> "$log" 2>&1; then
+              mkdir -p "$output"
+              printf '{"suite":"%s","passed":true}\n' "$suite" > "$output/single-passed.json"
+              return 0
+            fi
+            local status=$?
+            tail -200 "$log"
+            return "$status"
+          }
+          cat > "$GITHUB_WORKSPACE/artifacts/asan-probes.txt" <<'EOF'
+          test/language/expressions/dynamic-import
+          test/language/module-code/top-level-await
+          test/staging/sm/regress/regress-672893.js
+          EOF
+          while IFS= read -r suite; do
+            label=${suite//[^A-Za-z0-9_.-]/_}
+            echo "suite=$suite" >> "$log"
+            if [[ "$suite" == *.js ]]; then
+              run_single_test "$suite" "$GITHUB_WORKSPACE/artifacts/results/$label"
+            else
+              run_suite "$suite" "$GITHUB_WORKSPACE/artifacts/results/$label"
+            fi
+          done < "$GITHUB_WORKSPACE/artifacts/asan-probes.txt"
+      - name: Require probe results without Rust panics
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          reports = list(pathlib.Path('artifacts/results').rglob('latest.json'))
+          assert len(reports) == 2, reports
+          markers = list(pathlib.Path('artifacts/results').rglob('single-passed.json'))
+          assert len(markers) == 1, markers
+          suite_revision = pathlib.Path('artifacts/test262-revision.txt').read_text().strip()
+          summaries = []
+          for path in sorted(reports):
+              report = json.loads(path.read_text())
+              assert report['c'] == os.environ['TEST_REVISION']
+              assert report['u'] == suite_revision
+              stats = report['r']['a']
+              assert stats['t'] > 0, 'test262 must execute tests'
+              assert stats['p'] == 0, f'{path} caught {stats["p"]} Rust panics'
+              summaries.append({'path': str(path), 'stats': stats})
+          for marker in sorted(markers):
+              summaries.append({'path': str(marker), 'single': json.loads(marker.read_text())})
+          pathlib.Path('artifacts/summary.json').write_text(json.dumps(summaries, indent=2) + '\n')
+          print(json.dumps(summaries, sort_keys=True))
+          PY
+      - name: Upload environment, diagnostics and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-x86_64-asan-probes
+          path: artifacts/
+          if-no-files-found: error
