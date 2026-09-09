@@ -1,52 +1,42 @@
-name: Test262 platform and profile diagnosis
+name: Test262 AddressSanitizer diagnosis
 
 on:
   push:
     branches: [ci/issue539-test262-platform-matrix]
-    paths: [.github/workflows/test262-platform-matrix.yml]
+    paths: [.github/workflows/test262-address-sanitizer.yml]
   workflow_dispatch:
     inputs:
       revision:
-        description: Exact Boa commit to compare on every environment
+        description: Exact Boa commit to check
         type: string
         default: 21dde73e068e2051fe63863d743e3e067731976c
-        required: true
-      stack_bytes:
-        description: Rust worker stack size; 2 MiB reproduces the existing debug parser overflow
-        type: choice
-        options: ['8388608', '2097152']
-        default: '8388608'
         required: true
 
 permissions:
   contents: read
 
 jobs:
-  test262:
-    name: Test262 (${{ matrix.arch }}, ${{ matrix.profile }})
-    runs-on: ${{ matrix.runner }}
+  test262-asan:
+    name: Test262 (x86_64, AddressSanitizer)
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - {arch: x86_64, runner: ubuntu-24.04, profile: dev}
-          - {arch: x86_64, runner: ubuntu-24.04, profile: release}
-          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: dev}
-          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: release}
     env:
-      RAYON_NUM_THREADS: "2"
-      RUST_MIN_STACK: ${{ inputs.stack_bytes || '8388608' }}
-      RUST_BACKTRACE: full
       TEST_REVISION: ${{ inputs.revision || '21dde73e068e2051fe63863d743e3e067731976c' }}
+      RUSTC_BOOTSTRAP: "1"
+      RUSTFLAGS: -Zsanitizer=address -Cforce-frame-pointers=yes
+      CARGO_BUILD_JOBS: "1"
+      CARGO_PROFILE_DEV_OPT_LEVEL: "1"
+      CARGO_PROFILE_DEV_DEBUG: "1"
+      CARGO_INCREMENTAL: "0"
+      RUST_MIN_STACK: "8388608"
+      RAYON_NUM_THREADS: "2"
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1:allow_addr2line=1
     steps:
-      - name: Require the same exact commit on every runner
-        shell: bash
+      - name: Validate candidate
         run: |
           python3 - <<'PY'
           import os, re
           assert re.fullmatch(r'[0-9a-f]{40}', os.environ['TEST_REVISION'])
-          assert os.environ['RUST_MIN_STACK'] in ('2097152', '8388608')
           PY
       - uses: actions/checkout@v5
         with:
@@ -59,27 +49,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: boa -> target
-          key: test262-${{ matrix.arch }}-${{ matrix.profile }}
+          key: test262-x86_64-address-sanitizer
       - name: Record environment and pinned suite
         id: suite
-        shell: bash
         run: |
           mkdir -p artifacts
           {
             uname -a
-            cat /etc/os-release
             rustc --version --verbose
             cargo --version
-            gcc --version
-            ldd --version
+            free -m
             git -C boa show --no-patch --format=fuller HEAD
-            echo "profile=${{ matrix.profile }} rayon_threads=$RAYON_NUM_THREADS rust_min_stack=$RUST_MIN_STACK"
-            echo "main_stack_kib=$(ulimit -s)"
+            echo "rust_min_stack=$RUST_MIN_STACK rayon_threads=$RAYON_NUM_THREADS"
+            echo "rustflags=$RUSTFLAGS asan_options=$ASAN_OPTIONS"
           } > artifacts/environment.txt
           python3 - <<'PY'
           import os, pathlib, re, tomllib
           revision = tomllib.loads(pathlib.Path('boa/test262_config.toml').read_text())['commit']
-          assert re.fullmatch(r'[0-9a-f]{40}', revision), revision
+          assert re.fullmatch(r'[0-9a-f]{40}', revision)
           pathlib.Path('artifacts/test262-revision.txt').write_text(revision + '\n')
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write(f'revision={revision}\n')
@@ -90,21 +77,18 @@ jobs:
           ref: ${{ steps.suite.outputs.revision }}
           path: test262
           persist-credentials: false
-      - name: Run complete test262 without retries
+      - name: Run complete instrumented Test262 without retries
         working-directory: boa
-        shell: bash
         run: |
           set -euo pipefail
-          # boa_tester reads this loose ref when recording the suite revision.
           git -C "$GITHUB_WORKSPACE/test262" update-ref refs/heads/main \
             '${{ steps.suite.outputs.revision }}'
           export GITHUB_SHA="$TEST_REVISION"
-          cargo run --locked --profile '${{ matrix.profile }}' --bin boa_tester -- \
+          cargo run --locked --target x86_64-unknown-linux-gnu --bin boa_tester -- \
             run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
             -o "$GITHUB_WORKSPACE/artifacts/results" \
             2>&1 | tee "$GITHUB_WORKSPACE/artifacts/test262.log"
       - name: Require complete results without Rust panics
-        shell: bash
         run: |
           python3 - <<'PY'
           import json, os, pathlib
@@ -115,13 +99,13 @@ jobs:
           assert report['u'] == pathlib.Path('artifacts/test262-revision.txt').read_text().strip()
           stats = report['r']['a']
           print(json.dumps(stats, sort_keys=True))
-          assert stats['t'] > 0, 'test262 must execute tests'
+          assert stats['t'] > 0
           assert stats['p'] == 0, f'test262 caught {stats["p"]} Rust panics'
           PY
-      - name: Upload environment, per-test log and results
+      - name: Upload environment, diagnostics and results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test262-${{ matrix.arch }}-${{ matrix.profile }}
+          name: test262-x86_64-asan
           path: artifacts/
           if-no-files-found: error
