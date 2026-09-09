@@ -13,7 +13,7 @@ jobs:
   diagnose:
     name: Test262 allocator (${{ matrix.revision_name }}, ${{ matrix.mode }})
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
@@ -38,7 +38,6 @@ jobs:
       TEST_REVISION: ${{ matrix.revision }}
       MODE: ${{ matrix.mode }}
       RUST_MIN_STACK: ${{ matrix.stack }}
-      RAYON_NUM_THREADS: '4'
       CARGO_BUILD_JOBS: '2'
       CARGO_INCREMENTAL: '0'
       RUST_BACKTRACE: full
@@ -54,7 +53,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: boa -> target
-          key: test262-heap-${{ matrix.mode }}-${{ matrix.revision_name }}
+          key: test262-heap-v2-${{ matrix.mode }}-${{ matrix.revision_name }}
       - name: Record environment and suite revision
         id: suite
         shell: bash
@@ -65,7 +64,8 @@ jobs:
             uname -a
             rustc -vV
             git -C boa show --no-patch --format=fuller HEAD
-            echo "mode=$MODE stack=$RUST_MIN_STACK threads=$RAYON_NUM_THREADS"
+            echo "mode=$MODE stack=$RUST_MIN_STACK threads=default"
+            nproc
             free -m
           } > artifacts/environment.txt
           python3 - <<'PY'
@@ -90,9 +90,8 @@ jobs:
           if [[ "$MODE" = asan ]]; then
             export RUSTC_BOOTSTRAP=1
             export RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes'
-            export CARGO_PROFILE_DEV_OPT_LEVEL=1
-            export CARGO_PROFILE_DEV_DEBUG=1
-            cargo build --locked -j 1 --target x86_64-unknown-linux-gnu --bin boa_tester \
+            export CARGO_PROFILE_RELEASE_DEBUG=1
+            cargo build --locked -j 1 --release --target x86_64-unknown-linux-gnu --bin boa_tester \
               > ../artifacts/build.log 2>&1
           else
             cargo build --locked --release --bin boa_tester > ../artifacts/build.log 2>&1
@@ -112,20 +111,33 @@ jobs:
           export GITHUB_SHA="$TEST_REVISION"
           export ASAN_OPTIONS=detect_leaks=0:abort_on_error=1:allow_addr2line=1
           if [[ "$MODE" = asan ]]; then
-            binary=target/x86_64-unknown-linux-gnu/debug/boa_tester
-            # Include both declaration/expression class forms and constructor
-            # suites observed near the abort. Each process has a fresh GC heap.
-            suites=(test/language/statements/class test/language/expressions/class test/built-ins/Function test/built-ins/GeneratorFunction)
+            binary=target/x86_64-unknown-linux-gnu/release/boa_tester
+            # Compare a minimal parser calibration with/without ASAN's fake
+            # stack. The parser currently measures local-variable addresses.
+            for fake_stack in 1 0; do
+              ASAN_OPTIONS="$ASAN_OPTIONS:detect_stack_use_after_return=$fake_stack" \
+                "$binary" run --test262-path ../test262 \
+                --suite test/built-ins/Function/prototype/constructor -vvv \
+                -o "../artifacts/calibration-$fake_stack" \
+                > "../artifacts/calibration-$fake_stack.log" 2>&1
+            done
+            # Full heap checking still runs. Returning locals use native stack
+            # addresses so the parser's byte budget is meaningful in this run.
+            export ASAN_OPTIONS="$ASAN_OPTIONS:detect_stack_use_after_return=0"
+            verbosity=-vvv
           else
             binary=target/release/boa_tester
-            suites=(test)
+            # Match the failed ordinary workflow's output and thread defaults.
+            verbosity=-v
           fi
+          suites=(test)
+          echo "asan_options=$ASAN_OPTIONS verbosity=$verbosity" >> ../artifacts/environment.txt
           sha256sum "$binary" > ../artifacts/tester-sha256.txt
           status=0
           for suite in "${suites[@]}"; do
             label=${suite//\//_}
             echo "START $suite" >> ../artifacts/progress.txt
-            if "$binary" run --test262-path ../test262 --suite "$suite" -vv \
+            if "$binary" run --test262-path ../test262 --suite "$suite" "$verbosity" \
               -o "../artifacts/results/$label" > "../artifacts/$label.log" 2>&1; then
               code=0
             else
@@ -135,6 +147,19 @@ jobs:
             echo "$suite $code" >> ../artifacts/exit-status.txt
             echo "COMPLETE $suite exit=$code" >> ../artifacts/progress.txt
           done
+          if [[ "$status" = 0 ]]; then
+            # The tester returns zero for ordinary JS failures. Reject a vacuous
+            # sanitizer run where the parser prevents most test bodies executing.
+            python3 - <<'PY_CHECK'
+          import json, pathlib
+          reports = list(pathlib.Path('../artifacts/results').rglob('latest.json'))
+          assert len(reports) == 1, reports
+          stats = json.loads(reports[0].read_text())['r']['a']
+          print(stats)
+          assert stats['t'] == 50595, stats
+          assert stats['o'] > 45000, stats
+          PY_CHECK
+          fi
           exit "$status"
       - name: Upload all diagnosis evidence
         if: always()
