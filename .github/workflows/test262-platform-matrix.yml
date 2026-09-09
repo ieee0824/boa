@@ -1,0 +1,100 @@
+name: Test262 platform and profile diagnosis
+
+on:
+  push:
+    branches: [ci/issue539-test262-platform-matrix]
+  pull_request:
+    paths: [.github/workflows/test262-platform-matrix.yml]
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: Exact Boa commit to compare on every environment
+        type: string
+        default: d803bce094ff269d3abf741587fb23b82e13e302
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  test262:
+    name: Test262 (${{ matrix.arch }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-24.04, profile: dev}
+          - {arch: x86_64, runner: ubuntu-24.04, profile: release}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: dev}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: release}
+    env:
+      RAYON_NUM_THREADS: "2"
+      RUST_BACKTRACE: full
+      TEST_REVISION: ${{ inputs.revision || 'd803bce094ff269d3abf741587fb23b82e13e302' }}
+    steps:
+      - name: Require the same exact commit on every runner
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re
+          assert re.fullmatch(r'[0-9a-f]{40}', os.environ['TEST_REVISION'])
+          PY
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TEST_REVISION }}
+          path: boa
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: boa -> target
+          key: test262-${{ matrix.arch }}-${{ matrix.profile }}
+      - name: Record environment and pinned suite
+        id: suite
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          {
+            uname -a
+            cat /etc/os-release
+            rustc --version --verbose
+            cargo --version
+            gcc --version
+            ldd --version
+            git -C boa show --no-patch --format=fuller HEAD
+            echo "profile=${{ matrix.profile }} rayon_threads=$RAYON_NUM_THREADS"
+          } > artifacts/environment.txt
+          python3 - <<'PY'
+          import os, pathlib, re, tomllib
+          revision = tomllib.loads(pathlib.Path('boa/test262_config.toml').read_text())['commit']
+          assert re.fullmatch(r'[0-9a-f]{40}', revision), revision
+          pathlib.Path('artifacts/test262-revision.txt').write_text(revision + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Run complete test262 without retries
+        working-directory: boa
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --locked --profile '${{ matrix.profile }}' --bin boa_tester -- \
+            run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
+            -o "$GITHUB_WORKSPACE/artifacts/results" \
+            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/test262.log"
+      - name: Upload environment, per-test log and results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test262-${{ matrix.arch }}-${{ matrix.profile }}
+          path: artifacts/
+          if-no-files-found: error
