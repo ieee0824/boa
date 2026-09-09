@@ -78,7 +78,11 @@ where
 {
     type Output = GeneratorDeclarationNode;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let func_token = cursor.expect(
             (Keyword::Function, false),
             "generator declaration",

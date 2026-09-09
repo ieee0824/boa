@@ -41,7 +41,11 @@ where
 {
     type Output = Statement;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let next_token = cursor.peek(0, interner).or_abrupt()?;
         match next_token.kind() {
             TokenKind::Keyword((Keyword::Function | Keyword::Class, true)) => {

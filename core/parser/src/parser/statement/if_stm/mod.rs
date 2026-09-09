@@ -56,7 +56,11 @@ where
 {
     type Output = If;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::If, false), "if statement", interner)?;
         cursor.expect(Punctuator::OpenParen, "if statement", interner)?;
 

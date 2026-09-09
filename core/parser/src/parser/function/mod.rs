@@ -66,7 +66,11 @@ where
 {
     type Output = FormalParameterList;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.set_goal(InputElement::RegExp);
 
         let Some(start_position) = cursor
@@ -176,7 +180,11 @@ where
 {
     type Output = FormalParameterList;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let params_start_position = cursor
             .expect(
                 TokenKind::Punctuator(Punctuator::OpenParen),
@@ -248,7 +256,11 @@ where
 {
     type Output = ast::function::FormalParameter;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect(Punctuator::Spread, "rest parameter", interner)?;
 
         if let Some(t) = cursor.peek(0, interner)? {
@@ -345,7 +357,11 @@ where
 {
     type Output = ast::function::FormalParameter;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         if let Some(t) = cursor.peek(0, interner)? {
             let declaration = match *t.kind() {
                 TokenKind::Punctuator(Punctuator::OpenBlock) => {
@@ -468,7 +484,11 @@ where
 {
     type Output = AstFunctionBody;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let start = if self.parse_full_input {
             cursor
                 .peek(0, interner)?

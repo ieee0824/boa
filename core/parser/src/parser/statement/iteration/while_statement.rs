@@ -50,7 +50,11 @@ where
 {
     type Output = WhileLoop;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::While, false), "while statement", interner)?;
 
         cursor.expect(Punctuator::OpenParen, "while statement", interner)?;

@@ -48,7 +48,11 @@ where
 {
     type Output = ast::statement::Labelled;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let label = LabelIdentifier::new(self.allow_yield, self.allow_await)
             .parse(cursor, interner)?
             .sym();

@@ -74,7 +74,11 @@ where
 {
     type Output = ClassDeclarationNode;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let span = cursor
             .expect((Keyword::Class, false), "class declaration", interner)?
             .span();
@@ -155,7 +159,11 @@ where
         Position,
     );
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let token = cursor.peek(0, interner).or_abrupt()?;
         let super_ref = match token.kind() {
             TokenKind::Keyword((Keyword::Extends, true)) => {
@@ -240,7 +248,11 @@ where
 {
     type Output = Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect(
             TokenKind::Keyword((Keyword::Extends, false)),
             "class heritage",
@@ -292,7 +304,11 @@ where
 {
     type Output = (Option<FunctionExpression>, Vec<function::ClassElement>);
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let mut constructor = None;
         let mut elements = Vec::new();
         let mut private_elements_names = FxHashMap::default();
@@ -531,7 +547,11 @@ where
 {
     type Output = (Option<FunctionExpression>, Option<function::ClassElement>);
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let token = cursor.peek(0, interner).or_abrupt()?;
         let r#static = match token.kind() {
             TokenKind::Punctuator(Punctuator::Semicolon) => {

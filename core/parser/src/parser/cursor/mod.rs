@@ -7,7 +7,7 @@ use crate::{
     parser::{OrAbrupt, ParseResult},
     source::ReadChar,
 };
-use boa_ast::{LinearPosition, PositionGroup, Punctuator, Spanned};
+use boa_ast::{LinearPosition, Position, PositionGroup, Punctuator, Spanned};
 use boa_interner::Interner;
 use buffered_lexer::BufferedLexer;
 
@@ -24,6 +24,11 @@ pub(super) enum SemicolonResult<'s> {
 #[derive(Debug)]
 pub(super) struct Cursor<R> {
     buffered_lexer: BufferedLexer<R>,
+
+    /// Stack address of the outermost active grammar production (never dereferenced).
+    parser_stack_start: usize,
+    /// Number of active grammar productions, including non-expression productions.
+    parser_depth: usize,
 
     /// Tracks if the cursor is in a arrow function declaration.
     arrow: bool,
@@ -47,11 +52,44 @@ where
     pub(super) fn new(reader: R) -> Self {
         Self {
             buffered_lexer: Lexer::new(reader).into(),
+            parser_stack_start: 0,
+            parser_depth: 0,
             arrow: false,
             json_parse: false,
             identifier: 0,
             tagged_templates_count: 0,
         }
+    }
+
+    /// Enforces a bounded native stack and grammar depth before recursive parsing.
+    ///
+    /// Hosts must provide at least 2 `MiB` of available stack at the parser entry.
+    /// Reserve 512 `KiB` for the host, the next production, lexer and error unwinding.
+    /// Addresses are only compared numerically, so either stack growth direction works.
+    pub(super) fn enter_parser(
+        &mut self,
+        stack_address: usize,
+        interner: &mut Interner,
+    ) -> ParseResult<()> {
+        const MAX_STACK_BYTES: usize = 1536 * 1024;
+        const MAX_PARSER_DEPTH: usize = 4096;
+        if self.parser_depth == 0 {
+            self.parser_stack_start = stack_address;
+        }
+        if self.parser_depth >= MAX_PARSER_DEPTH
+            || stack_address.abs_diff(self.parser_stack_start) > MAX_STACK_BYTES
+        {
+            let position = self
+                .peek(0, interner)?
+                .map_or(Position::new(1, 1), |token| token.span().start());
+            return Err(Error::general("parser recursion limit exceeded", position));
+        }
+        self.parser_depth += 1;
+        Ok(())
+    }
+
+    pub(super) fn leave_parser(&mut self) {
+        self.parser_depth -= 1;
     }
 
     /// Sets the goal symbol of the cursor to `Module`.

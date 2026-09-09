@@ -1,0 +1,137 @@
+name: Parser stack regressions
+
+on:
+  pull_request:
+    paths:
+      - core/parser/**
+      - core/ast/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/parser-stack.yml
+  push:
+    branches: [main]
+    paths:
+      - core/parser/**
+      - core/ast/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/parser-stack.yml
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  parser-stack:
+    name: Parser stack (${{ matrix.arch }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {arch: x86_64, runner: ubuntu-24.04, profile: dev}
+          - {arch: x86_64, runner: ubuntu-24.04, profile: release}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: dev}
+          - {arch: aarch64, runner: ubuntu-24.04-arm, profile: release}
+    env:
+      NO_COLOR: "1"
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: parser-stack-${{ matrix.arch }}-${{ matrix.profile }}
+      - name: Record environment and pinned Test262 revision
+        id: suite
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          {
+            uname -a
+            rustc --version --verbose
+            cargo --version
+            git show --no-patch --format=fuller HEAD
+            echo 'profile=${{ matrix.profile }} thread_stacks=2097152,8388608'
+          } > artifacts/environment.txt
+          python3 - <<'PYCODE'
+          import os, pathlib, tomllib
+          revision = tomllib.loads(pathlib.Path('test262_config.toml').read_text())['commit']
+          pathlib.Path('artifacts/test262-revision.txt').write_text(revision + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PYCODE
+      - uses: actions/checkout@v5
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Test explicit 2 MiB and 8 MiB parser threads
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p boa_parser --profile '${{ matrix.profile }}' \
+            --test parser_stack -- --nocapture 2>&1 | tee artifacts/parser-stack.log
+      - name: Build the matching unmodified profile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --profile '${{ matrix.profile }}' --bin boa_tester \
+            2>&1 | tee artifacts/build.log
+      - name: Run the original Test262 case on both main-thread stack sizes
+        shell: bash
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          set -euo pipefail
+          git -C test262 update-ref refs/heads/main '${{ steps.suite.outputs.revision }}'
+          output=debug
+          if [[ "$PROFILE" == release ]]; then output=release; fi
+          for stack_kib in 2048 8192; do
+            (
+              ulimit -c 0
+              ulimit -s "$stack_kib"
+              "target/$output/boa_tester" run --test262-path test262 \
+                --suite test/staging/sm/regress/regress-672893.js \
+                --disable-parallelism -vv
+            ) 2>&1 | tee "artifacts/test262-${stack_kib}.log"
+          done
+      - name: Require an actual Test262 pass at each stack size
+        shell: bash
+        env:
+          PROFILE: ${{ matrix.profile }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          python3 - <<'PYCODE'
+          import json, os, pathlib, re, subprocess
+          results = {}
+          for stack_kib in (2048, 8192):
+              log = pathlib.Path(f'artifacts/test262-{stack_kib}.log').read_text()
+              outcomes = re.findall(r'`[^`\n]*regress-672893\.js`: (Passed|Ignored|Failed|Panic)', log)
+              assert outcomes == ['Passed'], (stack_kib, outcomes)
+              results[str(stack_kib)] = outcomes[0]
+          report = {
+              'revision': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'test262_revision': pathlib.Path('artifacts/test262-revision.txt').read_text().strip(),
+              'arch': os.environ['ARCH'],
+              'profile': os.environ['PROFILE'],
+              'test262_stack_kib': results,
+          }
+          pathlib.Path('artifacts/results.json').write_text(json.dumps(report, indent=2) + '\n')
+          PYCODE
+      - name: Upload environment and complete diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-stack-${{ matrix.arch }}-${{ matrix.profile }}
+          path: artifacts/
+          if-no-files-found: error

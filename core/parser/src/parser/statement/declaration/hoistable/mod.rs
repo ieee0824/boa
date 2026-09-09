@@ -76,7 +76,11 @@ where
 {
     type Output = Declaration;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
         match tok.kind() {

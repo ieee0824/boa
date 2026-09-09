@@ -66,7 +66,11 @@ where
 {
     type Output = ast::function::ArrowFunction;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let next_token = cursor.peek(0, interner).or_abrupt()?;
         let start_linear_span = next_token.linear_span();
 
@@ -189,7 +193,11 @@ where
 {
     type Output = ast::function::FunctionBody;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let stmts = if let TokenKind::Punctuator(Punctuator::OpenBlock) =
             cursor.peek(0, interner).or_abrupt()?.kind()
         {
@@ -238,7 +246,11 @@ where
 {
     type Output = Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         AssignmentExpression::new(self.allow_in, false, self.allow_await).parse(cursor, interner)
     }
 }

@@ -45,7 +45,11 @@ where
 {
     type Output = AstExportDeclaration;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Export, false), "export declaration", interner)?;
 
         let tok = cursor.peek(0, interner).or_abrupt()?;
@@ -236,7 +240,11 @@ where
 {
     type Output = Box<[boa_ast::declaration::ExportSpecifier]>;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect(Punctuator::OpenBlock, "export declaration", interner)?;
 
         let mut list = Vec::new();
@@ -301,7 +309,11 @@ where
 {
     type Output = (Sym, bool);
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let tok = cursor.next(interner).or_abrupt()?;
 
         match tok.kind() {
@@ -345,7 +357,11 @@ where
 {
     type Output = boa_ast::declaration::ExportSpecifier;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let (inner_name, string_literal) = ModuleExportName.parse(cursor, interner)?;
 
         if cursor

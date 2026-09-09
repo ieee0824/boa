@@ -59,12 +59,34 @@ where
 {
     type Output = ast::Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.set_goal(InputElement::RegExp);
 
+        let lhs = match cursor.peek(0, interner).or_abrupt()?.kind() {
+            TokenKind::Keyword((Keyword::New | Keyword::Super | Keyword::Import, _)) => {
+                self.parse_keyword(cursor, interner)?
+            }
+            _ => PrimaryExpression::new(self.allow_yield, self.allow_await)
+                .parse(cursor, interner)?,
+        };
+        self.parse_tail(lhs, cursor, interner)
+    }
+}
+
+impl MemberExpression {
+    // Keep keyword-specific AST temporaries off the recursive primary-expression path.
+    fn parse_keyword<R: ReadChar>(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<ast::Expression> {
         let token = cursor.peek(0, interner).or_abrupt()?;
         let position = token.span().start();
-        let mut lhs = match token.kind() {
+        let lhs = match token.kind() {
             TokenKind::Keyword((Keyword::New | Keyword::Super | Keyword::Import, true)) => {
                 return Err(Error::general(
                     "keyword must not contain escaped characters",
@@ -223,10 +245,18 @@ where
                     }
                 }
             }
-            _ => PrimaryExpression::new(self.allow_yield, self.allow_await)
-                .parse(cursor, interner)?,
+            _ => unreachable!("keyword member expression expected"),
         };
 
+        Ok(lhs)
+    }
+
+    fn parse_tail<R: ReadChar>(
+        self,
+        mut lhs: ast::Expression,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<ast::Expression> {
         cursor.set_goal(InputElement::TemplateTail);
 
         while let Some(tok) = cursor.peek(0, interner)? {

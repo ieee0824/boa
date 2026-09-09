@@ -59,10 +59,25 @@ where
 {
     type Output = Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let lhs = ShortCircuitExpression::new(self.allow_in, self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
 
+        self.parse_tail(lhs, cursor, interner)
+    }
+}
+
+impl ConditionalExpression {
+    fn parse_tail<R: ReadChar>(
+        self,
+        lhs: Expression,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
         if let Some(tok) = cursor.peek(0, interner)?
             && tok.kind() == &TokenKind::Punctuator(Punctuator::Question)
         {

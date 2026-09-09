@@ -84,7 +84,32 @@ where
 {
     type Output = Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
+        let tok = cursor.peek(0, interner).or_abrupt()?;
+        let position = tok.span().start();
+        if matches!(
+            tok.kind(),
+            TokenKind::Punctuator(Punctuator::Inc | Punctuator::Dec)
+        ) {
+            return self.parse_prefix(cursor, interner);
+        }
+
+        let lhs = LeftHandSideExpression::new(self.allow_yield, self.allow_await)
+            .parse(cursor, interner)?;
+        Self::parse_postfix(lhs, position, cursor, interner)
+    }
+}
+
+impl UpdateExpression {
+    fn parse_prefix<R: ReadChar>(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
         let tok = cursor.peek(0, interner).or_abrupt()?;
         let position = tok.span().start();
         match tok.kind() {
@@ -98,7 +123,7 @@ where
                 let target_span_end = target.span().end();
 
                 // https://tc39.es/ecma262/#sec-update-expressions-static-semantics-early-errors
-                return (as_simple(&target, position, cursor.strict())?).map_or_else(
+                (as_simple(&target, position, cursor.strict())?).map_or_else(
                     || {
                         Err(Error::lex(LexError::Syntax(
                             "Invalid left-hand side in assignment".into(),
@@ -113,7 +138,7 @@ where
                         )
                         .into())
                     },
-                );
+                )
             }
             TokenKind::Punctuator(Punctuator::Dec) => {
                 cursor
@@ -125,7 +150,7 @@ where
                 let target_span_end = target.span().end();
 
                 // https://tc39.es/ecma262/#sec-update-expressions-static-semantics-early-errors
-                return (as_simple(&target, position, cursor.strict())?).map_or_else(
+                (as_simple(&target, position, cursor.strict())?).map_or_else(
                     || {
                         Err(Error::lex(LexError::Syntax(
                             "Invalid left-hand side in assignment".into(),
@@ -140,13 +165,18 @@ where
                         )
                         .into())
                     },
-                );
+                )
             }
-            _ => {}
+            _ => unreachable!("prefix update expression expected"),
         }
+    }
 
-        let lhs = LeftHandSideExpression::new(self.allow_yield, self.allow_await)
-            .parse(cursor, interner)?;
+    fn parse_postfix<R: ReadChar>(
+        lhs: Expression,
+        position: Position,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
         let lhs_span_start = lhs.span().start();
 
         if cursor.peek_is_line_terminator(0, interner)?.unwrap_or(true) {

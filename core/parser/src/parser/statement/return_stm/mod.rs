@@ -44,7 +44,11 @@ where
 {
     type Output = Return;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Return, false), "return statement", interner)?;
 
         if let SemicolonResult::Found(tok) = cursor.peek_semicolon(interner)? {

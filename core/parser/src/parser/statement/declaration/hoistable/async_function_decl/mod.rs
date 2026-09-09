@@ -78,7 +78,11 @@ where
 {
     type Output = AsyncFunctionDeclarationNode;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let async_token = cursor.expect(
             (Keyword::Async, false),
             "async function declaration",

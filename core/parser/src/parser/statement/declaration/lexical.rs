@@ -65,7 +65,11 @@ where
 {
     type Output = ast::declaration::LexicalDeclaration;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let tok = cursor.next(interner).or_abrupt()?;
 
         let lexical_declaration = match tok.kind() {
@@ -184,7 +188,11 @@ where
 {
     type Output = ast::declaration::LexicalDeclaration;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         // Create vectors to store the variable declarations
         // Const and Let signatures are slightly different, Const needs definitions, Lets don't
         let mut decls = Vec::new();
@@ -291,7 +299,11 @@ where
 {
     type Output = Variable;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let peek_token = cursor.peek(0, interner).or_abrupt()?;
         let position = peek_token.span().start();
 
