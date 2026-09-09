@@ -91,6 +91,7 @@ jobs:
             export RUSTC_BOOTSTRAP=1
             export RUSTFLAGS='-Zsanitizer=address -Cforce-frame-pointers=yes'
             export CARGO_PROFILE_RELEASE_DEBUG=1
+            export CARGO_PROFILE_RELEASE_STRIP=none
             cargo build --locked -j 1 --release --target x86_64-unknown-linux-gnu --bin boa_tester \
               > ../artifacts/build.log 2>&1
           else
