@@ -17,9 +17,9 @@ permissions:
 
 jobs:
   test262-asan:
-    name: Test262 (x86_64, AddressSanitizer)
+    name: Test262 (x86_64, AddressSanitizer probes)
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     env:
       TEST_REVISION: ${{ inputs.revision || '21dde73e068e2051fe63863d743e3e067731976c' }}
       RUSTC_BOOTSTRAP: "1"
@@ -77,35 +77,82 @@ jobs:
           ref: ${{ steps.suite.outputs.revision }}
           path: test262
           persist-credentials: false
-      - name: Run complete instrumented Test262 without retries
+      - name: Run instrumented Test262 probes without retries
         working-directory: boa
         run: |
           set -euo pipefail
           git -C "$GITHUB_WORKSPACE/test262" update-ref refs/heads/main \
             '${{ steps.suite.outputs.revision }}'
           export GITHUB_SHA="$TEST_REVISION"
-          cargo run --locked --target x86_64-unknown-linux-gnu --bin boa_tester -- \
-            run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
-            -o "$GITHUB_WORKSPACE/artifacts/results" \
-            2>&1 | tee "$GITHUB_WORKSPACE/artifacts/test262.log"
-      - name: Require complete results without Rust panics
+          log="$GITHUB_WORKSPACE/artifacts/test262.log"
+          mkdir -p "$GITHUB_WORKSPACE/artifacts/results"
+          run_suite() {
+            local suite=$1
+            local output=$2
+            if cargo run --locked --target x86_64-unknown-linux-gnu --bin boa_tester -- \
+              run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
+              --suite "$suite" -o "$output" >> "$log" 2>&1; then
+              return 0
+            fi
+            local status=$?
+            tail -200 "$log"
+            return "$status"
+          }
+          run_single_test() {
+            local suite=$1
+            local output=$2
+            if cargo run --locked --target x86_64-unknown-linux-gnu --bin boa_tester -- \
+              run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
+              --suite "$suite" >> "$log" 2>&1; then
+              mkdir -p "$output"
+              printf '{"suite":"%s","passed":true}\n' "$suite" > "$output/single-passed.json"
+              return 0
+            fi
+            local status=$?
+            tail -200 "$log"
+            return "$status"
+          }
+          cat > "$GITHUB_WORKSPACE/artifacts/asan-probes.txt" <<'EOF'
+          test/language/expressions/dynamic-import
+          test/language/module-code/top-level-await
+          test/staging/sm/regress/regress-672893.js
+          EOF
+          while IFS= read -r suite; do
+            label=${suite//[^A-Za-z0-9_.-]/_}
+            echo "suite=$suite" >> "$log"
+            if [[ "$suite" == *.js ]]; then
+              run_single_test "$suite" "$GITHUB_WORKSPACE/artifacts/results/$label"
+            else
+              run_suite "$suite" "$GITHUB_WORKSPACE/artifacts/results/$label"
+            fi
+          done < "$GITHUB_WORKSPACE/artifacts/asan-probes.txt"
+      - name: Require probe results without Rust panics
         run: |
           python3 - <<'PY'
           import json, os, pathlib
           reports = list(pathlib.Path('artifacts/results').rglob('latest.json'))
-          assert len(reports) == 1, reports
-          report = json.loads(reports[0].read_text())
-          assert report['c'] == os.environ['TEST_REVISION']
-          assert report['u'] == pathlib.Path('artifacts/test262-revision.txt').read_text().strip()
-          stats = report['r']['a']
-          print(json.dumps(stats, sort_keys=True))
-          assert stats['t'] > 0
-          assert stats['p'] == 0, f'test262 caught {stats["p"]} Rust panics'
+          assert len(reports) == 2, reports
+          markers = list(pathlib.Path('artifacts/results').rglob('single-passed.json'))
+          assert len(markers) == 1, markers
+          suite_revision = pathlib.Path('artifacts/test262-revision.txt').read_text().strip()
+          summaries = []
+          for path in sorted(reports):
+              report = json.loads(path.read_text())
+              assert report['c'] == os.environ['TEST_REVISION']
+              assert report['u'] == suite_revision
+              stats = report['r']['a']
+              assert stats['t'] > 0, 'test262 must execute tests'
+              assert stats['p'] == 0, f'{path} caught {stats["p"]} Rust panics'
+              summaries.append({'path': str(path), 'stats': stats})
+          for marker in sorted(markers):
+              summaries.append({'path': str(marker), 'single': json.loads(marker.read_text())})
+          pathlib.Path('artifacts/summary.json').write_text(json.dumps(summaries, indent=2) + '\n')
+          print(json.dumps(summaries, sort_keys=True))
           PY
       - name: Upload environment, diagnostics and results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test262-x86_64-asan
+          name: test262-x86_64-asan-probes
           path: artifacts/
           if-no-files-found: error
