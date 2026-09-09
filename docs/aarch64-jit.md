@@ -46,9 +46,14 @@ On macOS arm64, the feature requires macOS 11.4 or later. It uses `MAP_JIT` with
 and a statically registered callback. Only that callback copies bounded bytes;
 the OS restores executable permission before returning. Publication then calls
 [`sys_icache_invalidate`](https://developer.apple.com/documentation/apple-silicon/porting-just-in-time-compilers-to-apple-silicon).
-Although `mmap` expresses both capabilities, write and execute permissions are
-exclusive for the current thread. Published code is immutable through this API,
-and mappings remain local to their owning runtime/thread.
+When `pthread_jit_write_protect_supported_np()` reports support, write and execute
+permissions are exclusive for the current thread. ARM64 virtual machines may lack
+that facility: libpthread then invokes the callback without changing permissions.
+In that case the allocator removes execute permission before writing code and
+publishes with `mprotect(PROT_READ | PROT_EXEC)` before flushing the instruction
+cache. A failed transition returns an OS error and releases the mapping. The same
+write-rejection test must pass on either path. Published code is immutable through
+this API, and mappings remain local to their owning runtime/thread.
 
 The current allocator owns one mapping per code object. Normal/ad-hoc signed
 macOS binaries are the supported execution environment. Hardened Runtime
