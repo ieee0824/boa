@@ -1,4 +1,8 @@
 #![allow(unused_crate_dependencies, missing_docs)]
+#![expect(
+    clippy::unused_async_trait_impl,
+    reason = "Fixture module parsing and errors stay deferred until the loader future is polled."
+)]
 
 use std::rc::Rc;
 
