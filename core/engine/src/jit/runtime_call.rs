@@ -32,8 +32,6 @@ use super::{
 static NEXT_DESCRIPTOR_ID: AtomicU64 = AtomicU64::new(1 << 32);
 static NEXT_FRAME_ID: AtomicU64 = AtomicU64::new(1 << 32);
 
-const RUNTIME_CALL_RETURN_PC: u32 = 9;
-
 /// Allocation operation implemented by the fixed JIT runtime-call table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JitAllocationKind {
@@ -236,26 +234,39 @@ struct PendingCall {
 struct RuntimeCallCode {
     memory: ExecutableMemory,
     descriptor: Arc<JitFrameDescriptor>,
+    return_pc: u32,
 }
 
 impl RuntimeCallCode {
     fn compile(frame_register_count: u32, safepoint_kind: SafepointKind) -> Result<Self, JitError> {
-        #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+        #[cfg(not(all(
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            any(target_os = "linux", target_os = "macos")
+        )))]
         {
             let _ = (frame_register_count, safepoint_kind);
             return Err(JitError::UnsupportedPlatform);
         }
-        #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+        #[cfg(all(
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            any(target_os = "linux", target_os = "macos")
+        ))]
         {
             // System V AMD64: align rsp, load the fixed trampoline from frame[0],
             // call it with the frame pointer still in rdi, restore rsp, return.
-            let code = [
-                0x48, 0x83, 0xec, 0x08, // sub rsp, 8
-                0x48, 0x8b, 0x07, // mov rax, [rdi]
-                0xff, 0xd0, // call rax (return PC = +9)
-                0x48, 0x83, 0xc4, 0x08, // add rsp, 8
-                0xc3, // ret
-            ];
+            #[cfg(target_arch = "x86_64")]
+            let (code, return_pc) = (
+                [
+                    0x48, 0x83, 0xec, 0x08, // sub rsp, 8
+                    0x48, 0x8b, 0x07, // mov rax, [rdi]
+                    0xff, 0xd0, // call rax (return PC = +9)
+                    0x48, 0x83, 0xc4, 0x08, // add rsp, 8
+                    0xc3, // ret
+                ],
+                9,
+            );
+            #[cfg(target_arch = "aarch64")]
+            let (code, return_pc) = super::aarch64::runtime_call()?;
             let descriptor = Arc::new(JitFrameDescriptor::new(
                 JitFrameDescriptorId(NEXT_DESCRIPTOR_ID.fetch_add(1, Ordering::Relaxed)),
                 u32::try_from(code.len()).map_err(|_| JitError::InvalidCodeSize)?,
@@ -263,7 +274,7 @@ impl RuntimeCallCode {
                     .map_err(|_| JitError::InvalidCodeSize)?,
                 frame_register_count,
                 [Safepoint {
-                    machine_offset: RUNTIME_CALL_RETURN_PC,
+                    machine_offset: return_pc,
                     bytecode_offset: 0,
                     kind: safepoint_kind,
                     stack_map: StackMap::new(
@@ -276,13 +287,14 @@ impl RuntimeCallCode {
             Ok(Self {
                 memory: writable.publish()?,
                 descriptor,
+                return_pc,
             })
         }
     }
 
     fn enter(&self, frame: &mut RuntimeCallFrame) {
-        // SAFETY: compile emits one fixed System V function taking the frame in
-        // rdi. The RX mapping and stack frame remain live for the whole call.
+        // SAFETY: compile emits the target C ABI, taking the frame in rdi on
+        // x86_64 or x0 on ARM64. The code and frame remain live throughout.
         let entry: unsafe extern "C" fn(*mut RuntimeCallFrame) =
             unsafe { std::mem::transmute(self.memory.as_ptr()) };
         unsafe { entry(frame) };
@@ -508,7 +520,7 @@ impl JitRuntimeCall {
                 .active_frames
                 .push(ActiveJitFrame {
                     header: frame.header,
-                    safepoint_pc: code.memory.as_ptr() as usize + RUNTIME_CALL_RETURN_PC as usize,
+                    safepoint_pc: code.memory.as_ptr() as usize + code.return_pc as usize,
                 })
                 .expect("the runtime constructs a valid nested frame chain");
             state.active_roots.push(ActiveFrameRoots {
@@ -699,7 +711,10 @@ mod tests {
     use boa_gc::WeakGc;
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn exception_plan_removes_nested_frames_and_their_spill_roots() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(1, 0).unwrap();
@@ -733,7 +748,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+    #[cfg(not(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    )))]
     fn unsupported_target_fails_loudly() {
         assert!(matches!(
             JitRuntimeCall::new(0, 0),
@@ -742,7 +760,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn allocations_cross_generated_boundary_and_return_values() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(4, 2).unwrap();
@@ -791,7 +812,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn gc_slow_path_nested_call_exception_and_failure_are_distinct() {
         let mut context = Context::default();
         let mut runtime = JitRuntimeCall::new(2, 0).unwrap();
@@ -866,7 +890,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn stack_map_roots_survive_minor_and_major_collection_then_die() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(2, 1).unwrap();
@@ -898,7 +925,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn generated_helper_errors_cross_js_catch_finally_rethrow_and_gc_boundary() {
         fn helper_throw(_: &JsValue, _: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
             let runtime = JitRuntimeCall::new(1, 0).map_err(RuntimeCallError::into_js_error)?;
@@ -960,7 +990,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     fn old_to_young_store_survives_minor_collection_from_jit_root() {
         let mut context = Context::default();
         let runtime = JitRuntimeCall::new(1, 1).unwrap();

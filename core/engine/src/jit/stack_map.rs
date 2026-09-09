@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeSet, error::Error, fmt, sync::Arc};
 
-use super::JitExceptionMetadata;
+use super::{JitArchitecture, JitExceptionMetadata, JitRegisterMap};
 
 /// Stable identity of one installed JIT frame descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,7 +17,7 @@ pub struct JitFrameDescriptorId(pub u64);
 /// A location that contains a live garbage-collected value at a safepoint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ValueLocation {
-    /// Architecture register number in the emitter's documented register set.
+    /// Register number in the frame descriptor's documented architecture map.
     MachineRegister(u8),
     /// Signed byte offset from the JIT frame pointer.
     StackSlot(i32),
@@ -95,6 +95,11 @@ pub enum FrameMetadataError {
         /// Rejected frame-register index.
         register: u32,
     },
+    /// A map names an unknown register, a stack pointer, or a reserved register.
+    InvalidMachineRegister {
+        /// Rejected architecture register number.
+        register: u8,
+    },
     /// A map names a native stack slot beyond the frame allocation.
     StackSlotOutOfBounds {
         /// Rejected frame-pointer-relative byte offset.
@@ -122,6 +127,7 @@ impl Error for FrameMetadataError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JitFrameDescriptor {
     id: JitFrameDescriptorId,
+    architecture: JitArchitecture,
     code_size: u32,
     frame_size: u32,
     frame_register_count: u32,
@@ -144,6 +150,7 @@ impl JitFrameDescriptor {
         let safepoints = safepoints.into_iter().collect::<Box<[_]>>();
         let descriptor = Self {
             id,
+            architecture: JitArchitecture::host(),
             code_size,
             frame_size,
             frame_register_count,
@@ -178,6 +185,11 @@ impl JitFrameDescriptor {
             previous = Some(safepoint.machine_offset);
             for location in safepoint.stack_map.live_values() {
                 match *location {
+                    ValueLocation::MachineRegister(register)
+                        if !self.register_map().is_value_register(register) =>
+                    {
+                        return Err(FrameMetadataError::InvalidMachineRegister { register });
+                    }
                     ValueLocation::FrameRegister(register)
                         if register >= self.frame_register_count =>
                     {
@@ -199,6 +211,12 @@ impl JitFrameDescriptor {
     /// Returns this descriptor's stable identity.
     pub const fn id(&self) -> JitFrameDescriptorId {
         self.id
+    }
+
+    /// Returns the register-number convention used by this code object's maps.
+    #[must_use]
+    pub const fn register_map(&self) -> JitRegisterMap {
+        self.architecture.registers()
     }
     #[must_use]
     /// Returns the generated code object's size in bytes.
@@ -546,6 +564,27 @@ mod tests {
         )
         .unwrap();
         assert_eq!(descriptor.safepoints().len(), 4);
+        assert_eq!(
+            descriptor.register_map().architecture,
+            JitArchitecture::host()
+        );
+        for register in [255, descriptor.register_map().stack_pointer] {
+            assert!(matches!(
+                JitFrameDescriptor::new(
+                    JitFrameDescriptorId(99),
+                    8,
+                    8,
+                    0,
+                    [point(
+                        4,
+                        0,
+                        SafepointKind::Call,
+                        &[ValueLocation::MachineRegister(register)]
+                    )],
+                ),
+                Err(FrameMetadataError::InvalidMachineRegister { .. })
+            ));
+        }
         assert!(matches!(
             JitFrameDescriptor::new(
                 JitFrameDescriptorId(4),

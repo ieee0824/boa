@@ -823,7 +823,10 @@ mod tests {
         ));
     }
 
-    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    #[cfg(all(
+        any(target_arch = "x86_64", target_arch = "aarch64"),
+        any(target_os = "linux", target_os = "macos")
+    ))]
     #[test]
     fn hotness_install_invalidation_and_recompile_are_connected() {
         use crate::jit::{JitCacheKey, JitCodeCache};
