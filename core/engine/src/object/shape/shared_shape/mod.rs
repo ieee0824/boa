@@ -227,7 +227,7 @@ where
         }
         let new_inner_shape = Inner {
             forward_transitions: ForwardTransition::default(),
-            prototype: prototype.clone(),
+            prototype,
             property_table: self.property_table().clone(),
             property_count: self.property_count(),
             previous: Some(self.root_handle().into_edge()),
@@ -237,7 +237,7 @@ where
         let new_shape = SharedShape::new(new_inner_shape);
 
         self.forward_transitions()
-            .insert_prototype(prototype, &new_shape.inner);
+            .insert_prototype(&new_shape.inner.prototype, &new_shape.inner);
 
         new_shape
     }

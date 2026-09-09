@@ -356,6 +356,10 @@ pub(crate) enum SpecEdition {
     ///
     /// <https://262.ecma-international.org/16.0>
     ES16,
+    /// ECMAScript 17th Edition
+    ///
+    /// <https://262.ecma-international.org/17.0>
+    ES17,
     /// The edition being worked on right now.
     ///
     /// A draft is currently available [here](https://tc39.es/ecma262).
@@ -421,6 +425,7 @@ impl SpecEdition {
             Self::ES14,
             Self::ES15,
             Self::ES16,
+            Self::ES17,
             Self::ESNext,
         ]
         .into_iter()

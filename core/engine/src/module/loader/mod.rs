@@ -256,15 +256,15 @@ impl<T: ModuleLoader> DynModuleLoader for T {
 pub struct IdleModuleLoader;
 
 impl ModuleLoader for IdleModuleLoader {
-    async fn load_imported_module(
+    fn load_imported_module(
         self: Rc<Self>,
         _referrer: Referrer,
         _specifier: JsString,
         _context: &AsyncContext<'_>,
-    ) -> JsResult<Module> {
-        Err(JsNativeError::typ()
+    ) -> impl Future<Output = JsResult<Module>> {
+        std::future::ready(Err(JsNativeError::typ()
             .with_message("module resolution is disabled for this context")
-            .into())
+            .into()))
     }
 }
 

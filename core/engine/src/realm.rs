@@ -343,3 +343,39 @@ mod tests {
         assert!(environment.kind().as_global().is_some());
     }
 }
+
+#[cfg(test)]
+mod lifetime_tests {
+    use crate::{Context, Source};
+    use boa_gc::{Rooted, WeakGcEdge};
+
+    #[test]
+    fn discarded_realm_is_not_rooted_by_shared_prototype_transitions() {
+        let mut context = Context::default();
+        let realm = context.create_realm().unwrap();
+        let parent = context.enter_realm(realm);
+        let weak_global = Rooted::new(WeakGcEdge::new_rooted(
+            &context.global_object().root_inner(),
+        ));
+        let function = context
+            .eval(Source::from_bytes("(() => 42)"))
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .root();
+        let realm = context.enter_realm(parent);
+        drop(realm);
+        context.clear_kept_objects();
+        boa_gc::force_collect();
+        assert!(
+            weak_global.is_upgradable(),
+            "a retained function keeps its Realm alive"
+        );
+        drop(function);
+        boa_gc::force_collect();
+        assert!(
+            !weak_global.is_upgradable(),
+            "a shared shape cache must not retain a discarded Realm"
+        );
+    }
+}

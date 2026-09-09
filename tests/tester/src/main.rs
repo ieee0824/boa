@@ -611,6 +611,7 @@ struct VersionedStats {
     es14: Statistics,
     es15: Statistics,
     es16: Statistics,
+    es17: Statistics,
 }
 
 impl<'de> Deserialize<'de> for VersionedStats {
@@ -635,6 +636,8 @@ impl<'de> Deserialize<'de> for VersionedStats {
             es15: Option<Statistics>,
             #[serde(default)]
             es16: Option<Statistics>,
+            #[serde(default)]
+            es17: Option<Statistics>,
         }
 
         let inner = Inner::deserialize(deserializer)?;
@@ -652,10 +655,12 @@ impl<'de> Deserialize<'de> for VersionedStats {
             es14,
             es15,
             es16,
+            es17,
         } = inner;
         let es14 = es14.unwrap_or(es13);
         let es15 = es15.unwrap_or(es14);
         let es16 = es16.unwrap_or(es15);
+        let es17 = es17.unwrap_or(es16);
 
         Ok(Self {
             es5,
@@ -670,6 +675,7 @@ impl<'de> Deserialize<'de> for VersionedStats {
             es14,
             es15,
             es16,
+            es17,
         })
     }
 }
@@ -701,6 +707,7 @@ impl VersionedStats {
             SpecEdition::ES14 => self.es14,
             SpecEdition::ES15 => self.es15,
             SpecEdition::ES16 => self.es16,
+            SpecEdition::ES17 => self.es17,
             SpecEdition::ESNext => return None,
         };
         Some(stats)
@@ -722,6 +729,7 @@ impl VersionedStats {
             SpecEdition::ES14 => &mut self.es14,
             SpecEdition::ES15 => &mut self.es15,
             SpecEdition::ES16 => &mut self.es16,
+            SpecEdition::ES17 => &mut self.es17,
             SpecEdition::ESNext => return None,
         };
         Some(stats)
@@ -745,6 +753,7 @@ impl Add for VersionedStats {
             es14: self.es14 + rhs.es14,
             es15: self.es15 + rhs.es15,
             es16: self.es16 + rhs.es16,
+            es17: self.es17 + rhs.es17,
         }
     }
 }
@@ -763,6 +772,7 @@ impl AddAssign for VersionedStats {
         self.es14 += rhs.es14;
         self.es15 += rhs.es15;
         self.es16 += rhs.es16;
+        self.es17 += rhs.es17;
     }
 }
 
@@ -1018,4 +1028,34 @@ enum Phase {
 #[allow(dead_code)]
 struct Locale {
     locale: Box<[Box<str>]>,
+}
+
+#[cfg(test)]
+mod result_edition_tests {
+    use super::*;
+
+    #[test]
+    fn current_report_editions_preserve_test_outcomes() {
+        let result: TestResult = serde_json::from_str(r#"{"n":"example","v":17,"r":"F"}"#).unwrap();
+        assert_eq!(result.edition, SpecEdition::ES17);
+        assert_eq!(result.result, TestOutcomeResult::Failed);
+        assert_eq!(serde_json::to_value(&result).unwrap()["v"], 17);
+    }
+
+    #[test]
+    fn versioned_reports_preserve_current_and_legacy_counts() {
+        let mut stats = VersionedStats::default();
+        stats.apply(SpecEdition::ES16, |stats| stats.total += 1);
+        stats.apply(SpecEdition::ES17, |stats| stats.total += 2);
+        let mut json = serde_json::to_value(stats).unwrap();
+        let current: VersionedStats = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(current.get(SpecEdition::ES16).unwrap().total, 1);
+        assert_eq!(current.get(SpecEdition::ES17).unwrap().total, 3);
+        let mut combined = current + current;
+        combined += current;
+        assert_eq!(combined.get(SpecEdition::ES17).unwrap().total, 9);
+        json.as_object_mut().unwrap().remove("es17");
+        let legacy: VersionedStats = serde_json::from_value(json).unwrap();
+        assert_eq!(legacy.get(SpecEdition::ES17).unwrap().total, 1);
+    }
 }

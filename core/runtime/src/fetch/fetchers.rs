@@ -11,12 +11,14 @@ use std::rc::Rc;
 pub struct ErrorFetcher;
 
 impl Fetcher for ErrorFetcher {
-    async fn fetch(
+    fn fetch(
         self: Rc<Self>,
         _request: JsRequest,
         _context: &AsyncContext<'_>,
-    ) -> JsResult<JsResponse> {
-        Err(js_error!(ReferenceError: "ErrorFetcher used in fetch API."))
+    ) -> impl Future<Output = JsResult<JsResponse>> {
+        std::future::ready(Err(
+            js_error!(ReferenceError: "ErrorFetcher used in fetch API."),
+        ))
     }
 }
 
@@ -30,6 +32,10 @@ pub struct BlockingReqwestFetcher {
 
 #[cfg(feature = "reqwest-blocking")]
 impl Fetcher for BlockingReqwestFetcher {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "Blocking I/O must stay deferred until the returned future is polled."
+    )]
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
