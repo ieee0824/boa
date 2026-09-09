@@ -1561,10 +1561,7 @@ mod tests {
             let mut context = Context::default();
             context.set_baseline_jit_enabled(enabled);
             let value = context.eval(Source::from_bytes(SOURCE)).unwrap();
-            assert_eq!(
-                value,
-                crate::JsValue::from(crate::js_string!("boolean:false"))
-            );
+            assert_eq!(value, JsValue::from(crate::js_string!("boolean:false")));
             results.push(value.display().to_string());
             let diagnostics = context.arithmetic_jit_diagnostics();
             if enabled {

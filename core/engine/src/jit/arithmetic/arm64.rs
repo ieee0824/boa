@@ -411,6 +411,11 @@ mod tests {
     fn large_register_indices_spill_values_and_boolean_tags() {
         const SOURCE: u32 = 5000;
         const DESTINATION: u32 = 5001;
+        unsafe extern "C" {
+            // Defined by the foundation's test-only assembly probe. It checks
+            // x19-x29, d8-d15 and native stack alignment around this leaf body.
+            fn boa_jit_abi_probe(entry: *const u8, frame: *mut libc::c_void) -> u64;
+        }
         let mut a = Assembler::default();
         let entry = a.position();
         a.memory(
@@ -445,11 +450,6 @@ mod tests {
             },
             poll_remaining: u64::MAX,
         };
-        unsafe extern "C" {
-            // Defined by the foundation's test-only assembly probe. It checks
-            // x19-x29, d8-d15 and native stack alignment around this leaf body.
-            fn boa_jit_abi_probe(entry: *const u8, frame: *mut libc::c_void) -> u64;
-        }
         // SAFETY: the validated leaf uses the bounded buffers above and the
         // probe preserves its own caller's registers after checking sentinels.
         assert_eq!(
