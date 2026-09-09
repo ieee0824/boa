@@ -5,7 +5,9 @@ use std::{
     mem::offset_of,
 };
 
-use super::{DeoptReason, JitError, Label, NativeFrame, PropertyBinding, signed, unsigned};
+use super::{
+    DeoptReason, JitError, Label, NativeFrame, PropertyBinding, register_operand, signed, unsigned,
+};
 
 #[derive(Default)]
 pub(super) struct Assembler {
@@ -110,9 +112,21 @@ pub(super) fn emit_instruction(
     a: &mut Assembler,
     i: &crate::vm::BytecodeInstruction,
     properties: &[PropertyBinding],
-    object_move_offsets: &BTreeSet<u32>,
+    object_move_offsets: &BTreeMap<u32, u32>,
     bailouts: &mut BTreeSet<(u32, DeoptReason)>,
 ) -> Result<(), JitError> {
+    if !matches!(i.name, "Move" | "GetPropertyByName" | "SetPropertyByName") {
+        for operand in &i.operands {
+            if operand.name != "dst"
+                && let Some(source) = register_operand(i.name, operand.name, operand.value)
+            {
+                a.bytes(&[0x41, 0x80, 0xbb]); // cmp byte [r11 + source], 3
+                a.u32(source);
+                a.bytes(&[3]);
+                bailout(a, &[0x0f, 0x84], i.offset, DeoptReason::TypeGuard, bailouts);
+            }
+        }
+    }
     let dst = || {
         unsigned(i, "dst")
             .and_then(|v| u32::try_from(v).ok())
@@ -135,7 +149,9 @@ pub(super) fn emit_instruction(
             a.bytes(&[0x48, 0x83, 0x47, 0x10, 0x01]);
         }
         "Move" => {
-            if object_move_offsets.contains(&i.offset) {
+            if let Some(&source) = object_move_offsets.get(&i.offset) {
+                immediate(a, i64::from(source));
+                store_rax(a, dst()?, 3);
                 return Ok(());
             }
             let source = src("src")?;
@@ -300,6 +316,10 @@ pub(super) fn emit_instruction(
                 load(a, binding.scratch_register, false);
                 store_rax(a, dst()?, 1);
             } else {
+                a.bytes(&[0x41, 0x80, 0xbb]); // cmp byte [r11 + value], 2
+                a.u32(src("value")?);
+                a.bytes(&[2]);
+                bailout(a, &[0x0f, 0x83], i.offset, DeoptReason::TypeGuard, bailouts);
                 load(a, src("value")?, false);
                 store_rax(a, binding.scratch_register, 1);
             }

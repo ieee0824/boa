@@ -6,7 +6,8 @@ The existing loop analysis, hotness, code map, scalar frame, safepoints and deop
 recipes select the architecture emitter. Both backends support the same bounded
 safe-integer operations. Other ECMAScript Numbers, including NaN, infinities,
 fractions and negative zero, resume the interpreter at the guarded bytecode.
-Property regions remain an explicit interpreter fallback until Gate 5-3.
+Property regions use the shared shape/IC guards and typed slot buffers described
+in [ARM64 properties and helpers](aarch64-properties.md).
 
 ## Generated code
 

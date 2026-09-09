@@ -35,8 +35,8 @@ use super::{
 
 static NEXT_DESCRIPTOR: AtomicU64 = AtomicU64::new(1 << 48);
 static NEXT_FRAME: AtomicU64 = AtomicU64::new(1 << 48);
-const RETURN_PC: u32 = 9;
 // System V AMD64: align the stack, call frame.trampoline(frame), return.
+#[cfg(not(target_arch = "aarch64"))]
 const STUB: [u8; 14] = [
     0x48, 0x83, 0xec, 0x08, 0x48, 0x8b, 0x07, 0xff, 0xd0, 0x48, 0x83, 0xc4, 0x08, 0xc3,
 ];
@@ -63,12 +63,13 @@ struct RuntimeCode {
     memory: ExecutableMemory,
     descriptor: Arc<JitFrameDescriptor>,
     entries: BTreeMap<u32, u32>,
+    return_pc: u32,
 }
 
 impl RuntimeCode {
     fn compile(block: &CodeBlock) -> Result<Self, JitError> {
         if !cfg!(all(
-            target_arch = "x86_64",
+            any(target_arch = "x86_64", target_arch = "aarch64"),
             any(target_os = "linux", target_os = "macos")
         )) {
             return Err(JitError::UnsupportedPlatform);
@@ -77,6 +78,10 @@ impl RuntimeCode {
             .bytecode_contract()
             .verify()
             .map_err(|_| JitError::InvalidCodeSize)?;
+        #[cfg(target_arch = "aarch64")]
+        let (stub, return_pc) = super::aarch64::runtime_call()?;
+        #[cfg(not(target_arch = "aarch64"))]
+        let (stub, return_pc) = (STUB, 9);
         let mut bytes = Vec::new();
         let mut entries = BTreeMap::new();
         let mut safepoints = Vec::new();
@@ -88,7 +93,9 @@ impl RuntimeCode {
             let offset = u32::try_from(bytes.len()).map_err(|_| JitError::InvalidCodeSize)?;
             entries.insert(instruction.offset, offset);
             safepoints.push(Safepoint {
-                machine_offset: offset + RETURN_PC,
+                machine_offset: offset
+                    .checked_add(return_pc)
+                    .ok_or(JitError::InvalidCodeSize)?,
                 bytecode_offset: instruction.offset,
                 kind: if allocation(opcode) {
                     SafepointKind::Allocation
@@ -98,7 +105,7 @@ impl RuntimeCode {
                 // No values are copied out of the VM into this native frame.
                 stack_map: StackMap::new([]),
             });
-            bytes.extend_from_slice(&STUB);
+            bytes.extend_from_slice(&stub);
         }
         let metadata = JitExceptionMetadata::new(
             snapshot
@@ -134,6 +141,7 @@ impl RuntimeCode {
             memory: memory.publish()?,
             descriptor,
             entries,
+            return_pc,
         })
     }
 }
@@ -189,7 +197,10 @@ struct Activation {
 }
 
 #[cfg(test)]
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 mod tests;
 
 #[derive(Debug, Default)]
@@ -305,7 +316,7 @@ impl VmRuntime {
                     },
                     safepoint_pc: code.memory.as_ptr() as usize
                         + frame.machine_offset as usize
-                        + RETURN_PC as usize,
+                        + code.return_pc as usize,
                 })
                 .expect("generated callers are linked in physical stack order");
             previous = Some(frame.id);

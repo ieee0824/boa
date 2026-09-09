@@ -8,7 +8,9 @@ use std::{
     mem::offset_of,
 };
 
-use super::{DeoptReason, JitError, Label, NativeFrame, PropertyBinding, signed, unsigned};
+use super::{
+    DeoptReason, JitError, Label, NativeFrame, PropertyBinding, register_operand, signed, unsigned,
+};
 use crate::jit::aarch64;
 
 const FRAME: u8 = 0;
@@ -160,10 +162,23 @@ impl Assembler {
 pub(super) fn emit_instruction(
     a: &mut Assembler,
     i: &crate::vm::BytecodeInstruction,
-    _properties: &[PropertyBinding],
-    _object_move_offsets: &BTreeSet<u32>,
+    properties: &[PropertyBinding],
+    object_move_offsets: &BTreeMap<u32, u32>,
     bailouts: &mut BTreeSet<(u32, DeoptReason)>,
 ) -> Result<(), JitError> {
+    // Opaque object aliases must return to the VM before scalar operations
+    // perform JavaScript coercion or compare object identities.
+    if !matches!(i.name, "Move" | "GetPropertyByName" | "SetPropertyByName") {
+        for operand in &i.operands {
+            if operand.name != "dst"
+                && let Some(source) = register_operand(i.name, operand.name, operand.value)
+            {
+                a.memory(true, 1, TEMP, TAGS, u64::from(source));
+                a.word(0xf100_0c1f | (u32::from(TEMP) << 5)); // cmp temp, #3
+                a.bailout(EQ, i.offset, DeoptReason::TypeGuard, bailouts);
+            }
+        }
+    }
     let operand = |name| {
         unsigned(i, name)
             .and_then(|v| u32::try_from(v).ok())
@@ -204,6 +219,13 @@ pub(super) fn emit_instruction(
             );
         }
         "Move" => {
+            // Keep the rooted VM source register as an opaque alias payload so
+            // every exit can reconstruct an overwritten temporary correctly.
+            if let Some(&source) = object_move_offsets.get(&i.offset) {
+                a.immediate(LEFT, u64::from(source));
+                a.store(operand("dst")?, 3);
+                return Ok(());
+            }
             let source = operand("src")?;
             let destination = operand("dst")?;
             a.load(source, LEFT);
@@ -340,6 +362,26 @@ pub(super) fn emit_instruction(
                 Some(if i.name == "JumpIfTrue" { NE } else { EQ }),
                 Label::Bytecode(operand("address")?),
             );
+        }
+        "GetPropertyByName" | "SetPropertyByName" => {
+            let ic_index = operand("ic_index")?;
+            let binding = properties
+                .iter()
+                .find(|binding| binding.ic_index == ic_index)
+                .ok_or(JitError::InvalidCodeSize)?;
+            if i.name == "GetPropertyByName" {
+                a.load(binding.scratch_register, LEFT);
+                a.store(operand("dst")?, 1);
+            } else {
+                let value = operand("value")?;
+                // A Boolean generated inside the loop cannot be committed to
+                // an object as a Number. Deopt before this property operation.
+                a.memory(true, 1, TEMP, TAGS, u64::from(value));
+                a.word(0xf100_081f | (u32::from(TEMP) << 5)); // cmp temp, #2
+                a.bailout(GE, i.offset, DeoptReason::TypeGuard, bailouts);
+                a.load(value, LEFT);
+                a.store(binding.scratch_register, 1);
+            }
         }
         _ => return Err(JitError::InvalidCodeSize),
     }
