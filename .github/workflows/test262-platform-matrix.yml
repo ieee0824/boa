@@ -8,7 +8,7 @@ on:
       revision:
         description: Exact Boa commit to compare on every environment
         type: string
-        default: d803bce094ff269d3abf741587fb23b82e13e302
+        default: 8f0bdfe013a71f3c8b81d84d345f44ea438b3544
         required: true
 
 permissions:
@@ -30,7 +30,7 @@ jobs:
     env:
       RAYON_NUM_THREADS: "2"
       RUST_BACKTRACE: full
-      TEST_REVISION: ${{ inputs.revision || 'd803bce094ff269d3abf741587fb23b82e13e302' }}
+      TEST_REVISION: ${{ inputs.revision || '8f0bdfe013a71f3c8b81d84d345f44ea438b3544' }}
     steps:
       - name: Require the same exact commit on every runner
         shell: bash
@@ -93,6 +93,21 @@ jobs:
             run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
             -o "$GITHUB_WORKSPACE/artifacts/results" \
             2>&1 | tee "$GITHUB_WORKSPACE/artifacts/test262.log"
+      - name: Require complete results without Rust panics
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          reports = list(pathlib.Path('artifacts/results').rglob('latest.json'))
+          assert len(reports) == 1, reports
+          report = json.loads(reports[0].read_text())
+          assert report['c'] == os.environ['TEST_REVISION']
+          assert report['u'] == pathlib.Path('artifacts/test262-revision.txt').read_text().strip()
+          stats = report['r']['a']
+          print(json.dumps(stats, sort_keys=True))
+          assert stats['t'] > 0, 'test262 must execute tests'
+          assert stats['p'] == 0, f'test262 caught {stats["p"]} Rust panics'
+          PY
       - name: Upload environment, per-test log and results
         if: always()
         uses: actions/upload-artifact@v4
