@@ -22,16 +22,16 @@ jobs:
             revision: ef6ef4f19a8b18c018746996bb6b8bc33a2d89c6
             mode: release
             stack: '2097152'
-          - revision_name: issue-541
-            revision: bac265c262b1bf92553f43302bc9d9465eb0c2ad
+          - revision_name: promise-fix
+            revision: ba9519ea08029a0f18df7850293955db9e5a8424
             mode: release
             stack: '2097152'
           - revision_name: before-541
             revision: ef6ef4f19a8b18c018746996bb6b8bc33a2d89c6
             mode: asan
             stack: '8388608'
-          - revision_name: issue-541
-            revision: bac265c262b1bf92553f43302bc9d9465eb0c2ad
+          - revision_name: promise-fix
+            revision: ba9519ea08029a0f18df7850293955db9e5a8424
             mode: asan
             stack: '8388608'
     env:
