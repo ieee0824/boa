@@ -864,9 +864,9 @@ mod tests {
             let ModuleKind::SourceText(src) = importer.kind() else {
                 unreachable!();
             };
-            let loaded = src.loaded_modules().borrow();
+            let cache = src.loaded_modules().borrow();
             assert!(
-                loaded.get(&crate::js_string!("dependency.js")) == Some(&dependency.to_edge()),
+                cache.get(&crate::js_string!("dependency.js")) == Some(&dependency.to_edge()),
                 "the referrer must cache the imported module, not itself"
             );
         }
