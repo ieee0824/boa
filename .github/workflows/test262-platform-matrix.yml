@@ -85,6 +85,10 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # boa_tester reads this loose ref when recording the suite revision.
+          git -C "$GITHUB_WORKSPACE/test262" update-ref refs/heads/main \
+            '${{ steps.suite.outputs.revision }}'
+          export GITHUB_SHA="$TEST_REVISION"
           cargo run --locked --profile '${{ matrix.profile }}' --bin boa_tester -- \
             run --test262-path "$GITHUB_WORKSPACE/test262" -vv \
             -o "$GITHUB_WORKSPACE/artifacts/results" \
