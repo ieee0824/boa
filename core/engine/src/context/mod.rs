@@ -184,6 +184,13 @@ impl Default for Context {
 
 // ==== Public API ====
 impl Context {
+    /// Returns generated runtime-helper entry, exception, and frame-lifetime counters.
+    #[cfg(feature = "baseline-jit")]
+    #[must_use]
+    pub const fn jit_exception_diagnostics(&self) -> crate::jit::JitExceptionDiagnostics {
+        self.vm.runtime_jit.diagnostics()
+    }
+
     /// Returns runtime-wide diagnostics for the opt-in arithmetic baseline tier.
     #[cfg(feature = "baseline-jit")]
     #[must_use]

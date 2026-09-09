@@ -23,6 +23,12 @@ impl Throw {
     ) -> ControlFlow<CompletionRecord> {
         let value = context.vm.get_register(value.into());
         let error = JsError::from_opaque(value.clone());
+        #[cfg(feature = "baseline-jit")]
+        let error = {
+            let mut error = error;
+            context.prepare_generated_exception(&mut error);
+            error
+        };
         context.vm.pending_exception = Some(error);
 
         // Note: -1 because we increment after fetching the opcode.

@@ -133,6 +133,9 @@ pub struct Vm {
     #[cfg(feature = "baseline-jit")]
     pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
 
+    #[cfg(feature = "baseline-jit")]
+    pub(crate) runtime_jit: crate::jit::VmRuntime,
+
     /// Persistent embedder policy, independent of temporary dispatch suppression.
     #[cfg(feature = "baseline-jit")]
     pub(crate) baseline_jit_policy: BaselineJitPolicy,
@@ -590,6 +593,8 @@ impl Vm {
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
             #[cfg(feature = "baseline-jit")]
+            runtime_jit: crate::jit::VmRuntime::default(),
+            #[cfg(feature = "baseline-jit")]
             baseline_jit_policy: BaselineJitPolicy::Enabled,
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit_suppression_depth: 0,
@@ -726,6 +731,10 @@ impl Vm {
     /// Returns `true` if the exception was handled, `false` otherwise.
     #[inline]
     pub(crate) fn handle_exception_at(&mut self, pc: u32) -> bool {
+        #[cfg(feature = "baseline-jit")]
+        if let Some(handled) = self.handle_generated_exception() {
+            return handled;
+        }
         let frame = self.frame_mut();
         let Some((_, handler)) = frame.code_block().find_handler(pc) else {
             return false;
@@ -988,6 +997,8 @@ impl Context {
     }
 
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
+        #[cfg(feature = "baseline-jit")]
+        self.prepare_generated_exception(&mut err);
         // If we hit the execution step limit, bubble up the error to the
         // (Rust) caller instead of trying to handle as an exception.
         if !err.is_catchable() {
