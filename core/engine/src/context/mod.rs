@@ -184,6 +184,28 @@ impl Default for Context {
 
 // ==== Public API ====
 impl Context {
+    /// Copies live generated code, stack maps, source/handler metadata and deopt
+    /// recipes into a diagnostic text snapshot for reproducible failure artifacts.
+    ///
+    /// The snapshot contains relative code offsets, not executable pointers.
+    /// Calling this does not enter JavaScript, change JIT policy or collect GC
+    /// values. It allocates host memory proportional to the bounded code caches.
+    #[cfg(feature = "baseline-jit")]
+    #[must_use]
+    pub fn jit_debug_snapshot(&self) -> String {
+        let mut output = format!(
+            "jit-debug-v1 target={}-{} policy={:?}\narithmetic={:?}\nexceptions={:?}\n",
+            std::env::consts::ARCH,
+            std::env::consts::OS,
+            self.vm.baseline_jit_policy,
+            self.arithmetic_jit_diagnostics(),
+            self.jit_exception_diagnostics(),
+        );
+        self.vm.arithmetic_jit.write_debug_snapshot(&mut output);
+        self.vm.runtime_jit.write_debug_snapshot(&mut output);
+        output
+    }
+
     /// Returns generated runtime-helper entry, exception, and frame-lifetime counters.
     #[cfg(feature = "baseline-jit")]
     #[must_use]

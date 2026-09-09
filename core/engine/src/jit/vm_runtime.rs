@@ -10,6 +10,7 @@ use std::{
     any::Any,
     collections::{BTreeMap, HashMap, VecDeque},
     ffi::c_void,
+    fmt::Write as _,
     mem::size_of,
     ops::ControlFlow,
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
@@ -202,6 +203,35 @@ pub(crate) struct VmRuntime {
 impl VmRuntime {
     pub(crate) const fn diagnostics(&self) -> JitExceptionDiagnostics {
         self.diagnostics
+    }
+
+    pub(crate) fn write_debug_snapshot(&self, output: &mut String) {
+        let mut entries = self.cache.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(id, _)| **id);
+        for (id, entry) in entries {
+            if let CacheEntry::Compiled(code) = entry {
+                writeln!(
+                    output,
+                    "tier=runtime-helper code_id={id}\nframe={:#?}\nentries={:#?}",
+                    code.descriptor, code.entries
+                )
+                .expect("String formatting cannot fail");
+                code.memory.write_debug_bytes(output);
+            }
+        }
+        for frame in &self.active {
+            writeln!(output, "active frame_id={} code_id={} vm_depth={} bytecode_pc={} machine_offset={} unwound={}",
+                frame.id, frame.code_id, frame.frame_depth, frame.bytecode_pc,
+                frame.machine_offset, frame.unwound).expect("String formatting cannot fail");
+            if !matches!(
+                self.cache.get(&frame.code_id),
+                Some(CacheEntry::Compiled(_))
+            ) {
+                writeln!(output, "evicted_active_frame={:#?}", frame.code.descriptor)
+                    .expect("String formatting cannot fail");
+                frame.code.memory.write_debug_bytes(output);
+            }
+        }
     }
 
     fn code(&mut self, block: &CodeBlock) -> Option<Rc<RuntimeCode>> {

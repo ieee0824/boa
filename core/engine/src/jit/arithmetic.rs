@@ -7,6 +7,7 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    fmt::Write as _,
     mem::{offset_of, size_of},
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
@@ -486,6 +487,27 @@ impl ArithmeticRuntime {
 
     pub(crate) const fn diagnostics(&self) -> ArithmeticJitDiagnostics {
         self.diagnostics
+    }
+
+    pub(crate) fn write_debug_snapshot(&self, output: &mut String) {
+        let mut entries = self.entries.iter().collect::<Vec<_>>();
+        entries.sort_unstable_by_key(|(key, _)| **key);
+        for ((code_id, pc), entry) in entries {
+            if let RuntimeEntry::Compiled(code) = entry {
+                writeln!(
+                    output,
+                    "tier=arithmetic code_id={code_id} bytecode_entry_pc={pc}"
+                )
+                .expect("String formatting cannot fail");
+                writeln!(
+                    output,
+                    "frame={:#?}\ncode_map={:#?}\ndeopt={:#?}",
+                    code.frame_descriptor, code.code_map, code.deopt_recipes
+                )
+                .expect("String formatting cannot fail");
+                code.memory.write_debug_bytes(output);
+            }
+        }
     }
 
     fn ensure_entry(&mut self, key: (u64, u32)) {
@@ -1889,6 +1911,27 @@ mod tests {
             }
             assert_eq!(context.vm.arithmetic_jit_budget, None);
         }
+    }
+
+    #[test]
+    fn failure_snapshot_copies_live_code_and_metadata_without_changing_execution() {
+        let mut context = Context::default();
+        context.eval(Source::from_bytes("function f(o,n){for(let i=0;i<n;i++)o.x=o.x+1;return o.x}function helper(){return {x:1}}for(let i=0;i<40;i++)helper();f({x:0},200)")).unwrap();
+        let before = context.arithmetic_jit_diagnostics();
+        let first = context.jit_debug_snapshot();
+        assert!(first.contains("tier=arithmetic"));
+        assert!(first.contains("tier=runtime-helper"));
+        assert!(first.contains("StackMap"));
+        assert!(first.contains("DeoptRecipe"));
+        assert!(first.contains("bytecode_entry_pc="));
+        assert!(first.contains("48 83 ec 08 48 8b 07 ff d0"));
+        assert_eq!(context.jit_debug_snapshot(), first);
+        boa_gc::force_collect();
+        assert_eq!(context.arithmetic_jit_diagnostics(), before);
+        assert_eq!(context.jit_debug_snapshot(), first);
+        drop(context);
+        // The artifact owns copied text and remains readable after RX unmapping.
+        assert!(first.starts_with("jit-debug-v1"));
     }
 
     #[test]
