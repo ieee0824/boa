@@ -45,6 +45,10 @@ impl E2eFetcher {
 }
 
 impl crate::fetch::Fetcher for E2eFetcher {
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "The fixture must borrow the Context only when its future is polled."
+    )]
     async fn fetch(
         self: Rc<Self>,
         request: JsRequest,
