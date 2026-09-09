@@ -1,4 +1,4 @@
-use std::{io, marker::PhantomData, ptr::NonNull, rc::Rc};
+use std::{fmt::Write as _, io, marker::PhantomData, ptr::NonNull, rc::Rc};
 
 use super::JitError;
 
@@ -45,6 +45,20 @@ pub(super) struct ExecutableMemory {
 }
 
 impl ExecutableMemory {
+    pub(super) fn write_debug_bytes(&self, output: &mut String) {
+        // SAFETY: publication made this live, exclusively owned mapping
+        // readable/executable; requested_len bounds the initialized code.
+        // Borrowing self keeps it mapped while the bytes are copied to text.
+        let bytes = unsafe { std::slice::from_raw_parts(self.as_ptr(), self.requested_len()) };
+        for (index, chunk) in bytes.chunks(16).enumerate() {
+            write!(output, "{:08x}:", index * 16).expect("String formatting cannot fail");
+            for byte in chunk {
+                write!(output, " {byte:02x}").expect("String formatting cannot fail");
+            }
+            output.push('\n');
+        }
+    }
+
     pub(super) fn as_ptr(&self) -> *const u8 {
         self.mapping.pointer.as_ptr()
     }
