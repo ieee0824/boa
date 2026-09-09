@@ -332,6 +332,13 @@ macro_rules! generate_opcodes {
         }
 
         impl Opcode {
+            #[cfg(feature = "baseline-jit")]
+            pub(crate) const fn cost(self) -> u8 {
+                match self {
+                    $(Self::$Variant => $Variant::COST),*
+                }
+            }
+
             pub(crate) fn as_str(&self) -> &'static str {
                 match self {
                     $(Self::$Variant => $Variant::NAME),*
@@ -379,6 +386,10 @@ macro_rules! generate_opcodes {
                 #[inline(always)]
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake>](context: &mut Context, pc: usize) -> ControlFlow<CompletionRecord> {
+                    #[cfg(feature = "baseline-jit")]
+                    if let Some(budget) = &mut context.vm.arithmetic_jit_budget {
+                        *budget = budget.saturating_sub(u32::from($Variant::COST));
+                    }
                     let bytes = &context.vm.frame.code_block.bytecode.bytecode;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
@@ -394,6 +405,10 @@ macro_rules! generate_opcodes {
                 #[allow(unused_parens)]
                 fn [<handle_ $Variant:snake _budget>](context: &mut Context, pc: usize, budget: &mut u32) -> ControlFlow<CompletionRecord> {
                     *budget = budget.saturating_sub(u32::from($Variant::COST));
+                    #[cfg(feature = "baseline-jit")]
+                    if let Some(shared) = &mut context.vm.arithmetic_jit_budget {
+                        *shared = (*shared).min(*budget);
+                    }
                     let bytes = &context.vm.frame.code_block.bytecode.bytecode;
                     let (args, next_pc) = <($($($FieldType),*)?)>::decode(bytes, pc + 1);
                     context.vm.frame_mut().pc = next_pc as u32;
@@ -507,19 +522,31 @@ impl Context {
         let pc = frame.pc as usize;
 
         #[cfg(feature = "baseline-jit")]
-        let arithmetic_jit_suppression_depth =
-            std::mem::replace(&mut self.vm.arithmetic_jit_suppression_depth, 1);
-        #[cfg(feature = "baseline-jit")]
-        let result = self.invoke_runtime_site(opcode, |context| {
-            OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, budget)
-        });
-        #[cfg(not(feature = "baseline-jit"))]
-        let result = OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget);
+        let previous_jit_budget = self.vm.arithmetic_jit_budget;
         #[cfg(feature = "baseline-jit")]
         {
-            self.vm.arithmetic_jit_suppression_depth = arithmetic_jit_suppression_depth;
+            self.vm.arithmetic_jit_budget =
+                Some(previous_jit_budget.map_or(*budget, |outer| outer.min(*budget)));
         }
-        result
+        #[cfg(feature = "baseline-jit")]
+        {
+            let mut context = self.guard(move |context| {
+                let remaining = context.vm.arithmetic_jit_budget;
+                context.vm.arithmetic_jit_budget =
+                    previous_jit_budget.map(|outer| outer.min(remaining.unwrap_or(outer)));
+            });
+            let result = context.invoke_runtime_site(opcode, |context| {
+                OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, budget)
+            });
+            let remaining = context
+                .vm
+                .arithmetic_jit_budget
+                .expect("budgeted dispatch installs a shared budget");
+            *budget = (*budget).min(remaining);
+            result
+        }
+        #[cfg(not(feature = "baseline-jit"))]
+        OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget)
     }
 }
 

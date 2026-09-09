@@ -35,6 +35,170 @@ fn suspending_function(slot: Gc<GcRefCell<Option<NativeCallSuspension>>>) -> Nat
     )
 }
 
+#[test]
+fn deadline_scope_restores_nested_limits_and_cancelled_async_evaluation() {
+    use std::time::{Duration, Instant};
+    let mut context = Context::default();
+    let deadline = Instant::now() + Duration::from_secs(60);
+    {
+        let mut outer = context.enter_runtime_deadline(deadline);
+        {
+            let inner = outer.enter_runtime_deadline(deadline + Duration::from_secs(60));
+            assert_eq!(inner.runtime_limits().deadline(), Some(deadline));
+        }
+        {
+            let inner =
+                outer.enter_runtime_deadline(deadline.checked_sub(Duration::from_secs(1)).unwrap());
+            assert_eq!(
+                inner.runtime_limits().deadline(),
+                Some(deadline.checked_sub(Duration::from_secs(1)).unwrap())
+            );
+        }
+        assert_eq!(outer.runtime_limits().deadline(), Some(deadline));
+    }
+    assert_eq!(context.runtime_limits().deadline(), None);
+    let script = Script::parse(Source::from_bytes("for(;;){}"), None, &mut context).unwrap();
+    let mut evaluation = Box::pin(async {
+        let mut scope = context.enter_runtime_deadline(deadline);
+        script.evaluate_async_with_budget(&mut scope, 1).await
+    });
+    assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+    drop(evaluation);
+    assert_eq!(context.runtime_limits().deadline(), None);
+    assert_eq!(
+        context.eval(Source::from_bytes("6*7")).unwrap(),
+        JsValue::from(42)
+    );
+}
+
+#[test]
+fn expired_deadline_stops_before_script_effects_and_is_not_catchable() {
+    let mut context = Context::default();
+    context
+        .eval(Source::from_bytes("globalThis.effects=0"))
+        .unwrap();
+    context
+        .runtime_limits_mut()
+        .set_deadline(Some(std::time::Instant::now()));
+    let error = context
+        .eval(Source::from_bytes(
+            "try{effects++}catch(e){effects++}finally{effects++}",
+        ))
+        .unwrap_err();
+    assert!(!error.is_catchable());
+    assert_eq!(
+        error.as_native().unwrap().message(),
+        super::WALL_CLOCK_TIMEOUT_MESSAGE
+    );
+    context.runtime_limits_mut().set_deadline(None);
+    assert_eq!(
+        context.eval(Source::from_bytes("effects")).unwrap(),
+        JsValue::from(0)
+    );
+}
+
+#[test]
+fn deadline_after_native_return_unwinds_deep_mixed_calls_before_catch_or_finally() {
+    for throws in [false, true] {
+        let mut context = Context::default();
+        context
+            .register_global_callable(
+                js_string!("expire"),
+                0,
+                NativeFunction::from_copy_closure(move |_, _, context| {
+                    context
+                        .runtime_limits_mut()
+                        .set_deadline(Some(std::time::Instant::now()));
+                    if throws {
+                        Err(JsNativeError::typ()
+                            .with_message("late native error")
+                            .into())
+                    } else {
+                        Ok(JsValue::from(42))
+                    }
+                }),
+            )
+            .unwrap();
+        context.eval(Source::from_bytes("globalThis.effects=0;function mixed(n,fail){if(n)return mixed(n-1,fail);if(fail)return expire();return 1}for(let i=0;i<40;i++)mixed(20,false)")).unwrap();
+        let error = context
+            .eval(Source::from_bytes(
+                "try{mixed(100,true);effects++}catch(e){effects++}finally{effects++}",
+            ))
+            .unwrap_err();
+        assert!(!error.is_catchable());
+        assert_eq!(
+            error.as_native().unwrap().message(),
+            super::WALL_CLOCK_TIMEOUT_MESSAGE
+        );
+        #[cfg(feature = "baseline-jit")]
+        assert_eq!(context.jit_exception_diagnostics().active_frames, 0);
+        context.runtime_limits_mut().set_deadline(None);
+        assert_eq!(
+            context.eval(Source::from_bytes("effects")).unwrap(),
+            JsValue::from(0)
+        );
+    }
+}
+
+#[test]
+fn suspended_native_call_keeps_its_deadline_when_resumed() {
+    use std::time::{Duration, Instant};
+    for expires in [false, true] {
+        let mut context = Context::default();
+        let slot = Gc::new(GcRefCell::new(None));
+        let _root = Rooted::from_gc(slot.clone());
+        context
+            .register_global_callable(js_string!("suspend"), 0, suspending_function(slot.clone()))
+            .unwrap();
+        context
+            .eval(Source::from_bytes("globalThis.effects=0"))
+            .unwrap();
+        let script = Script::parse(
+            Source::from_bytes("let resumed=suspend();effects++;resumed+1"),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_millis(if expires { 250 } else { 60_000 });
+        let mut evaluation = Box::pin(async {
+            let mut scope = context.enter_runtime_deadline(deadline);
+            script.evaluate_async(&mut scope).await
+        });
+        assert!(future::block_on(future::poll_once(evaluation.as_mut())).is_none());
+        let suspension = slot
+            .borrow()
+            .clone()
+            .expect("host call must suspend before expiry");
+        if expires {
+            std::thread::sleep(
+                deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+            );
+        }
+        suspension.resume(Ok(JsValue::from(41))).unwrap();
+        boa_gc::force_collect();
+        let result = future::block_on(evaluation);
+        if expires {
+            let error = result.unwrap_err();
+            assert!(!error.is_catchable());
+            assert_eq!(
+                error.as_native().unwrap().message(),
+                super::WALL_CLOCK_TIMEOUT_MESSAGE
+            );
+        } else {
+            assert_eq!(result.unwrap(), JsValue::from(42));
+        }
+        assert_eq!(context.runtime_limits().deadline(), None);
+        assert_eq!(
+            context.eval(Source::from_bytes("effects")).unwrap(),
+            JsValue::from(i32::from(!expires))
+        );
+        assert_eq!(
+            suspension.resume(Ok(JsValue::from(0))),
+            Err(NativeCallAlreadyResumed)
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 struct InMemoryModuleLoader {
     modules: GcRefCell<Vec<(JsString, Module)>>,
