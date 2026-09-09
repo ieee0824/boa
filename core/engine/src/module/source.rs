@@ -2039,7 +2039,7 @@ fn async_module_execution_fulfilled(module: &Module, context: &mut Context) {
             //    ii. If result is an abrupt completion, then
             if let Err(e) = result {
                 //    1. Perform AsyncModuleExecutionRejected(m, result.[[Value]]).
-                async_module_execution_rejected(module, &e, context);
+                async_module_execution_rejected(&m, &e, context);
             } else {
                 // iii. Else,
                 //    1. Set m.[[Status]] to evaluated.
