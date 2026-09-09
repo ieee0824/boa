@@ -72,6 +72,59 @@ fn deadline_scope_restores_nested_limits_and_cancelled_async_evaluation() {
 }
 
 #[test]
+fn expired_module_deadline_still_settles_intrinsic_promises_without_panicking() {
+    use crate::builtins::promise::PromiseState;
+    for asynchronous in [false, true] {
+        let mut context = Context::default();
+        context
+            .eval(Source::from_bytes("globalThis.effects=0"))
+            .unwrap();
+        let module = Module::parse(
+            Source::from_bytes("effects=1;export default 42"),
+            None,
+            &mut context,
+        )
+        .unwrap();
+        let loaded = module.load(&mut context);
+        context.run_jobs().unwrap();
+        assert!(matches!(loaded.state(), PromiseState::Fulfilled(_)));
+        module.link(&mut context).unwrap();
+        context
+            .runtime_limits_mut()
+            .set_deadline(Some(std::time::Instant::now()));
+        if asynchronous {
+            let error =
+                future::block_on(module.load_link_evaluate_async(&mut context)).unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains(super::WALL_CLOCK_TIMEOUT_MESSAGE)
+            );
+        } else {
+            let promise = module.evaluate(&mut context);
+            let PromiseState::Rejected(value) = promise.state() else {
+                panic!("expired evaluation must reject")
+            };
+            let error = crate::JsError::from_opaque(value);
+            assert!(
+                error
+                    .to_string()
+                    .contains(super::WALL_CLOCK_TIMEOUT_MESSAGE)
+            );
+        }
+        context.runtime_limits_mut().set_deadline(None);
+        assert_eq!(
+            context.eval(Source::from_bytes("effects")).unwrap(),
+            JsValue::from(0)
+        );
+        assert_eq!(
+            context.eval(Source::from_bytes("21*2")).unwrap(),
+            JsValue::from(42)
+        );
+    }
+}
+
+#[test]
 fn expired_deadline_stops_before_script_effects_and_is_not_catchable() {
     let mut context = Context::default();
     context

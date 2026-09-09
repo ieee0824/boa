@@ -109,10 +109,11 @@ impl NativeJob {
     /// If the native job has an execution realm defined, this sets the running execution
     /// context to the realm's before calling the inner closure, and resets it after execution.
     pub fn call(self, context: &mut Context) -> JsResult<JsValue> {
+        context.runtime_limits().check_deadline()?;
         // If realm is not null, each time job is invoked the implementation must perform
         // implementation-defined steps such that execution is prepared to evaluate ECMAScript
         // code at the time of job's invocation.
-        if let Some(realm) = self.realm {
+        let result = if let Some(realm) = self.realm {
             let old_realm = context.enter_realm(realm);
 
             // Let scriptOrModule be GetActiveScriptOrModule() at the time HostEnqueuePromiseJob is
@@ -126,7 +127,9 @@ impl NativeJob {
             result
         } else {
             (self.f)(context)
-        }
+        };
+        context.runtime_limits().check_deadline()?;
+        result
     }
 }
 
@@ -304,6 +307,18 @@ impl Debug for AsyncContext<'_> {
 }
 
 impl<'a> AsyncContext<'a> {
+    fn check_deadline(&self, fallback: crate::vm::RuntimeLimits) -> JsResult<()> {
+        // An exclusive job can retain the context lease while pending. Its
+        // original absolute deadline remains checkable without re-borrowing it.
+        let limits = self
+            .context
+            .try_borrow()
+            .ok()
+            .and_then(|slot| slot.as_deref().map(Context::runtime_limits))
+            .unwrap_or(fallback);
+        limits.check_deadline()
+    }
+
     /// Creates async job context storage and enables asynchronous suspension until it is dropped.
     ///
     /// Dropping the storage restores the execution context's previous suspension mode.
@@ -385,6 +400,19 @@ impl Drop for AsyncContext<'_> {
     fn drop(&mut self) {
         if let Some(context) = self.context.get_mut().as_deref_mut() {
             context.async_jobs_enabled = self.previous_async_jobs_enabled;
+        }
+    }
+}
+
+struct AsyncJobRealmGuard<'a, 'context> {
+    context: &'a AsyncContext<'context>,
+    previous: Option<Realm>,
+}
+
+impl Drop for AsyncJobRealmGuard<'_, '_> {
+    fn drop(&mut self) {
+        if let Some(previous) = self.previous.take() {
+            self.context.borrow_mut().enter_realm(previous);
         }
     }
 }
@@ -476,8 +504,9 @@ impl NativeAsyncJob {
         // implementation-defined steps such that execution is prepared to evaluate ECMAScript
         // code at the time of job's invocation.
         let realm = self.realm;
+        let limits = context.borrow().runtime_limits();
 
-        let mut future = if let Some(realm) = &realm {
+        let future = if let Some(realm) = &realm {
             let old_realm = context.borrow_mut().enter_realm(realm.clone());
 
             // Let scriptOrModule be GetActiveScriptOrModule() at the time HostEnqueuePromiseJob is
@@ -491,20 +520,41 @@ impl NativeAsyncJob {
         } else {
             (self.f)(context)
         };
+        let mut future = Some(future);
 
         std::future::poll_fn(move |cx| {
+            if let Err(error) = context.check_deadline(limits) {
+                future.take();
+                return std::task::Poll::Ready(Err(error));
+            }
             // We need to do the same dance again since the inner code could assume we're still
             // on the same realm.
-            if let Some(realm) = &realm {
+            let result = if let Some(realm) = &realm {
                 let old_realm = context.borrow_mut().enter_realm(realm.clone());
 
-                let poll_result = future.as_mut().poll(cx);
+                let poll_result = future
+                    .as_mut()
+                    .expect("job polled after completion")
+                    .as_mut()
+                    .poll(cx);
 
                 context.borrow_mut().enter_realm(old_realm);
                 poll_result
             } else {
-                future.as_mut().poll(cx)
+                future
+                    .as_mut()
+                    .expect("job polled after completion")
+                    .as_mut()
+                    .poll(cx)
+            };
+            if let Err(error) = context.check_deadline(limits) {
+                future.take();
+                return std::task::Poll::Ready(Err(error));
             }
+            if result.is_ready() {
+                future.take();
+            }
+            result
         })
     }
 }
@@ -570,9 +620,11 @@ impl PromiseJob {
         let job_realm = realm.clone();
         let job = NativeAsyncJob::new(async move |context| {
             let old_realm = context.borrow_mut().enter_realm(job_realm);
-            let result = f(context).await;
-            context.borrow_mut().enter_realm(old_realm);
-            result
+            let _realm = AsyncJobRealmGuard {
+                context,
+                previous: Some(old_realm),
+            };
+            f(context).await
         });
         Self(PromiseJobInner::Async { job, realm })
     }
@@ -920,6 +972,93 @@ impl JobExecutor for SimpleJobExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_async_promise_job_restores_its_callers_realm() {
+        let mut context = Context::default();
+        let caller = context.realm().clone();
+        let job_realm = context.create_realm().unwrap();
+        let storage = AsyncContext::new(&mut context);
+        let job = PromiseJob::with_realm_async(
+            async |context| {
+                let _lease = context.take();
+                future::pending::<JsResult<JsValue>>().await
+            },
+            job_realm,
+        );
+        let mut call = Box::pin(job.call_async(&storage));
+        assert!(future::block_on(future::poll_once(call.as_mut())).is_none());
+        drop(call);
+        assert!(
+            *storage.borrow().realm() == caller,
+            "cancelled job must restore its caller's realm"
+        );
+    }
+
+    #[test]
+    fn native_job_deadline_prevents_the_next_callback_and_clears_the_queue() {
+        let mut context = Context::default();
+        let count = Rc::new(Cell::new(0));
+        for index in 0..2 {
+            let count = Rc::clone(&count);
+            let job = GenericJob::new(
+                move |context| {
+                    count.set(count.get() + 1);
+                    if index == 0 {
+                        context
+                            .runtime_limits_mut()
+                            .set_deadline(Some(time::Instant::now()));
+                    }
+                    Ok(JsValue::undefined())
+                },
+                context.realm().clone(),
+            );
+            context.enqueue_job(job.into());
+        }
+        let error = context.run_jobs().unwrap_err();
+        assert_eq!(
+            error.as_native().unwrap().message(),
+            crate::vm::WALL_CLOCK_TIMEOUT_MESSAGE
+        );
+        assert_eq!(count.get(), 1);
+        context.runtime_limits_mut().set_deadline(None);
+        context.run_jobs().unwrap();
+        assert_eq!(count.get(), 1);
+    }
+
+    #[test]
+    fn exclusive_async_job_deadline_is_polled_while_the_context_is_leased() {
+        use std::time::{Duration, Instant};
+        let mut context = Context::default();
+        let deadline = Instant::now() + Duration::from_millis(250);
+        context.runtime_limits_mut().set_deadline(Some(deadline));
+        let storage = AsyncContext::new(&mut context);
+        let job = NativeAsyncJob::new_exclusive(async |context| {
+            let _lease = context.take();
+            future::pending::<JsResult<JsValue>>().await
+        });
+        let mut call = Box::pin(job.call(&storage));
+        assert!(future::block_on(future::poll_once(call.as_mut())).is_none());
+        assert!(storage.context.borrow().is_none());
+        std::thread::sleep(
+            deadline.saturating_duration_since(Instant::now()) + Duration::from_millis(1),
+        );
+        let error = future::block_on(future::poll_once(call.as_mut()))
+            .expect("expired job must finish on this poll")
+            .unwrap_err();
+        assert_eq!(
+            error.as_native().unwrap().message(),
+            crate::vm::WALL_CLOCK_TIMEOUT_MESSAGE
+        );
+        assert!(storage.context.borrow().is_some());
+        drop(call);
+        drop(storage);
+        context.runtime_limits_mut().set_deadline(None);
+        assert_eq!(
+            context.eval(crate::Source::from_bytes("6*7")).unwrap(),
+            JsValue::from(42)
+        );
+    }
 
     #[test]
     fn exclusive_async_jobs_wait_for_earlier_jobs_and_block_later_jobs() {

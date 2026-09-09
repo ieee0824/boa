@@ -1355,7 +1355,9 @@ impl Context {
 
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
-        self.vm.runtime_limits.check_deadline()?;
+        // This structural check also guards infallible intrinsic promise
+        // bookkeeping. Deadline errors belong at bytecode/job boundaries:
+        // rejecting an expired module must still be able to settle its promise.
         // Must throw if the number of recursive calls exceeds the defined limit.
         if self.vm.runtime_limits.recursion_limit() <= self.vm.frames.len() {
             // A recursion overflow is a normal JavaScript exception. In particular,
