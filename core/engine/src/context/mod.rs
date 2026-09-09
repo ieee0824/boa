@@ -1032,6 +1032,22 @@ impl Context {
 }
 
 impl Context {
+    /// Borrows the context with a cooperative execution deadline.
+    ///
+    /// Nested scopes retain the earlier deadline. Dropping the guard restores
+    /// the previous deadline, including when an asynchronous evaluation is
+    /// cancelled or unwinds. Blocking native functions are checked when they
+    /// return; this does not preempt host code.
+    pub fn enter_runtime_deadline(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> impl std::ops::DerefMut<Target = Self> + '_ {
+        let previous = self.runtime_limits().deadline();
+        self.runtime_limits_mut()
+            .set_deadline(Some(previous.map_or(deadline, |outer| outer.min(deadline))));
+        self.guard(move |context| context.runtime_limits_mut().set_deadline(previous))
+    }
+
     /// Creates a `ContextCleanupGuard` that executes some cleanup after being dropped.
     pub(crate) fn guard<F>(&mut self, cleanup: F) -> ContextCleanupGuard<'_, F>
     where

@@ -7,13 +7,10 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
-    mem::size_of,
+    mem::{offset_of, size_of},
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
-
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
-use std::mem::offset_of;
 
 use crate::{
     JsObject, JsValue,
@@ -40,6 +37,14 @@ struct NativeFrame {
     pc: u32,
     status: u32,
     header: JitFrameHeader,
+    poll_remaining: u64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeEntryLimits {
+    loop_limit: u64,
+    poll_iterations: u64,
+    interpreter_frame_depth: usize,
 }
 
 #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
@@ -67,6 +72,7 @@ pub(crate) struct ArithmeticCode {
     pub(crate) code_map: BytecodeCodeMap,
     frame_descriptor: JitFrameDescriptor,
     deopt_recipes: BTreeMap<u32, DeoptRecipe>,
+    iteration_cost: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +244,16 @@ impl ArithmeticCode {
             let mut writable = WritableMemory::allocate(assembler.code.len())?;
             writable.write(0, &assembler.code)?;
             let memory = writable.publish()?;
+            // A conservative instruction-budget bound between loop polls,
+            // including paths skipped by conditional branches.
+            let iteration_cost = snapshot.instructions[region.first..region.end]
+                .iter()
+                .fold(0_u32, |cost, instruction| {
+                    cost.saturating_add(u32::from(
+                        crate::vm::Opcode::decode(instruction.opcode).cost(),
+                    ))
+                })
+                .max(1);
             Ok(Some(Self {
                 memory,
                 resumed_entry_offset,
@@ -247,6 +263,7 @@ impl ArithmeticCode {
                 code_map,
                 frame_descriptor,
                 deopt_recipes,
+                iteration_cost,
             }))
         }
     }
@@ -259,7 +276,16 @@ impl ArithmeticCode {
         loop_limit: u64,
     ) -> Option<ArithmeticExit> {
         let mut write_kinds = vec![0; values.len()];
-        self.execute_after_increment_typed(values, &mut write_kinds, loop_iterations, loop_limit, 0)
+        self.execute_after_increment_typed(
+            values,
+            &mut write_kinds,
+            loop_iterations,
+            NativeEntryLimits {
+                loop_limit,
+                poll_iterations: u64::MAX,
+                interpreter_frame_depth: 0,
+            },
+        )
     }
 
     fn execute_after_increment_typed(
@@ -267,16 +293,14 @@ impl ArithmeticCode {
         values: &mut [Option<i64>],
         write_kinds: &mut [u8],
         loop_iterations: &mut u64,
-        loop_limit: u64,
-        interpreter_frame_depth: usize,
+        limits: NativeEntryLimits,
     ) -> Option<ArithmeticExit> {
         self.execute_at(
             self.resumed_entry_offset,
             values,
             write_kinds,
             loop_iterations,
-            loop_limit,
-            interpreter_frame_depth,
+            limits,
         )
     }
 
@@ -286,8 +310,7 @@ impl ArithmeticCode {
         values: &mut [Option<i64>],
         write_kinds: &mut [u8],
         loop_iterations: &mut u64,
-        loop_limit: u64,
-        interpreter_frame_depth: usize,
+        limits: NativeEntryLimits,
     ) -> Option<ArithmeticExit> {
         if values.len() != write_kinds.len()
             || self.required.iter().any(|&r| values[r as usize].is_none())
@@ -303,16 +326,17 @@ impl ArithmeticCode {
             registers: registers.as_mut_ptr(),
             dirty: write_kinds.as_mut_ptr(),
             loop_iterations: *loop_iterations,
-            loop_limit,
+            loop_limit: limits.loop_limit,
             pc: 0,
             status: 0,
             header: JitFrameHeader {
                 frame_id: NEXT_ACTIVE_FRAME_ID.fetch_add(1, Ordering::Relaxed),
                 descriptor_id: self.frame_descriptor.id(),
                 caller: FrameCaller::Interpreter {
-                    frame_depth: interpreter_frame_depth,
+                    frame_depth: limits.interpreter_frame_depth,
                 },
             },
+            poll_remaining: limits.poll_iterations.saturating_sub(1),
         };
         // SAFETY: the emitter validates every register and branch, generated code
         // only accesses this frame and its fixed-size register allocation, and the
@@ -484,6 +508,9 @@ impl ArithmeticRuntime {
     /// Observes a loop header and, once hot, replaces repeated bytecode dispatch
     /// with one bounded generated-code call.
     pub(crate) fn try_execute_after_increment(&mut self, vm: &mut Vm) -> bool {
+        if vm.arithmetic_jit_budget == Some(0) {
+            return false;
+        }
         let pc = vm.frame.pc;
         let key = (vm.frame.code_block.jit_code_id, pc);
         self.ensure_entry(key);
@@ -551,6 +578,18 @@ impl ArithmeticRuntime {
         let RuntimeEntry::Compiled(code) = entry else {
             unreachable!("successful compilation was installed above")
         };
+        let mut poll_iterations = if vm.runtime_limits.deadline().is_some() {
+            4096
+        } else {
+            u64::MAX
+        };
+        if let Some(budget) = vm.arithmetic_jit_budget {
+            let iterations = budget / code.iteration_cost;
+            if iterations == 0 {
+                return false;
+            }
+            poll_iterations = poll_iterations.min(u64::from(iterations));
+        }
         debug_assert!(!code.code_map.entries().is_empty());
         debug_assert!(!code.frame_descriptor.safepoints().is_empty());
         let register_count = vm.frame.code_block.register_count as usize;
@@ -687,12 +726,16 @@ impl ArithmeticRuntime {
                 self.diagnostics.property_guard_hits.saturating_add(1);
         }
         let interpreter_frame_depth = vm.frames.len();
+        let iterations_before = vm.frame.loop_iteration_count;
         let Some(exit) = code.execute_after_increment_typed(
             &mut values,
             &mut write_kinds,
             &mut vm.frame.loop_iteration_count,
-            vm.runtime_limits.loop_iteration_limit(),
-            interpreter_frame_depth,
+            NativeEntryLimits {
+                loop_limit: vm.runtime_limits.loop_iteration_limit(),
+                poll_iterations,
+                interpreter_frame_depth,
+            },
         ) else {
             reconstruct_deopt(
                 code,
@@ -705,6 +748,15 @@ impl ArithmeticRuntime {
             );
             return false;
         };
+        if let Some(budget) = &mut vm.arithmetic_jit_budget {
+            let iterations = vm
+                .frame
+                .loop_iteration_count
+                .wrapping_sub(iterations_before)
+                .saturating_add(1);
+            let cost = iterations.saturating_mul(u64::from(code.iteration_cost));
+            *budget = budget.saturating_sub(u32::try_from(cost).unwrap_or(u32::MAX));
+        }
         vm.frame.code_block.jit_metadata.record_compiled_entry();
         self.diagnostics.compiled_entries = self.diagnostics.compiled_entries.saturating_add(1);
         for (binding_index, binding) in code.properties.iter().enumerate() {
@@ -1159,6 +1211,11 @@ fn emit_instruction(
     };
     match i.name {
         "IncrementLoopIteration" => {
+            let poll_offset = u8::try_from(offset_of!(NativeFrame, poll_remaining))
+                .map_err(|_| JitError::InvalidCodeSize)?;
+            a.bytes(&[0x48, 0x83, 0x7f, poll_offset, 0x00]); // cmp [rdi + poll], 0
+            bailout(a, &[0x0f, 0x84], i.offset, DeoptReason::Interrupt, bailouts);
+            a.bytes(&[0x48, 0x83, 0x6f, poll_offset, 0x01]); // sub [rdi + poll], 1
             a.bytes(&[0x48, 0x8b, 0x47, 0x10, 0x48, 0x3b, 0x47, 0x18]);
             bailout(a, &[0x0f, 0x87], i.offset, DeoptReason::Interrupt, bailouts);
             a.bytes(&[0x48, 0x83, 0x47, 0x10, 0x01]);
@@ -1795,6 +1852,108 @@ mod tests {
         let diagnostics = context.arithmetic_jit_diagnostics();
         assert_eq!(diagnostics.compile_requests, 0);
         assert_eq!(diagnostics.compiled_entries, 0);
+    }
+
+    #[test]
+    fn budgeted_generated_loops_yield_with_exact_property_state_and_gc_roots() {
+        for enabled in [false, true] {
+            let mut context = Context::default();
+            context.set_baseline_jit_enabled(enabled);
+            let script = Script::parse(
+                Source::from_bytes("function f(o,n){let s=1;for(let i=0;i<n;i++){o.x=o.x+1;s=(s+i*3)%1000003}return s+o.x} f({x:0},2000)"),
+                None, &mut context,
+            ).unwrap();
+            let mut evaluation = Box::pin(script.evaluate_async_with_budget(&mut context, 1024));
+            let mut yields = 0;
+            let actual = loop {
+                if let Some(result) = future::block_on(future::poll_once(evaluation.as_mut())) {
+                    break result.unwrap();
+                }
+                yields += 1;
+                boa_gc::force_minor_collect();
+                if yields % 16 == 0 {
+                    boa_gc::force_collect();
+                }
+            };
+            drop(evaluation);
+            let expected = (0..2000_i64).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003) + 2000;
+            assert_eq!(actual.as_number(), Some(expected as f64));
+            assert!(yields > 10);
+            let diagnostics = context.arithmetic_jit_diagnostics();
+            if enabled {
+                assert!(diagnostics.compiled_entries > 10, "{diagnostics:?}");
+                assert!(diagnostics.property_guard_hits > 0, "{diagnostics:?}");
+                assert!(diagnostics.interrupt_deopts > 10, "{diagnostics:?}");
+            } else {
+                assert_eq!(diagnostics.compiled_entries, 0);
+            }
+            assert_eq!(context.vm.arithmetic_jit_budget, None);
+        }
+    }
+
+    #[test]
+    fn async_native_panic_restores_the_shared_budget_and_deadline() {
+        let mut context = Context::default();
+        context
+            .register_global_callable(
+                crate::js_string!("panicNative"),
+                0,
+                crate::NativeFunction::from_copy_closure(|_, _, _| panic!("host panic")),
+            )
+            .unwrap();
+        let script = Script::parse(Source::from_bytes("function f(fail){if(fail)panicNative();return {}}for(let i=0;i<40;i++)f(false);f(true)"), None, &mut context).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            future::block_on(async {
+                let mut scope = context
+                    .enter_runtime_deadline(Instant::now() + std::time::Duration::from_secs(60));
+                script.evaluate_async_with_budget(&mut scope, 1024).await
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(context.vm.arithmetic_jit_budget, None);
+        assert_eq!(context.runtime_limits().deadline(), None);
+        assert_eq!(context.jit_exception_diagnostics().active_frames, 0);
+        assert_eq!(
+            context.eval(Source::from_bytes("6*7")).unwrap().as_number(),
+            Some(42.0)
+        );
+    }
+
+    #[test]
+    fn generated_loop_observes_deadline_and_recovers_the_vm() {
+        for enabled in [false, true] {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let mut context = Context::default();
+                context.set_baseline_jit_enabled(enabled);
+                context.eval(Source::from_bytes(
+                    "function timed(n){let s=1;for(let i=0;i<n;i++)s=(s+i*3)%1000003;return s}timed(200)",
+                )).unwrap();
+                let before = context.arithmetic_jit_diagnostics().compiled_entries;
+                context
+                    .runtime_limits_mut()
+                    .set_deadline(Some(Instant::now() + std::time::Duration::from_millis(50)));
+                let error = context
+                    .eval(Source::from_bytes("timed(1000000000000)"))
+                    .unwrap_err();
+                let native = error.as_native().unwrap();
+                assert!(native.is_runtime_limit());
+                assert_eq!(native.message(), crate::vm::WALL_CLOCK_TIMEOUT_MESSAGE);
+                if enabled {
+                    assert!(context.arithmetic_jit_diagnostics().compiled_entries > before);
+                }
+                assert_eq!(context.jit_exception_diagnostics().active_frames, 0);
+                context.runtime_limits_mut().set_deadline(None);
+                assert_eq!(
+                    context.eval(Source::from_bytes("6*7")).unwrap().as_number(),
+                    Some(42.0)
+                );
+                sender.send(()).unwrap();
+            });
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("execution must observe its deadline while generated code is running");
+        }
     }
 
     #[test]

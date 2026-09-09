@@ -25,7 +25,6 @@ impl IncrementLoopIteration {
 
         #[cfg(feature = "baseline-jit")]
         if context.vm.baseline_jit_policy == crate::vm::BaselineJitPolicy::Enabled
-            && context.vm.arithmetic_jit_suppression_depth == 0
             && !context.vm.frame.code_block.jit_metadata.is_disabled()
         {
             let mut arithmetic_jit = std::mem::take(&mut context.vm.arithmetic_jit);

@@ -43,7 +43,7 @@ pub(crate) use {
 pub(crate) use code_block::next_jit_code_id;
 
 pub use inline_cache::{InlineCacheMetadataSnapshot, InlineCacheState};
-pub use runtime_limits::RuntimeLimits;
+pub use runtime_limits::{RuntimeLimits, WALL_CLOCK_TIMEOUT_MESSAGE};
 pub use {
     bytecode_contract::{
         BYTECODE_CONTRACT_VERSION, BytecodeConstant, BytecodeContract, BytecodeContractError,
@@ -130,6 +130,9 @@ pub struct Vm {
     pub(crate) environments: EnvironmentStack,
     pub(crate) runtime_limits: RuntimeLimits,
 
+    /// Remaining straight-line instructions before the next time-limit poll.
+    interrupt_poll_remaining: u16,
+
     #[cfg(feature = "baseline-jit")]
     pub(crate) arithmetic_jit: crate::jit::ArithmeticRuntime,
 
@@ -140,12 +143,9 @@ pub struct Vm {
     #[cfg(feature = "baseline-jit")]
     pub(crate) baseline_jit_policy: BaselineJitPolicy,
 
-    /// Non-zero while the current dispatch path must not enter arithmetic generated code.
-    ///
-    /// Budgeted async dispatch disables this around each instruction so a native
-    /// loop cannot consume work that is invisible to its cooperative budget.
+    /// Remaining cooperative instruction budget shared with generated loop slices.
     #[cfg(feature = "baseline-jit")]
-    pub(crate) arithmetic_jit_suppression_depth: u8,
+    pub(crate) arithmetic_jit_budget: Option<u32>,
 
     /// This is used to assign a native (rust) function as the active function,
     /// because we don't push a frame for them.
@@ -590,6 +590,7 @@ impl Vm {
             environments: EnvironmentStack::new(realm.environment()),
             pending_exception: None,
             runtime_limits: RuntimeLimits::default(),
+            interrupt_poll_remaining: 0,
             #[cfg(feature = "baseline-jit")]
             arithmetic_jit: crate::jit::ArithmeticRuntime::default(),
             #[cfg(feature = "baseline-jit")]
@@ -597,7 +598,7 @@ impl Vm {
             #[cfg(feature = "baseline-jit")]
             baseline_jit_policy: BaselineJitPolicy::Enabled,
             #[cfg(feature = "baseline-jit")]
-            arithmetic_jit_suppression_depth: 0,
+            arithmetic_jit_budget: None,
             native_active_function: None,
             native_active_function_is_constructor_call: false,
             pending_native_call: None,
@@ -970,6 +971,35 @@ impl Context {
     where
         F: FnOnce(&mut Context, Opcode) -> ControlFlow<CompletionRecord>,
     {
+        let interrupt_boundary = matches!(
+            opcode,
+            Opcode::IncrementLoopIteration
+                | Opcode::Call
+                | Opcode::CallSpread
+                | Opcode::CallEval
+                | Opcode::CallEvalSpread
+                | Opcode::New
+                | Opcode::NewSpread
+                | Opcode::SuperCall
+                | Opcode::SuperCallSpread
+                | Opcode::SuperCallDerived
+                | Opcode::GetPropertyByName
+                | Opcode::GetPropertyByValue
+                | Opcode::SetPropertyByName
+                | Opcode::SetPropertyByValue
+                | Opcode::Throw
+                | Opcode::ReThrow
+                | Opcode::Return
+        );
+        if self.vm.runtime_limits.deadline().is_some() {
+            if self.vm.interrupt_poll_remaining == 0 || interrupt_boundary {
+                self.vm.interrupt_poll_remaining = 256;
+                if let Err(error) = self.vm.runtime_limits.check_deadline() {
+                    return self.handle_error(error);
+                }
+            }
+            self.vm.interrupt_poll_remaining -= 1;
+        }
         #[cfg(test)]
         self.vm
             .instruction_count
@@ -986,17 +1016,30 @@ impl Context {
         }
 
         #[cfg(feature = "trace")]
-        if self.vm.trace || self.vm.frame().code_block.traceable() {
+        let result = if self.vm.trace || self.vm.frame().code_block.traceable() {
             self.trace_execute_instruction(f, opcode)
         } else {
             self.execute_instruction(f, opcode)
-        }
+        };
 
         #[cfg(not(feature = "trace"))]
-        self.execute_instruction(f, opcode)
+        let result = self.execute_instruction(f, opcode);
+
+        if interrupt_boundary
+            && result.is_continue()
+            && let Err(error) = self.vm.runtime_limits.check_deadline()
+        {
+            return self.handle_error(error);
+        }
+        result
     }
 
     fn handle_error(&mut self, mut err: JsError) -> ControlFlow<CompletionRecord> {
+        if err.is_catchable()
+            && let Err(timeout) = self.vm.runtime_limits.check_deadline()
+        {
+            err = timeout;
+        }
         #[cfg(feature = "baseline-jit")]
         self.prepare_generated_exception(&mut err);
         // If we hit the execution step limit, bubble up the error to the
@@ -1197,6 +1240,7 @@ impl Context {
     /// "clock cycles" have passed.
     #[allow(clippy::future_not_send)]
     pub(crate) async fn run_async_with_budget(&mut self, budget: u32) -> CompletionRecord {
+        self.vm.interrupt_poll_remaining = 0;
         #[cfg(feature = "trace")]
         if self.vm.trace {
             self.trace_call_frame();
@@ -1234,6 +1278,12 @@ impl Context {
                     let _ = suspension.resume(Err(error));
                 }
                 let result = suspension.wait().await;
+                if let Err(error) = self.vm.runtime_limits.check_deadline() {
+                    if let ControlFlow::Break(completion) = self.handle_error(error) {
+                        return completion;
+                    }
+                    unreachable!("deadline errors bypass JavaScript handlers");
+                }
                 let completion = if placeholder_was_consumed {
                     match result {
                         Ok(_) => unreachable!("the rejected suspension completed successfully"),
@@ -1257,6 +1307,7 @@ impl Context {
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
+        self.vm.interrupt_poll_remaining = 0;
         #[cfg(feature = "trace")]
         if self.vm.trace {
             self.trace_call_frame();
@@ -1304,6 +1355,7 @@ impl Context {
 
     /// Checks if we haven't exceeded the defined runtime limits.
     pub(crate) fn check_runtime_limits(&self) -> JsResult<()> {
+        self.vm.runtime_limits.check_deadline()?;
         // Must throw if the number of recursive calls exceeds the defined limit.
         if self.vm.runtime_limits.recursion_limit() <= self.vm.frames.len() {
             // A recursion overflow is a normal JavaScript exception. In particular,
