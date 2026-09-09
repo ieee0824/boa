@@ -105,6 +105,7 @@ where
 }
 
 impl UpdateExpression {
+    #[inline(never)]
     fn parse_prefix<R: ReadChar>(
         self,
         cursor: &mut Cursor<R>,
@@ -171,6 +172,7 @@ impl UpdateExpression {
         }
     }
 
+    #[inline(never)]
     fn parse_postfix<R: ReadChar>(
         lhs: Expression,
         position: Position,

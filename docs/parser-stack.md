@@ -43,8 +43,11 @@ measurements of this build, not portable layout guarantees.
 The member/assignment/update/conditional and operator-precedence parsers now
 keep their post-operand work in separate functions. Their temporary AST values
 no longer remain on the stack while the initial operand recursively parses a
-function body. Grammar, precedence, public AST types and dependency versions are
-unchanged.
+function body. These post-operand helpers are kept out of line even in optimized
+builds: inlining them back into the recursive path can recreate large frames.
+The release tests also retain 100 nested arrays and parentheses on both stack
+sizes, which caught that regression in native x86_64 and aarch64 CI. Grammar,
+precedence, public AST types and dependency versions are unchanged.
 
 ## Reproduce the checks
 

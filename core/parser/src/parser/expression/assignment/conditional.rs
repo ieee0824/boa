@@ -72,6 +72,7 @@ where
 }
 
 impl ConditionalExpression {
+    #[inline(never)]
     fn parse_tail<R: ReadChar>(
         self,
         lhs: Expression,

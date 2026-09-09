@@ -79,6 +79,7 @@ where
 
 impl MemberExpression {
     // Keep keyword-specific AST temporaries off the recursive primary-expression path.
+    #[inline(never)]
     fn parse_keyword<R: ReadChar>(
         self,
         cursor: &mut Cursor<R>,
@@ -251,6 +252,7 @@ impl MemberExpression {
         Ok(lhs)
     }
 
+    #[inline(never)]
     fn parse_tail<R: ReadChar>(
         self,
         mut lhs: ast::Expression,

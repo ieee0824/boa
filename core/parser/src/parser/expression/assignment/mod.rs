@@ -164,6 +164,7 @@ where
 
 impl AssignmentExpression {
     // Arrow and assignment temporaries are only needed after the condition has parsed.
+    #[inline(never)]
     fn parse_tail<R: ReadChar>(
         self,
         mut lhs: Expression,

@@ -87,6 +87,7 @@ macro_rules! expression {
         }
 
         impl $name {
+            #[inline(never)]
             fn parse_tail<R: ReadChar>(
                 self,
                 mut lhs: ast::Expression,
@@ -162,6 +163,7 @@ where
 }
 
 impl Expression {
+    #[inline(never)]
     fn parse_tail<R: ReadChar>(
         self,
         mut lhs: ast::Expression,
@@ -285,6 +287,7 @@ where
 }
 
 impl ShortCircuitExpression {
+    #[inline(never)]
     fn parse_tail<R: ReadChar>(
         self,
         mut current_node: ast::Expression,
