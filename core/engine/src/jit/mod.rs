@@ -14,6 +14,10 @@ mod lowering;
 mod platform;
 mod runtime_call;
 mod stack_map;
+mod vm_runtime;
+
+pub use vm_runtime::JitExceptionDiagnostics;
+pub(crate) use vm_runtime::VmRuntime;
 
 pub use arithmetic::ArithmeticJitDiagnostics;
 pub(crate) use arithmetic::ArithmeticRuntime;

@@ -490,6 +490,11 @@ impl Context {
         let frame = self.vm.frame_mut();
         let pc = frame.pc as usize;
 
+        #[cfg(feature = "baseline-jit")]
+        return self.invoke_runtime_site(opcode, |context| {
+            OPCODE_HANDLERS[opcode as usize](context, pc)
+        });
+        #[cfg(not(feature = "baseline-jit"))]
         OPCODE_HANDLERS[opcode as usize](self, pc)
     }
 
@@ -504,6 +509,11 @@ impl Context {
         #[cfg(feature = "baseline-jit")]
         let arithmetic_jit_suppression_depth =
             std::mem::replace(&mut self.vm.arithmetic_jit_suppression_depth, 1);
+        #[cfg(feature = "baseline-jit")]
+        let result = self.invoke_runtime_site(opcode, |context| {
+            OPCODE_HANDLERS_BUDGET[opcode as usize](context, pc, budget)
+        });
+        #[cfg(not(feature = "baseline-jit"))]
         let result = OPCODE_HANDLERS_BUDGET[opcode as usize](self, pc, budget);
         #[cfg(feature = "baseline-jit")]
         {

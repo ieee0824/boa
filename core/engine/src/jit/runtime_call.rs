@@ -137,6 +137,8 @@ pub struct JitRuntimeCallDiagnostics {
     pub exceptions: u64,
     /// Runtime exceptions planned through the active generated frame chain.
     pub exception_unwinds: u64,
+    /// Generated frames and matching root records removed by unwind plans.
+    pub unwound_frames: u64,
     /// Deterministically injected allocation failures.
     pub allocation_failures: u64,
 }
@@ -145,6 +147,7 @@ pub struct JitRuntimeCallDiagnostics {
 enum RuntimeRequest {
     Allocate(JitAllocationKind),
     Throw,
+    NestedThrow,
     NestedAllocate(JitAllocationKind),
     CollectMinor,
     CollectMajor,
@@ -395,6 +398,16 @@ impl JitRuntimeCall {
         self.invoke(RuntimeRequest::Throw, &[], context)
     }
 
+    /// Throws after a collection in a nested generated call with live spill roots.
+    #[doc(hidden)]
+    pub fn nested_throw_for_test(
+        &self,
+        arguments: &[JsValue],
+        context: &mut Context,
+    ) -> Result<JsResult<JsValue>, RuntimeCallError> {
+        self.invoke(RuntimeRequest::NestedThrow, arguments, context)
+    }
+
     /// Enters a second generated helper while the outer JIT frame remains live.
     #[doc(hidden)]
     pub fn nested_allocate_for_test(
@@ -461,6 +474,7 @@ impl JitRuntimeCall {
 
         let code = match request {
             RuntimeRequest::Throw
+            | RuntimeRequest::NestedThrow
             | RuntimeRequest::NestedAllocate(_)
             | RuntimeRequest::CollectMinor
             | RuntimeRequest::CollectMajor => &self.call_code,
@@ -505,10 +519,17 @@ impl JitRuntimeCall {
         }
         code.enter(&mut frame);
         let state = unsafe { &mut *self.state.get() };
-        if pending
-            .result
-            .as_ref()
-            .is_some_and(|result| matches!(result, Ok(Err(_))))
+        if state
+            .active_frames
+            .frames()
+            .last()
+            .is_some_and(|frame| frame.header.frame_id == frame_id)
+            && pending.result.as_ref().is_some_and(|result| {
+                matches!(
+                    result,
+                    Ok(Err(_)) | Err(RuntimeCallError::AllocationFailure)
+                )
+            })
         {
             let plan = JitExceptionUnwindPlan::build(&state.active_frames, &state.pc_table)
                 .expect("active generated exception frames resolve at exact safepoints");
@@ -518,17 +539,39 @@ impl JitRuntimeCall {
             ));
             state.diagnostics.exception_unwinds =
                 state.diagnostics.exception_unwinds.saturating_add(1);
+            for &id in plan.popped_frame_ids() {
+                let roots = state
+                    .active_roots
+                    .pop()
+                    .expect("every generated frame owns a root record");
+                assert_eq!(roots.frame_id, id);
+                state
+                    .active_frames
+                    .pop(id)
+                    .expect("unwind order is inner to outer");
+                state.diagnostics.unwound_frames += 1;
+            }
         }
-        let popped_roots = state
-            .active_roots
-            .pop()
-            .expect("every generated frame has a root record");
-        assert_eq!(popped_roots.frame_id, frame_id);
-        let popped = state
+        // An inner exception can already have removed this logical frame. The
+        // physical helper only forwards that result, without allocating or
+        // reading spills after cleanup, until the native ABI returns.
+        if state
             .active_frames
-            .pop(frame_id)
-            .expect("generated calls return in stack order");
-        debug_assert_eq!(popped.header.frame_id, frame_id);
+            .frames()
+            .last()
+            .is_some_and(|frame| frame.header.frame_id == frame_id)
+        {
+            let popped_roots = state
+                .active_roots
+                .pop()
+                .expect("every generated frame has a root record");
+            assert_eq!(popped_roots.frame_id, frame_id);
+            let popped = state
+                .active_frames
+                .pop(frame_id)
+                .expect("generated calls return in stack order");
+            debug_assert_eq!(popped.header.frame_id, frame_id);
+        }
         pending
             .result
             .unwrap_or(Err(RuntimeCallError::MissingResult))
@@ -543,12 +586,14 @@ impl JitRuntimeCall {
         match request {
             RuntimeRequest::Allocate(kind) => self.allocate_helper(kind, arguments, context),
             RuntimeRequest::Throw => {
+                boa_gc::force_minor_collect();
                 let state = unsafe { &mut *self.state.get() };
                 state.diagnostics.exceptions = state.diagnostics.exceptions.saturating_add(1);
                 Ok(Err(JsNativeError::typ()
                     .with_message("JIT runtime helper exception")
                     .into()))
             }
+            RuntimeRequest::NestedThrow => self.invoke(RuntimeRequest::Throw, arguments, context),
             RuntimeRequest::NestedAllocate(kind) => {
                 self.invoke(RuntimeRequest::Allocate(kind), arguments, context)
             }
@@ -652,6 +697,29 @@ mod tests {
     use super::*;
     use crate::{Source, js_string};
     use boa_gc::WeakGc;
+
+    #[test]
+    #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+    fn exception_plan_removes_nested_frames_and_their_spill_roots() {
+        let mut context = Context::default();
+        let runtime = JitRuntimeCall::new(1, 0).unwrap();
+        let live = JsObject::with_null_proto();
+        let weak = WeakGc::new(&live.root_inner());
+        let error = runtime
+            .nested_throw_for_test(&[live.clone().into()], &mut context)
+            .unwrap()
+            .unwrap_err();
+        assert!(error.as_native().unwrap().is_type());
+        let state = unsafe { &*runtime.state.get() };
+        assert!(state.active_frames.frames().is_empty());
+        assert!(state.active_roots.is_empty());
+        assert_eq!(state.diagnostics.exception_unwinds, 1);
+        assert_eq!(state.diagnostics.unwound_frames, 2);
+        assert!(weak.is_upgradable());
+        drop(live);
+        boa_gc::force_collect();
+        assert!(!weak.is_upgradable());
+    }
 
     #[test]
     fn excessive_frame_capacity_is_rejected_before_code_allocation() {
@@ -762,7 +830,8 @@ mod tests {
         assert_eq!(diagnostics.nested_calls, 16);
         assert_eq!(diagnostics.slow_allocations, 16);
         assert_eq!(diagnostics.exceptions, 1);
-        assert_eq!(diagnostics.exception_unwinds, 1);
+        assert_eq!(diagnostics.exception_unwinds, 3);
+        assert_eq!(diagnostics.unwound_frames, 3);
         assert_eq!(diagnostics.allocation_failures, 2);
         assert_eq!(
             runtime.call_code[0].descriptor.safepoints()[0].kind,
