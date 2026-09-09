@@ -71,13 +71,13 @@ impl ForwardTransition {
     }
 
     /// Insert a prototype transition.
-    pub(super) fn insert_prototype(&self, key: JsPrototype, value: &Rooted<SharedShapeInner>) {
+    pub(super) fn insert_prototype(&self, key: &JsPrototype, value: &Rooted<SharedShapeInner>) {
         // Store only the address as the lookup key. A strong prototype key
         // would retain its entire Realm through a shared root shape, even
         // though the target shape is weak. A live target shape itself owns
         // the prototype, so its address cannot be reused while that target
         // can still be upgraded; dead targets are discarded on lookup.
-        let key = prototype_key(&key);
+        let key = prototype_key(key);
         // Allocated before the borrow, for the reason given in `insert_property`.
         let value = WeakGcEdge::new_rooted(value);
 
