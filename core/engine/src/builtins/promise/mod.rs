@@ -2224,6 +2224,11 @@ impl Promise {
                         return Ok(JsValue::undefined());
                     };
 
+                    // Taking the shared capture marks both functions resolved
+                    // and removes its traced edge. Keep the promise rooted
+                    // across getters, host callbacks, and job allocation.
+                    let _promise_root = promise.clone().root();
+
                     let resolution = args.get_or_undefined(0);
 
                     // 7. If SameValue(resolution, promise) is true, then
@@ -2320,6 +2325,10 @@ impl Promise {
                     let Some(promise) = captures.take() else {
                         return Ok(JsValue::undefined());
                     };
+
+                    // Rejection can allocate jobs or invoke a host hook after
+                    // the shared capture has stopped tracing the promise.
+                    let _promise_root = promise.clone().root();
 
                     // 7. Perform RejectPromise(promise, reason).
                     reject_promise(&promise, args.get_or_undefined(0).clone(), context);
