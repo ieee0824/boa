@@ -93,7 +93,11 @@ where
 {
     type Output = ast::Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         // TODO: tok currently consumes the token instead of peeking, so the token
         // isn't passed and consumed by parsers according to spec (EX: GeneratorExpression)
         let tok = cursor.peek(0, interner).or_abrupt()?;
@@ -312,7 +316,11 @@ where
 {
     type Output = ast::Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         #[derive(Debug)]
         enum InnerExpression {
             Expression(ast::Expression),

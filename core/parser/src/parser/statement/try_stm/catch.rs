@@ -53,7 +53,11 @@ where
 {
     type Output = statement::Catch;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Catch, false), "try statement", interner)?;
         let position = cursor.peek(0, interner).or_abrupt()?.span().start();
         let catch_param = if cursor.next_if(Punctuator::OpenParen, interner)?.is_some() {
@@ -152,7 +156,11 @@ where
 {
     type Output = Binding;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let token = cursor.peek(0, interner).or_abrupt()?;
 
         match token.kind() {

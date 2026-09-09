@@ -75,13 +75,25 @@ macro_rules! expression {
         {
             type Output = ast::Expression;
 
-            fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner)-> ParseResult<ast::Expression> {
+            fn parse_inner(self, cursor: &mut Cursor<R>, interner: &mut Interner)-> ParseResult<ast::Expression> {
 
                 if $goal.is_some() {
                     cursor.set_goal($goal.unwrap());
                 }
 
-                let mut lhs = $lower::new($( self.$low_param ),*).parse(cursor, interner)?;
+                let lhs = $lower::new($( self.$low_param ),*).parse(cursor, interner)?;
+                self.parse_tail(lhs, cursor, interner)
+            }
+        }
+
+        impl $name {
+            #[inline(never)]
+            fn parse_tail<R: ReadChar>(
+                self,
+                mut lhs: ast::Expression,
+                cursor: &mut Cursor<R>,
+                interner: &mut Interner,
+            ) -> ParseResult<ast::Expression> {
                 while let Some(tok) = cursor.peek(0, interner)? {
                     match *tok.kind() {
                         TokenKind::Punctuator(op) if $( op == $op )||* => {
@@ -139,9 +151,25 @@ where
 {
     type Output = ast::Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let mut lhs = AssignmentExpression::new(self.allow_in, self.allow_yield, self.allow_await)
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
+        let lhs = AssignmentExpression::new(self.allow_in, self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
+        self.parse_tail(lhs, cursor, interner)
+    }
+}
+
+impl Expression {
+    #[inline(never)]
+    fn parse_tail<R: ReadChar>(
+        self,
+        mut lhs: ast::Expression,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<ast::Expression> {
         while let Some(tok) = cursor.peek(0, interner)? {
             match *tok.kind() {
                 TokenKind::Punctuator(Punctuator::Comma) => {
@@ -246,10 +274,26 @@ where
 {
     type Output = ast::Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let mut current_node =
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
+        let current_node =
             BitwiseORExpression::new(self.allow_in, self.allow_yield, self.allow_await)
                 .parse(cursor, interner)?;
+        self.parse_tail(current_node, cursor, interner)
+    }
+}
+
+impl ShortCircuitExpression {
+    #[inline(never)]
+    fn parse_tail<R: ReadChar>(
+        self,
+        mut current_node: ast::Expression,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<ast::Expression> {
         let mut previous = self.previous;
 
         while let Some(tok) = cursor.peek(0, interner)? {
@@ -516,7 +560,11 @@ where
 {
     type Output = ast::Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         if self.allow_in.0 {
             let token = cursor.peek(0, interner).or_abrupt()?;
             if let TokenKind::PrivateIdentifier(identifier) = token.kind() {

@@ -64,7 +64,11 @@ where
 {
     type Output = ast::Declaration;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
         match tok.kind() {
@@ -118,7 +122,11 @@ where
 {
     type Output = ast::declaration::ModuleSpecifier;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect(TokenKind::identifier(Sym::FROM), self.context, interner)?;
 
         let tok = cursor.next(interner).or_abrupt()?;

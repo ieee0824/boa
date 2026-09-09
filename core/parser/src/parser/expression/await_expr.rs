@@ -47,7 +47,11 @@ where
 {
     type Output = Await;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let await_span_start = cursor
             .expect(
                 TokenKind::Keyword((Keyword::Await, false)),

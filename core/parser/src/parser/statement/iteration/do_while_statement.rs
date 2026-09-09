@@ -60,7 +60,11 @@ where
 {
     type Output = DoWhileLoop;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Do, false), "do while statement", interner)?;
 
         let position = cursor.peek(0, interner).or_abrupt()?.span().start();

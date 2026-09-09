@@ -76,7 +76,11 @@ where
 {
     type Output = FunctionDeclarationNode;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let func_token =
             cursor.expect((Keyword::Function, false), "function declaration", interner)?;
         let func_token_span = func_token.linear_span();

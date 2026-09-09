@@ -49,12 +49,25 @@ where
 
     /// Parses the token stream using the current parser.
     ///
-    /// This method needs to be provided by the implementor type.
+    /// Every grammar production enters through this checked wrapper.
     ///
     /// # Errors
     ///
     /// It will fail if the cursor is not placed at the beginning of the expected non-terminal.
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output>;
+    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+        let marker = 0_u8;
+        cursor.enter_parser(std::ptr::from_ref(&marker) as usize, interner)?;
+        let result = self.parse_inner(cursor, interner);
+        cursor.leave_parser();
+        result
+    }
+
+    /// Parses one production after checking the shared stack and recursion budget.
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output>;
 }
 
 /// Boolean representing if the parser should allow a `yield` keyword.
@@ -112,6 +125,18 @@ impl From<bool> for AllowDefault {
 /// This parser implementation tries to be conformant to the most recent
 /// [ECMAScript language specification], and it also implements some legacy features like
 /// [labelled functions][label] or [duplicated block-level function definitions][block].
+///
+/// # Stack requirements
+///
+/// Provide at least 2 `MiB` of available native stack when entering the parser, including
+/// in unoptimized builds. Parsing returns an error when it uses more than 1.5 `MiB` of
+/// that stack or reaches 4096 simultaneous grammar productions. The remaining stack
+/// is reserved for lexer work, error propagation and cleanup. The accepted syntax
+/// depth therefore depends on the compiler, profile and host architecture.
+///
+/// These are parser recursion limits, not limits on source length or flat lists.
+/// They do not measure stack already consumed by the embedding application, and
+/// do not replace the VM's separate execution limits.
 ///
 /// [spec]: https://tc39.es/ecma262/#sec-ecmascript-language-source-code
 /// [label]: https://tc39.es/ecma262/#sec-labelled-function-declarations
@@ -324,7 +349,11 @@ where
 {
     type Output = ScriptParseOutput;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let stmts =
             ScriptBody::new(true, cursor.strict(), self.direct_eval).parse(cursor, interner)?;
         let script = boa_ast::Script::new(stmts);
@@ -386,7 +415,11 @@ where
 {
     type Output = StatementList;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let (body, _end) = statement::StatementList::new(
             false,
             false,
@@ -458,7 +491,11 @@ where
 {
     type Output = ModuleParseOutput;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.set_module();
 
         let module = boa_ast::Module::new(ModuleItemList.parse(cursor, interner)?);

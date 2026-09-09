@@ -115,7 +115,11 @@ where
 {
     type Output = ast::Statement;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         // TODO: add BreakableStatement and divide Whiles, fors and so on to another place.
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
@@ -283,7 +287,11 @@ where
     ///
     /// Note that the last token which causes the parse to finish is not
     /// consumed.
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let mut items = Vec::new();
 
         let global_strict = cursor.strict();
@@ -416,7 +424,11 @@ where
 {
     type Output = ast::StatementListItem;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
         match tok.kind().clone() {
@@ -492,7 +504,11 @@ where
 {
     type Output = ObjectPattern;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let start = cursor
             .expect(
                 TokenKind::Punctuator(Punctuator::OpenBlock),
@@ -740,7 +756,11 @@ where
 {
     type Output = ArrayPattern;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let start = cursor
             .expect(
                 TokenKind::Punctuator(Punctuator::OpenBracket),
@@ -936,7 +956,11 @@ where
 {
     type Output = boa_ast::ModuleItemList;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let mut list = Vec::new();
         while cursor.peek(0, interner)?.is_some() {
             let item = ModuleItem.parse(cursor, interner)?;
@@ -986,7 +1010,11 @@ where
 {
     type Output = boa_ast::ModuleItem;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let tok = cursor.peek(0, interner).or_abrupt()?;
 
         match tok.kind() {

@@ -41,7 +41,11 @@ where
 {
     type Output = ClassExpressionNode;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let class_span_start = cursor
             .expect(
                 TokenKind::Keyword((Keyword::Class, false)),

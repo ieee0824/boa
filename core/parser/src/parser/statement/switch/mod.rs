@@ -59,7 +59,11 @@ where
 {
     type Output = Switch;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Switch, false), "switch statement", interner)?;
         cursor.expect(Punctuator::OpenParen, "switch statement", interner)?;
 
@@ -143,7 +147,11 @@ where
 {
     type Output = Box<[statement::Case]>;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect(Punctuator::OpenBlock, "switch case block", interner)?;
 
         let mut cases = Vec::new();

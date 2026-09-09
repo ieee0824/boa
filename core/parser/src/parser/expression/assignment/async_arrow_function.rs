@@ -65,7 +65,11 @@ where
 {
     type Output = ast::function::AsyncArrowFunction;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let async_token =
             cursor.expect((Keyword::Async, false), "async arrow function", interner)?;
         let start_linear_span = async_token.linear_span();
@@ -182,7 +186,11 @@ where
 {
     type Output = ast::function::FunctionBody;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let body = if let TokenKind::Punctuator(Punctuator::OpenBlock) =
             cursor.peek(0, interner).or_abrupt()?.kind()
         {

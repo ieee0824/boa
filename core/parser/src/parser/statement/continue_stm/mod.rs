@@ -56,7 +56,11 @@ where
 {
     type Output = Continue;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Continue, false), "continue statement", interner)?;
 
         let label = if let SemicolonResult::Found(tok) = cursor.peek_semicolon(interner)? {

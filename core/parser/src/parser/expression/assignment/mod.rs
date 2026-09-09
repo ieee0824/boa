@@ -29,7 +29,7 @@ use crate::{
     source::ReadChar,
 };
 use boa_ast::{
-    Expression, Keyword, Punctuator, Span, Spanned,
+    Expression, Keyword, LinearSpan, Position, Punctuator, Span, Spanned,
     expression::operator::assign::{Assign, AssignOp, AssignTarget},
     operations::{ContainsSymbol, bound_names, contains, lexically_declared_names},
 };
@@ -84,7 +84,11 @@ where
 {
     type Output = Expression;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Expression> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
         cursor.set_goal(InputElement::RegExp);
 
         match cursor.peek(0, interner).or_abrupt()?.kind() {
@@ -151,9 +155,24 @@ where
         let peek_token = cursor.peek(0, interner).or_abrupt()?;
         let position = peek_token.span().start();
         let start_linear_span = peek_token.linear_span();
-        let mut lhs = ConditionalExpression::new(self.allow_in, self.allow_yield, self.allow_await)
+        let lhs = ConditionalExpression::new(self.allow_in, self.allow_yield, self.allow_await)
             .parse(cursor, interner)?;
 
+        self.parse_tail(lhs, position, start_linear_span, cursor, interner)
+    }
+}
+
+impl AssignmentExpression {
+    // Arrow and assignment temporaries are only needed after the condition has parsed.
+    #[inline(never)]
+    fn parse_tail<R: ReadChar>(
+        self,
+        mut lhs: Expression,
+        position: Position,
+        start_linear_span: LinearSpan,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
         // If the left hand side is a parameter list, we must parse an arrow function.
         if let Expression::FormalParameterList(parameters) = lhs {
             cursor.peek_expect_no_lineterminator(0, "arrow function", interner)?;

@@ -43,7 +43,11 @@ where
 {
     type Output = AsyncFunctionExpressionNode;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         let token = cursor.expect(
             (Keyword::Async, false),
             "async function expression",

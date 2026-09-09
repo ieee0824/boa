@@ -42,7 +42,11 @@ where
 {
     type Output = Throw;
 
-    fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
+    fn parse_inner(
+        self,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Self::Output> {
         cursor.expect((Keyword::Throw, false), "throw statement", interner)?;
 
         cursor.peek_expect_no_lineterminator(0, "throw statement", interner)?;
