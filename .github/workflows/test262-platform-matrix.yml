@@ -8,7 +8,13 @@ on:
       revision:
         description: Exact Boa commit to compare on every environment
         type: string
-        default: 8f0bdfe013a71f3c8b81d84d345f44ea438b3544
+        default: 21dde73e068e2051fe63863d743e3e067731976c
+        required: true
+      stack_bytes:
+        description: Rust worker stack size; 2 MiB reproduces the existing debug parser overflow
+        type: choice
+        options: ['8388608', '2097152']
+        default: '8388608'
         required: true
 
 permissions:
@@ -29,8 +35,9 @@ jobs:
           - {arch: aarch64, runner: ubuntu-24.04-arm, profile: release}
     env:
       RAYON_NUM_THREADS: "2"
+      RUST_MIN_STACK: ${{ inputs.stack_bytes || '8388608' }}
       RUST_BACKTRACE: full
-      TEST_REVISION: ${{ inputs.revision || '8f0bdfe013a71f3c8b81d84d345f44ea438b3544' }}
+      TEST_REVISION: ${{ inputs.revision || '21dde73e068e2051fe63863d743e3e067731976c' }}
     steps:
       - name: Require the same exact commit on every runner
         shell: bash
@@ -38,6 +45,7 @@ jobs:
           python3 - <<'PY'
           import os, re
           assert re.fullmatch(r'[0-9a-f]{40}', os.environ['TEST_REVISION'])
+          assert os.environ['RUST_MIN_STACK'] in ('2097152', '8388608')
           PY
       - uses: actions/checkout@v5
         with:
@@ -64,7 +72,8 @@ jobs:
             gcc --version
             ldd --version
             git -C boa show --no-patch --format=fuller HEAD
-            echo "profile=${{ matrix.profile }} rayon_threads=$RAYON_NUM_THREADS"
+            echo "profile=${{ matrix.profile }} rayon_threads=$RAYON_NUM_THREADS rust_min_stack=$RUST_MIN_STACK"
+            echo "main_stack_kib=$(ulimit -s)"
           } > artifacts/environment.txt
           python3 - <<'PY'
           import os, pathlib, re, tomllib
