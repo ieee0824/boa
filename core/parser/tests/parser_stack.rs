@@ -4,6 +4,43 @@ use boa_ast::scope::Scope;
 use boa_interner::Interner;
 use boa_parser::{Parser, Source};
 
+#[test]
+fn shallow_inputs_on_2_mib_stack() {
+    std::thread::Builder::new()
+        .name("parser-shallow".to_owned())
+        .stack_size(2 * 1024 * 1024)
+        .spawn(|| {
+            let mut interner = Interner::default();
+            for source in ["", "42;", "function f(a) { return a + 1; } f(41);"] {
+                Parser::new(Source::from_bytes(source))
+                    .parse_script(&Scope::new_global(), &mut interner)
+                    .expect("shallow script must parse, including with ASAN fake stack");
+                let utf16: Vec<u16> = source.encode_utf16().collect();
+                Parser::new(Source::from_utf16(&utf16))
+                    .parse_script(&Scope::new_global(), &mut interner)
+                    .expect("shallow UTF-16 script must parse");
+                Parser::new(Source::from_reader(std::io::Cursor::new(source), None))
+                    .parse_script(&Scope::new_global(), &mut interner)
+                    .expect("shallow reader-backed script must parse");
+                Parser::new(Source::from_bytes(source))
+                    .parse_module(&Scope::new_global(), &mut interner)
+                    .expect("shallow module must parse");
+                Parser::new(Source::from_bytes(source))
+                    .parse_eval(false, &mut interner)
+                    .expect("shallow eval must parse");
+                Parser::new(Source::from_bytes(source))
+                    .parse_function_body(&mut interner, false, false)
+                    .expect("shallow dynamic function body must parse");
+            }
+            Parser::new(Source::from_bytes("a, b = 42"))
+                .parse_formal_parameters(&mut interner, false, false)
+                .expect("shallow dynamic function parameters must parse");
+        })
+        .expect("spawn shallow parser thread")
+        .join()
+        .expect("shallow parsing must not panic");
+}
+
 fn nested_functions() -> String {
     let mut source = "function f() { return ".to_owned();
     source.push_str(&"function () { return ".repeat(14));
@@ -53,13 +90,23 @@ fn parse_on_stack(stack_bytes: usize) {
             // The grammar budget must not impose a small syntax-depth limit on
             // optimized builds whose native frames already fit the host stack.
             #[cfg(not(debug_assertions))]
-            for source in [
-                format!("{}0{};", "[".repeat(100), "]".repeat(100)),
-                format!("{}0{};", "(".repeat(100), ")".repeat(100)),
+            for (name, source) in [
+                (
+                    "arrays",
+                    format!("{}0{};", "[".repeat(100), "]".repeat(100)),
+                ),
+                (
+                    "parentheses",
+                    format!("{}0{};", "(".repeat(100), ")".repeat(100)),
+                ),
             ] {
                 Parser::new(Source::from_bytes(&source))
                     .parse_script(&Scope::new_global(), &mut interner)
-                    .expect("optimized parsing must retain ordinary deep nesting");
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{name}: optimized parsing must retain ordinary deep nesting: {error}"
+                        )
+                    });
             }
             // Flat lists and iteratively parsed chains do not consume the recursion budget.
             for source in [

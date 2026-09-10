@@ -6,18 +6,25 @@ thread's stack. An embedding application that has already consumed substantial
 stack must account for that before calling the parser.
 
 Every grammar production enters through `TokenParser::parse`. The wrapper checks
-both the distance from its outermost stack marker and the number of active grammar
-productions. Parsing returns a normal `boa_parser::Error` with the message
-`parser recursion limit exceeded` when either limit is reached:
+both the native stack distance from its outermost entry and the number of active
+grammar productions. Parsing returns a normal `boa_parser::Error` with a message starting
+with `parser recursion limit exceeded` when either limit is reached:
 
 - 1.5 MiB of parser stack usage;
 - 4096 simultaneous grammar productions.
 
+The diagnostic includes the measured byte count and active grammar depth.
+
 The remaining 512 KiB within the minimum host stack is reserved for the next
-production, lexer work, error propagation and cleanup. Marker addresses are only
-compared as integers; they are never dereferenced. Both stack growth directions
-are handled. Each outermost parse establishes a new marker, and ordinary errors
-restore the grammar-depth counter while propagating outward.
+production, lexer work, error propagation and cleanup. On x86-64 and AArch64,
+the measurement reads the native stack pointer directly. ASAN may relocate
+address-taken locals to its fake stack, so local-variable addresses cannot measure
+native stack consumption in that configuration (#640). Other architectures and
+Miri retain the existing local-marker fallback; fake-stack support is verified
+only on x86-64 and AArch64. Sampled addresses are compared as integers and never
+dereferenced. Both growth directions are handled. Each outermost parse establishes
+a new baseline, and ordinary errors restore the depth counter while propagating
+outward.
 
 These limits describe recursive parser work, not source length, the number of
 statements, or the JavaScript VM's execution stack. Iterative expression chains
@@ -48,6 +55,13 @@ builds: inlining them back into the recursive path can recreate large frames.
 The release tests also retain 100 nested arrays and parentheses on both stack
 sizes, which caught that regression in native x86_64 and aarch64 CI. Grammar,
 precedence, public AST types and dependency versions are unchanged.
+
+With ASAN enabled, relational, primary and left-hand-side parsing also keep
+larger alternative paths and post-operand work out of active recursive frames.
+Parenthesized expressions separate their comma/rest handling and final parameter
+validation. This preserves the same 100-level release regressions with fake stack
+enabled without increasing either budget or reducing the test inputs. Actual
+frame sizes remain compiler- and instrumentation-dependent.
 
 ## Reproduce the checks
 
@@ -82,3 +96,12 @@ revision, pinned Test262 revision and complete logs even on failure. Since the
 single-file Test262 runner also returns exit status zero for a test assertion
 failure, the workflow explicitly requires one `Passed` outcome for each size;
 a successful process exit alone is not accepted as a conformance result.
+
+The additional `.github/workflows/parser-asan.yml` records explicit
+`detect_stack_use_after_return=1` and tests the same parser regressions plus the
+original #640 Function-constructor calibration on native x86-64 and AArch64,
+with dev/release profiles and both 2 MiB and 8 MiB stacks. The shallow regression
+covers all public parse entry points and input representations. The pinned
+calibration must actually pass; an exit status without a matching test report
+is insufficient. The diagnostic settings and exact revisions accompany every
+artifact.

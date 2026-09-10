@@ -76,16 +76,32 @@ where
         if self.parser_depth == 0 {
             self.parser_stack_start = stack_address;
         }
-        if self.parser_depth >= MAX_PARSER_DEPTH
-            || stack_address.abs_diff(self.parser_stack_start) > MAX_STACK_BYTES
-        {
-            let position = self
-                .peek(0, interner)?
-                .map_or(Position::new(1, 1), |token| token.span().start());
-            return Err(Error::general("parser recursion limit exceeded", position));
+        let stack_bytes = stack_address.abs_diff(self.parser_stack_start);
+        if self.parser_depth >= MAX_PARSER_DEPTH || stack_bytes > MAX_STACK_BYTES {
+            return self.parser_limit_error(stack_bytes, interner);
         }
         self.parser_depth += 1;
         Ok(())
+    }
+
+    /// Keep diagnostic and lookahead temporaries out of active recursive frames.
+    #[cold]
+    #[inline(never)]
+    fn parser_limit_error(
+        &mut self,
+        stack_bytes: usize,
+        interner: &mut Interner,
+    ) -> ParseResult<()> {
+        let position = self
+            .peek(0, interner)?
+            .map_or(Position::new(1, 1), |token| token.span().start());
+        Err(Error::general(
+            format!(
+                "parser recursion limit exceeded (native stack: {stack_bytes} bytes, productions: {})",
+                self.parser_depth
+            ),
+            position,
+        ))
     }
 
     pub(super) fn leave_parser(&mut self) {

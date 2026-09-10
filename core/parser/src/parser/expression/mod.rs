@@ -596,9 +596,22 @@ where
             }
         }
 
-        let mut lhs =
+        let lhs =
             ShiftExpression::new(self.allow_yield, self.allow_await).parse(cursor, interner)?;
 
+        self.parse_tail(lhs, cursor, interner)
+    }
+}
+
+impl RelationalExpression {
+    // Operator/AST temporaries are not needed while the initial operand recurses.
+    #[inline(never)]
+    fn parse_tail<R: ReadChar>(
+        self,
+        mut lhs: ast::Expression,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<ast::Expression> {
         while let Some(tok) = cursor.peek(0, interner)? {
             match *tok.kind() {
                 TokenKind::Punctuator(op)

@@ -1,0 +1,151 @@
+name: Parser AddressSanitizer regressions
+
+on:
+  pull_request:
+    paths:
+      - core/parser/**
+      - core/ast/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/parser-asan.yml
+  push:
+    branches: [main]
+    paths:
+      - core/parser/**
+      - core/ast/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/parser-asan.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: parser-asan-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  parser-asan:
+    name: Parser ASAN (${{ matrix.target }}, ${{ matrix.profile }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [dev, release]
+        target: [x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu]
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+    env:
+      RUSTC_BOOTSTRAP: '1'
+      RUSTFLAGS: -Zsanitizer=address -Cforce-frame-pointers=yes
+      CARGO_BUILD_JOBS: '2'
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_OPT_LEVEL: '1'
+      CARGO_PROFILE_DEV_DEBUG: '1'
+      ASAN_OPTIONS: detect_leaks=0:detect_stack_use_after_return=1:abort_on_error=1
+      TARGET: ${{ matrix.target }}
+      PROFILE: ${{ matrix.profile }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: parser-asan-v1-${{ matrix.target }}-${{ matrix.profile }}
+      - name: Record exact diagnostic settings and suite revision
+        id: suite
+        shell: bash
+        run: |
+          test "$(rustc --version --verbose | awk '/^host:/ {print $2}')" = "$TARGET"
+          mkdir -p artifacts
+          {
+            uname -a
+            rustc --version --verbose
+            git show --no-patch --format=fuller HEAD
+            printf 'target=%s profile=%s\n' "$TARGET" "$PROFILE"
+            printf 'rustflags=%s\nasan_options=%s\n' "$RUSTFLAGS" "$ASAN_OPTIONS"
+            printf 'dev_opt_level=%s dev_debug=%s incremental=%s\n' "$CARGO_PROFILE_DEV_OPT_LEVEL" "$CARGO_PROFILE_DEV_DEBUG" "$CARGO_INCREMENTAL"
+            echo 'thread_stack_bytes=2097152,8388608'
+          } > artifacts/environment.txt
+          python3 - <<'PY'
+          import os, pathlib, tomllib
+          revision = tomllib.loads(pathlib.Path('test262_config.toml').read_text())['commit']
+          pathlib.Path('artifacts/test262-revision.txt').write_text(revision + '\n')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write(f'revision={revision}\n')
+          PY
+      - uses: actions/checkout@v5
+        with:
+          repository: tc39/test262
+          ref: ${{ steps.suite.outputs.revision }}
+          path: test262
+          persist-credentials: false
+      - name: Require shallow parsing and deep-input rejection with fake stack enabled
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p boa_parser --target "$TARGET" --profile "$PROFILE" \
+            --test parser_stack -- --nocapture --test-threads=1 2>&1 | tee artifacts/parser-stack.log
+      - name: Build instrumented Test262 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --target "$TARGET" --profile "$PROFILE" --bin boa_tester \
+            2>&1 | tee artifacts/build.log
+      - name: Require the original Function-constructor calibration on 2 MiB and 8 MiB
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C test262 update-ref refs/heads/main '${{ steps.suite.outputs.revision }}'
+          output=debug
+          if [[ "$PROFILE" == release ]]; then output=release; fi
+          for stack_kib in 2048 8192; do
+            (
+              ulimit -c 0
+              ulimit -s "$stack_kib"
+              "target/$TARGET/$output/boa_tester" run --test262-path test262 \
+                --suite test/built-ins/Function/prototype/constructor --disable-parallelism \
+                -vv -o "artifacts/calibration-$stack_kib"
+            ) 2>&1 | tee "artifacts/calibration-$stack_kib.log"
+          done
+      - name: Verify actual passes and preserve a machine-readable summary
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib, re, subprocess
+          root = pathlib.Path('artifacts')
+          tests = re.findall(r'test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored', (root/'parser-stack.log').read_text())
+          assert tests == [('5', '0', '0')], tests
+          revision = (root/'test262-revision.txt').read_text().strip()
+          commit = subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
+          cases = {}
+          for stack in (2048, 8192):
+              reports = list((root/f'calibration-{stack}').rglob('latest.json'))
+              assert len(reports) == 1, reports
+              report = json.loads(reports[0].read_text())
+              assert report['u'] == revision and report['c'] == commit, report
+              stats = report['r']['a']
+              assert stats['t'] == stats['o'] == 1, stats
+              assert stats['p'] == 0 and stats['i'] == 0, stats
+              cases[str(stack)] = stats
+          summary = {'revision': commit,
+                     'target': os.environ['TARGET'], 'profile': os.environ['PROFILE'],
+                     'asan_options': os.environ['ASAN_OPTIONS'], 'test262_revision': revision,
+                     'parser_tests': tests, 'calibration': cases}
+          (root/'results.json').write_text(json.dumps(summary, indent=2)+'\n')
+          PY
+      - name: Upload settings, exact revisions and all execution logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: parser-asan-${{ matrix.target }}-${{ matrix.profile }}
+          path: artifacts/
+          if-no-files-found: error

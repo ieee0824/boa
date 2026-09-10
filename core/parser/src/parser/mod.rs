@@ -2,6 +2,7 @@
 
 mod cursor;
 mod expression;
+mod stack;
 mod statement;
 
 pub(crate) mod function;
@@ -55,8 +56,7 @@ where
     ///
     /// It will fail if the cursor is not placed at the beginning of the expected non-terminal.
     fn parse(self, cursor: &mut Cursor<R>, interner: &mut Interner) -> ParseResult<Self::Output> {
-        let marker = 0_u8;
-        cursor.enter_parser(std::ptr::from_ref(&marker) as usize, interner)?;
+        cursor.enter_parser(stack::current_stack_address(), interner)?;
         let result = self.parse_inner(cursor, interner);
         cursor.leave_parser();
         result
@@ -133,6 +133,8 @@ impl From<bool> for AllowDefault {
 /// that stack or reaches 4096 simultaneous grammar productions. The remaining stack
 /// is reserved for lexer work, error propagation and cleanup. The accepted syntax
 /// depth therefore depends on the compiler, profile and host architecture.
+/// On x86-64 and `AArch64` the budget measures the native stack pointer, so
+/// `AddressSanitizer`'s fake-stack placement does not affect this measurement.
 ///
 /// These are parser recursion limits, not limits on source length or flat lists.
 /// They do not measure stack already consumed by the embedding application, and
