@@ -1,4 +1,4 @@
-//! Bounded x86-64 integer loop emitter used by the first arithmetic baseline tier.
+//! Bounded native integer loops using the shared baseline lowering and frame contract.
 //!
 //! Values cross this boundary as checked safe integers in an engine-owned scratch frame.
 //! Generated code cannot allocate or retain GC edges. Any operation whose exact
@@ -26,6 +26,15 @@ use super::{
     JitFrameHeader, Safepoint, SafepointKind, StackMap, ValueLocation, WritableMemory,
 };
 
+#[cfg(target_arch = "aarch64")]
+mod arm64;
+#[cfg(target_arch = "aarch64")]
+use arm64::{Assembler, emit_exit, emit_instruction};
+#[cfg(not(target_arch = "aarch64"))]
+mod x86;
+#[cfg(not(target_arch = "aarch64"))]
+use x86::{Assembler, emit_exit, emit_instruction};
+
 static NEXT_FRAME_DESCRIPTOR_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_ACTIVE_FRAME_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -48,19 +57,40 @@ struct NativeEntryLimits {
     interpreter_frame_depth: usize,
 }
 
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, registers) == 0x00);
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, dirty) == 0x08);
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, loop_iterations) == 0x10);
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, loop_limit) == 0x18);
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, pc) == 0x20);
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, status) == 0x24);
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+#[cfg(all(
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    any(target_os = "linux", target_os = "macos")
+))]
 static_assertions::const_assert!(offset_of!(NativeFrame, header) == 0x28);
 
 #[derive(Debug)]
@@ -102,12 +132,18 @@ impl ArithmeticCode {
         inline_caches: &[InlineCache],
         bytecode_resume: u32,
     ) -> Result<Option<Self>, JitError> {
-        #[cfg(not(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos"))))]
+        #[cfg(not(all(
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            any(target_os = "linux", target_os = "macos")
+        )))]
         {
             let _ = (snapshot, inline_caches, bytecode_resume);
             return Ok(None);
         }
-        #[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
+        #[cfg(all(
+            any(target_arch = "x86_64", target_arch = "aarch64"),
+            any(target_os = "linux", target_os = "macos")
+        ))]
         {
             let Some(mut region) = LoopRegion::find(snapshot, bytecode_resume) else {
                 return Ok(None);
@@ -117,6 +153,11 @@ impl ArithmeticCode {
             else {
                 return Ok(None);
             };
+            #[cfg(target_arch = "aarch64")]
+            if !properties.is_empty() {
+                // Property lowering is introduced separately by Gate 5-3.
+                return Ok(None);
+            }
             for property in &properties {
                 region
                     .required
@@ -124,13 +165,7 @@ impl ArithmeticCode {
             }
             let mut assembler = Assembler::default();
             let resumed_entry_offset = assembler.position();
-            // r10 permanently holds the checked integer register-file pointer.
-            assembler.bytes(&[0x4c, 0x8b, 0x17]); // mov r10, [rdi]
-            assembler.bytes(&[0x4c, 0x8b, 0x5f, 0x08]); // mov r11, [rdi + 8]
-            assembler.jump(
-                &[0xe9],
-                Label::Bytecode(snapshot.instructions[region.increment].next_offset),
-            );
+            assembler.entry(snapshot.instructions[region.increment].next_offset);
             let mut code_map = BytecodeCodeMap::default();
             let mut bailouts = BTreeSet::new();
             let mut safepoints = Vec::new();
@@ -1122,302 +1157,9 @@ enum Label {
     Bailout(u32, DeoptReason),
     Internal(u32, u8),
 }
-#[derive(Default)]
-struct Assembler {
-    code: Vec<u8>,
-    labels: BTreeMap<Label, u32>,
-    fixups: Vec<(usize, Label)>,
-}
-impl Assembler {
-    fn position(&self) -> u32 {
-        self.code.len() as u32
-    }
-    fn bytes(&mut self, bytes: &[u8]) {
-        self.code.extend_from_slice(bytes);
-    }
-    fn u32(&mut self, value: u32) {
-        self.bytes(&value.to_le_bytes());
-    }
-    fn bind(&mut self, label: Label) {
-        self.labels.insert(label, self.position());
-    }
-    fn jump(&mut self, opcode: &[u8], label: Label) {
-        self.bytes(opcode);
-        let at = self.code.len();
-        self.u32(0);
-        self.fixups.push((at, label));
-    }
-    fn resolve(&mut self) -> Result<(), JitError> {
-        for (at, label) in &self.fixups {
-            let target = i64::from(*self.labels.get(label).ok_or(JitError::InvalidCodeSize)?);
-            let after = (*at + 4) as i64;
-            let rel = i32::try_from(target - after).map_err(|_| JitError::InvalidCodeSize)?;
-            self.code[*at..*at + 4].copy_from_slice(&rel.to_le_bytes());
-        }
-        Ok(())
-    }
-}
-
-fn load(a: &mut Assembler, reg: u32, rcx: bool) {
-    a.bytes(if rcx {
-        &[0x49, 0x8b, 0x8a]
-    } else {
-        &[0x49, 0x8b, 0x82]
-    });
-    a.u32(reg * 8);
-}
-fn store_rax(a: &mut Assembler, reg: u32, kind: u8) {
-    a.bytes(&[0x49, 0x89, 0x82]);
-    a.u32(reg * 8);
-    a.bytes(&[0x41, 0xc6, 0x83]);
-    a.u32(reg);
-    a.bytes(&[kind]);
-}
-fn move_rax(a: &mut Assembler, src: u32, dst: u32, pc: u32) {
-    // Preserve a comparison's boolean tag when Move forwards it. Untagged
-    // native-entry inputs are known numeric values.
-    a.bytes(&[0x41, 0x8a, 0x8b]);
-    a.u32(src);
-    a.bytes(&[0x84, 0xc9]);
-    let typed = Label::Internal(pc, 4);
-    a.jump(&[0x0f, 0x85], typed);
-    a.bytes(&[0xb1, 0x01]);
-    a.bind(typed);
-    a.bytes(&[0x49, 0x89, 0x82]);
-    a.u32(dst * 8);
-    a.bytes(&[0x41, 0x88, 0x8b]);
-    a.u32(dst);
-}
-fn immediate(a: &mut Assembler, value: i64) {
-    a.bytes(&[0x48, 0xb8]);
-    a.bytes(&value.to_le_bytes());
-}
-fn bailout(
-    a: &mut Assembler,
-    opcode: &[u8],
-    pc: u32,
-    reason: DeoptReason,
-    set: &mut BTreeSet<(u32, DeoptReason)>,
-) {
-    set.insert((pc, reason));
-    a.jump(opcode, Label::Bailout(pc, reason));
-}
-
-fn guard_safe_integer(a: &mut Assembler, pc: u32, bailouts: &mut BTreeSet<(u32, DeoptReason)>) {
-    a.bytes(&[0x49, 0x89, 0xc0]); // mov r8, rax
-    immediate(a, 9_007_199_254_740_991);
-    a.bytes(&[0x49, 0x39, 0xc0]); // cmp r8, rax
-    bailout(a, &[0x0f, 0x8f], pc, DeoptReason::ArithmeticGuard, bailouts);
-    immediate(a, -9_007_199_254_740_991);
-    a.bytes(&[0x49, 0x39, 0xc0]); // cmp r8, rax
-    bailout(a, &[0x0f, 0x8c], pc, DeoptReason::ArithmeticGuard, bailouts);
-    a.bytes(&[0x4c, 0x89, 0xc0]); // mov rax, r8
-}
-
-fn emit_instruction(
-    a: &mut Assembler,
-    i: &crate::vm::BytecodeInstruction,
-    properties: &[PropertyBinding],
-    object_move_offsets: &BTreeSet<u32>,
-    bailouts: &mut BTreeSet<(u32, DeoptReason)>,
-) -> Result<(), JitError> {
-    let dst = || {
-        unsigned(i, "dst")
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or(JitError::InvalidCodeSize)
-    };
-    let src = |n| {
-        unsigned(i, n)
-            .and_then(|v| u32::try_from(v).ok())
-            .ok_or(JitError::InvalidCodeSize)
-    };
-    match i.name {
-        "IncrementLoopIteration" => {
-            let poll_offset = u8::try_from(offset_of!(NativeFrame, poll_remaining))
-                .map_err(|_| JitError::InvalidCodeSize)?;
-            a.bytes(&[0x48, 0x83, 0x7f, poll_offset, 0x00]); // cmp [rdi + poll], 0
-            bailout(a, &[0x0f, 0x84], i.offset, DeoptReason::Interrupt, bailouts);
-            a.bytes(&[0x48, 0x83, 0x6f, poll_offset, 0x01]); // sub [rdi + poll], 1
-            a.bytes(&[0x48, 0x8b, 0x47, 0x10, 0x48, 0x3b, 0x47, 0x18]);
-            bailout(a, &[0x0f, 0x87], i.offset, DeoptReason::Interrupt, bailouts);
-            a.bytes(&[0x48, 0x83, 0x47, 0x10, 0x01]);
-        }
-        "Move" => {
-            if object_move_offsets.contains(&i.offset) {
-                return Ok(());
-            }
-            let source = src("src")?;
-            load(a, source, false);
-            move_rax(a, source, dst()?, i.offset);
-        }
-        "PushZero" => {
-            immediate(a, 0);
-            store_rax(a, dst()?, 1);
-        }
-        "PushOne" => {
-            immediate(a, 1);
-            store_rax(a, dst()?, 1);
-        }
-        "PushInt8" | "PushInt16" | "PushInt32" => {
-            immediate(a, signed(i, "value").ok_or(JitError::InvalidCodeSize)?);
-            store_rax(a, dst()?, 1);
-        }
-        "Inc" => {
-            load(a, src("src")?, false);
-            a.bytes(&[0x48, 0x83, 0xc0, 0x01]);
-            bailout(
-                a,
-                &[0x0f, 0x80],
-                i.offset,
-                DeoptReason::ArithmeticGuard,
-                bailouts,
-            );
-            guard_safe_integer(a, i.offset, bailouts);
-            store_rax(a, dst()?, 1);
-        }
-        "Add" | "AddAssignLocal" | "Sub" | "Mul" => {
-            let output = if i.name == "AddAssignLocal" {
-                src("value")?
-            } else {
-                dst()?
-            };
-            load(
-                a,
-                src(if i.name == "AddAssignLocal" {
-                    "value"
-                } else {
-                    "lhs"
-                })?,
-                false,
-            );
-            load(a, src("rhs")?, true);
-            if i.name == "Mul" {
-                // A zero multiplied by a value with the opposite sign is -0,
-                // which this safe-integer tier cannot represent.
-                a.bytes(&[0x48, 0x85, 0xc0]);
-                let lhs_nonzero = Label::Internal(i.offset, 2);
-                a.jump(&[0x0f, 0x85], lhs_nonzero);
-                a.bytes(&[0x48, 0x85, 0xc9]);
-                bailout(
-                    a,
-                    &[0x0f, 0x88],
-                    i.offset,
-                    DeoptReason::ArithmeticGuard,
-                    bailouts,
-                );
-                let safe = Label::Internal(i.offset, 3);
-                a.jump(&[0xe9], safe);
-                a.bind(lhs_nonzero);
-                a.bytes(&[0x48, 0x85, 0xc9]);
-                a.jump(&[0x0f, 0x85], safe);
-                a.bytes(&[0x48, 0x85, 0xc0]);
-                bailout(
-                    a,
-                    &[0x0f, 0x88],
-                    i.offset,
-                    DeoptReason::ArithmeticGuard,
-                    bailouts,
-                );
-                a.bind(safe);
-            }
-            a.bytes(match i.name {
-                "Add" | "AddAssignLocal" => &[0x48, 0x01, 0xc8][..],
-                "Sub" => &[0x48, 0x29, 0xc8][..],
-                _ => &[0x48, 0x0f, 0xaf, 0xc1][..],
-            });
-            bailout(
-                a,
-                &[0x0f, 0x80],
-                i.offset,
-                DeoptReason::ArithmeticGuard,
-                bailouts,
-            );
-            guard_safe_integer(a, i.offset, bailouts);
-            store_rax(a, output, 1);
-        }
-        "Mod" => {
-            load(a, src("lhs")?, false);
-            load(a, src("rhs")?, true);
-            a.bytes(&[0x48, 0x85, 0xc9]);
-            bailout(
-                a,
-                &[0x0f, 0x84],
-                i.offset,
-                DeoptReason::ArithmeticGuard,
-                bailouts,
-            );
-            // Inputs are bounded to safe integers, so signed division cannot
-            // encounter the i64::MIN / -1 hardware trap.
-            a.bytes(&[0x49, 0x89, 0xc0, 0x48, 0x99, 0x48, 0xf7, 0xf9]);
-            // A negative zero remainder needs the interpreter's f64 representation.
-            a.bytes(&[0x48, 0x85, 0xd2]);
-            let nonzero = Label::Internal(i.offset, 1);
-            a.jump(&[0x0f, 0x85], nonzero);
-            a.bytes(&[0x4d, 0x85, 0xc0]);
-            bailout(
-                a,
-                &[0x0f, 0x88],
-                i.offset,
-                DeoptReason::ArithmeticGuard,
-                bailouts,
-            );
-            a.bind(nonzero);
-            a.bytes(&[0x48, 0x89, 0xd0]);
-            store_rax(a, dst()?, 1);
-        }
-        "LessThan" | "LessThanOrEq" | "GreaterThan" | "GreaterThanOrEq" | "StrictEq"
-        | "StrictNotEq" => {
-            load(a, src("lhs")?, false);
-            load(a, src("rhs")?, true);
-            a.bytes(&[0x48, 0x39, 0xc8]);
-            let cc = match i.name {
-                "LessThan" => 0x9c,
-                "LessThanOrEq" => 0x9e,
-                "GreaterThan" => 0x9f,
-                "GreaterThanOrEq" => 0x9d,
-                "StrictEq" => 0x94,
-                _ => 0x95,
-            };
-            a.bytes(&[0x0f, cc, 0xc0, 0x48, 0x0f, 0xb6, 0xc0]);
-            store_rax(a, dst()?, 2);
-        }
-        "Jump" => a.jump(&[0xe9], Label::Bytecode(src("address")?)),
-        "JumpIfTrue" | "JumpIfFalse" => {
-            load(a, src("value")?, false);
-            a.bytes(&[0x48, 0x85, 0xc0]);
-            let op = if i.name == "JumpIfTrue" { 0x85 } else { 0x84 };
-            a.jump(&[0x0f, op], Label::Bytecode(src("address")?));
-        }
-        "GetPropertyByName" | "SetPropertyByName" => {
-            let ic_index = src("ic_index")?;
-            let binding = properties
-                .iter()
-                .find(|binding| binding.ic_index == ic_index)
-                .ok_or(JitError::InvalidCodeSize)?;
-            if i.name == "GetPropertyByName" {
-                load(a, binding.scratch_register, false);
-                store_rax(a, dst()?, 1);
-            } else {
-                load(a, src("value")?, false);
-                store_rax(a, binding.scratch_register, 1);
-            }
-        }
-        _ => return Err(JitError::InvalidCodeSize),
-    }
-    Ok(())
-}
-
-fn emit_exit(a: &mut Assembler, pc: u32, status: u32) {
-    a.bytes(&[0xc7, 0x47, 0x20]);
-    a.u32(pc);
-    a.bytes(&[0xc7, 0x47, 0x24]);
-    a.u32(status);
-    a.bytes(&[0xc3]);
-}
-
 #[cfg(all(
     test,
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
 mod tests {
@@ -1535,6 +1277,90 @@ mod tests {
                 .iter()
                 .all(|point| point.stack_map.live_values().is_empty())
         );
+    }
+
+    #[test]
+    fn arithmetic_on_off_corpus_covers_number_boundaries_and_all_comparisons() {
+        let sources = [
+            "function f(n,s,a){for(var i=0;i<n;i++)s=s+a;return s} \
+             f(200,1,2); [f(100,9007199254740950,3),f(100,-9007199254740950,-3),\
+             f(100,NaN,1),f(100,Infinity,1),f(100,-0,0),f(100,1,'2')]",
+            "function f(n,s,a){for(var i=0;i<n;i++)s=s*a;return s} \
+             f(200,1,1); [f(100,9007199254740991,9007199254740991),\
+             f(100,0,-1),f(100,-1,0),f(100,-9007199254740991,9007199254740991)]",
+            "function f(n,s,a){for(var i=0;i<n;i++)s=s%a;return s} \
+             f(200,7,3); [f(100,-6,3),f(100,5,0),f(100,-7,3),f(100,7,-3)]",
+            "function f(n){var s=0;for(var i=0;i<n;i++){\
+             if(i<50)s+=1;if(i<=50)s+=2;if(i>50)s+=3;if(i>=50)s+=4;\
+             if(i===50)s+=5;if(i!==50)s+=6}return s} [f(2000)]",
+            "function f(n){var b=false;for(var i=0;i<n;i++)b=i<3;return b} [f(200)]",
+            "function f(n){var b=false;for(var i=0;i<n;i++)b=(i<3)===0;return b} [f(200)]",
+            "function f(n){var b=false;for(var i=0;i<n;i++)b=(i<3)!==0;return b} [f(200)]",
+            "function f(n){var b=false;for(var i=0;i<n;i++)b=0===(i<3);return b} [f(200)]",
+            "function f(n){var b=false;for(var i=0;i<n;i++)b=0!==(i<3);return b} [f(200)]",
+            "function f(n){var b=false;for(var i=0;i<n;i++)b=(i<300)===(i<400);return b} [f(200)]",
+        ];
+        for source in sources {
+            let mut results = Vec::new();
+            for enabled in [false, true] {
+                let mut context = Context::default();
+                context.set_baseline_jit_enabled(enabled);
+                let result = context.eval(Source::from_bytes(source)).unwrap();
+                context
+                    .register_global_property(
+                        crate::js_string!("results"),
+                        result,
+                        crate::property::Attribute::all(),
+                    )
+                    .unwrap();
+                let rendered = context
+                    .eval(Source::from_bytes(
+                        "results.map(x=>typeof x+':'+(Object.is(x,-0)?'-0':String(x))).join('|')",
+                    ))
+                    .unwrap();
+                let diagnostics = context.arithmetic_jit_diagnostics();
+                if enabled {
+                    assert!(
+                        diagnostics.compiled_entries > 0,
+                        "{source}: {diagnostics:?}"
+                    );
+                } else {
+                    assert_eq!(diagnostics.compiled_entries, 0);
+                }
+                results.push(rendered.display().to_string());
+            }
+            assert_eq!(results[0], results[1], "{source}");
+        }
+    }
+
+    #[test]
+    #[allow(clippy::print_stderr)]
+    fn issue305_native_and_interpreter_measurements_share_a_checksum() {
+        const ITERATIONS: i64 = 200_000;
+        let expected = (0..ITERATIONS).fold(1_i64, |sum, i| (sum + i * 3) % 1_000_003);
+        for enabled in [false, true] {
+            let mut context = Context::default();
+            context.set_baseline_jit_enabled(enabled);
+            context.eval(Source::from_bytes(
+                "function measured(n){var s=1;for(var i=0;i<n;i++)s=(s+i*3)%1000003;return s}measured(200)"
+            )).unwrap();
+            let before = context.arithmetic_jit_diagnostics().compiled_entries;
+            let start = Instant::now();
+            let value = context
+                .eval(Source::from_bytes("measured(200000)"))
+                .unwrap();
+            let elapsed = start.elapsed();
+            assert_eq!(value.as_number(), Some(expected as f64));
+            let entries = context.arithmetic_jit_diagnostics().compiled_entries - before;
+            assert_eq!(entries > 0, enabled);
+            if std::env::var_os("BOA_JIT_DIAGNOSTICS").is_some() {
+                eprintln!(
+                    "issue305-arith architecture={:?} jit={enabled} iterations={ITERATIONS} elapsed_ns={} checksum={expected} native_entries={entries}",
+                    super::super::JitArchitecture::host(),
+                    elapsed.as_nanos()
+                );
+            }
+        }
     }
 
     #[test]
@@ -1660,6 +1486,7 @@ mod tests {
         assert!(diagnostics.compiled_entries >= 1);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn monomorphic_property_read_and_write_run_in_generated_loop() {
         let mut context = Context::default();
@@ -1686,6 +1513,7 @@ mod tests {
         assert_eq!(diagnostics.property_guard_misses, 0);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn issue305_prop_mono_shape_stays_in_generated_loop_past_i32() {
         let mut context = Context::default();
@@ -1711,6 +1539,7 @@ mod tests {
         assert_eq!(diagnostics.property_bailouts, 0);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn shape_transition_invalidates_property_machine_code() {
         let mut context = Context::default();
@@ -1733,6 +1562,7 @@ mod tests {
         assert!(diagnostics.compile_rejections >= 1);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn delete_redefine_and_accessor_objects_never_reuse_stale_property_code() {
         let mut context = Context::default();
@@ -1754,6 +1584,7 @@ mod tests {
         assert!(diagnostics.compile_rejections >= 1);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn forged_stale_ic_slot_is_invalidated_before_interpreter_resume() {
         let mut context = Context::default();
@@ -1795,6 +1626,7 @@ mod tests {
         assert!(!ic.slot().attributes.contains(SlotAttributes::PROTOTYPE));
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn prototype_property_and_prototype_mutation_stay_in_interpreter() {
         let mut context = Context::default();
@@ -1815,6 +1647,7 @@ mod tests {
         assert!(diagnostics.compile_rejections >= 1);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn property_loop_matches_jit_suppressed_execution() {
         const SOURCE: &str = "(function(n){let o={x:3},s=1;for(let i=0;i<n;i++){s=(s+o.x*3)%1000003;o.x=o.x+1}return s+o.x})(2000)";
@@ -1834,6 +1667,7 @@ mod tests {
         assert!(compiled.arithmetic_jit_diagnostics().property_guard_hits >= 1);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn property_write_is_committed_before_exact_arithmetic_bailout() {
         let mut context = Context::default();
@@ -1876,6 +1710,7 @@ mod tests {
         assert_eq!(diagnostics.compiled_entries, 0);
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn budgeted_generated_loops_yield_with_exact_property_state_and_gc_roots() {
         for enabled in [false, true] {
@@ -1913,6 +1748,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn failure_snapshot_copies_live_code_and_metadata_without_changing_execution() {
         let mut context = Context::default();
@@ -1934,6 +1770,7 @@ mod tests {
         assert!(first.starts_with("jit-debug-v1"));
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn async_native_panic_restores_the_shared_budget_and_deadline() {
         let mut context = Context::default();
@@ -2073,6 +1910,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_arch = "x86_64")]
     #[test]
     fn property_and_arithmetic_loops_compile_independently_in_one_function() {
         let mut context = Context::default();

@@ -1,11 +1,10 @@
 //! Experimental baseline JIT lowering, dispatch, code-memory, and entry ABI.
 //!
-//! This is an opt-in public embedding contract through `baseline-jit`; enabling
-//! the synchronous VM uses generated x86-64 code for verified hot integer
-//! arithmetic loops. The common lowering layer makes every unsupported
+//! The opt-in `baseline-jit` feature lets the VM use generated x86-64/ARM64 code
+//! for verified hot integer arithmetic loops. The common lowering layer makes every unsupported
 //! instruction and unrepresentable Number result an explicit interpreter
-//! fallback. ARM64 provides the same fixed-entry and runtime-call foundation;
-//! arithmetic/property lowering is introduced by the subsequent Gate 5 tasks.
+//! fallback. ARM64 shares the fixed-entry, runtime-call and arithmetic contracts;
+//! property lowering is introduced by the subsequent Gate 5 task.
 //! The API remains experimental and may evolve between fork revisions.
 
 #[cfg(any(target_arch = "aarch64", test))]

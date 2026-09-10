@@ -8,13 +8,6 @@ use super::JitError;
 pub(super) struct Label(usize);
 
 #[derive(Debug, Clone, Copy)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "branch relocations are exercised by foundation tests until arithmetic lowering uses them"
-    )
-)]
 enum Relocation {
     Branch,
     Conditional,
@@ -89,26 +82,24 @@ impl Assembler {
         self.instruction(instruction);
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by foundation tests and the subsequent arithmetic backend"
-        )
-    )]
     pub(super) fn branch(&mut self, target: Label) {
         self.relocate(0x1400_0000, target, Relocation::Branch);
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used by foundation tests and the subsequent arithmetic backend"
-        )
-    )]
     pub(super) fn branch_equal(&mut self, target: Label) {
-        self.relocate(0x5400_0000, target, Relocation::Conditional);
+        self.branch_condition(target, 0);
+    }
+
+    pub(super) fn branch_condition(&mut self, target: Label, condition: u8) {
+        assert!(
+            condition < 14,
+            "A64 conditional branch requires a real condition"
+        );
+        self.relocate(
+            0x5400_0000 | u32::from(condition),
+            target,
+            Relocation::Conditional,
+        );
     }
 
     pub(super) fn literal_u64(&mut self, register: u8, value: u64) -> Result<(), JitError> {
