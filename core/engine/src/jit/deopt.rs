@@ -61,7 +61,7 @@ pub enum DeoptValueRepresentation {
     SafeInteger,
     /// Convert zero/non-zero into an ECMAScript Boolean.
     Boolean,
-    /// Read the generated frame's side tag to choose Number or Boolean.
+    /// Read the generated frame's side tag for a Number, Boolean, or rooted alias.
     NativeTagged,
 }
 
@@ -349,7 +349,10 @@ impl DeoptRecipe {
                 })?;
             let value = match (operation.representation, source) {
                 (_, DeoptSourceValue::Preserve) => continue,
-                (DeoptValueRepresentation::Tagged, DeoptSourceValue::Tagged(value)) => value,
+                (
+                    DeoptValueRepresentation::Tagged | DeoptValueRepresentation::NativeTagged,
+                    DeoptSourceValue::Tagged(value),
+                ) => value,
                 (DeoptValueRepresentation::SafeInteger, DeoptSourceValue::SafeInteger(value)) => {
                     JsValue::from(value as f64)
                 }

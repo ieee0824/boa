@@ -3,8 +3,8 @@
 //! The opt-in `baseline-jit` feature lets the VM use generated x86-64/ARM64 code
 //! for verified hot integer arithmetic loops. The common lowering layer makes every unsupported
 //! instruction and unrepresentable Number result an explicit interpreter
-//! fallback. ARM64 shares the fixed-entry, runtime-call and arithmetic contracts;
-//! property lowering is introduced by the subsequent Gate 5 task.
+//! fallback. ARM64 and x86-64 share fixed-entry, runtime-call, arithmetic and
+//! guarded own-data-property contracts, including exact interpreter restoration.
 //! The API remains experimental and may evolve between fork revisions.
 
 #[cfg(any(target_arch = "aarch64", test))]

@@ -153,11 +153,6 @@ impl ArithmeticCode {
             else {
                 return Ok(None);
             };
-            #[cfg(target_arch = "aarch64")]
-            if !properties.is_empty() {
-                // Property lowering is introduced separately by Gate 5-3.
-                return Ok(None);
-            }
             for property in &properties {
                 region
                     .required
@@ -497,6 +492,10 @@ fn reconstruct_deopt(
                     value: values[source].expect("a dirty generated register has a value"),
                     is_boolean: write_kinds[source] == 2,
                 }),
+                3 => Some(DeoptSourceValue::Tagged(
+                    vm.get_register(values[source].expect("object alias has a source") as usize)
+                        .clone(),
+                )),
                 _ => unreachable!("emitter only writes validated arithmetic value kinds"),
             }
         })
@@ -830,6 +829,10 @@ impl ArithmeticRuntime {
         }
         match exit {
             ArithmeticExit::Completed(pc) => {
+                // Resolve aliases before updating any original VM registers.
+                let original_registers = (0..register_count)
+                    .map(|index| vm.get_register(index).clone())
+                    .collect::<Vec<_>>();
                 for (index, (&value, &write_kind)) in values
                     .iter()
                     .zip(&write_kinds)
@@ -839,6 +842,9 @@ impl ArithmeticRuntime {
                     match (value, write_kind) {
                         (Some(value), 1) => vm.set_register(index, JsValue::from(value as f64)),
                         (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
+                        (Some(source), 3) => {
+                            vm.set_register(index, original_registers[source as usize].clone());
+                        }
                         (_, 0) => {}
                         _ => unreachable!("emitter only writes validated arithmetic value kinds"),
                     }
@@ -878,9 +884,9 @@ fn property_bindings(
     snapshot: &BytecodeContractSnapshot,
     inline_caches: &[InlineCache],
     region: &LoopRegion,
-) -> Option<(Vec<PropertyBinding>, BTreeSet<u32>)> {
+) -> Option<(Vec<PropertyBinding>, BTreeMap<u32, u32>)> {
     let mut bindings = Vec::<PropertyBinding>::new();
-    let mut object_move_offsets = BTreeSet::new();
+    let mut object_move_offsets = BTreeMap::new();
     let instructions = &snapshot.instructions[region.first..region.end];
     for (instruction_index, instruction) in instructions.iter().enumerate() {
         let (object_operand, is_write) = match instruction.name {
@@ -906,6 +912,15 @@ fn property_bindings(
             temporary_object,
             &mut object_move_offsets,
         )?;
+        // Alias payloads refer to the VM register at native entry. Its object
+        // identity must remain stable throughout every generated iteration.
+        if instructions.iter().any(|candidate| {
+            unsigned(candidate, "dst") == Some(u64::from(object_register))
+                || (candidate.name == "AddAssignLocal"
+                    && unsigned(candidate, "value") == Some(u64::from(object_register)))
+        }) {
+            return None;
+        }
         let (shape, slot) = inline_caches
             .get(ic_index as usize)?
             .monomorphic_own_data_slot()?;
@@ -951,6 +966,29 @@ fn property_bindings(
             });
         }
     }
+    // Root objects are opaque inputs, never scalar operands. Aliases created
+    // by Move carry a side tag that is guarded by both native emitters.
+    for binding in &bindings {
+        for instruction in instructions {
+            for operand in &instruction.operands {
+                if operand.name == "dst"
+                    || register_operand(instruction.name, operand.name, operand.value)
+                        != Some(binding.object_register)
+                {
+                    continue;
+                }
+                let object_use = match instruction.name {
+                    "Move" => object_move_offsets.contains_key(&instruction.offset),
+                    "GetPropertyByName" => matches!(operand.name, "value" | "receiver"),
+                    "SetPropertyByName" => matches!(operand.name, "object" | "receiver"),
+                    _ => false,
+                };
+                if !object_use {
+                    return None;
+                }
+            }
+        }
+    }
     Some((bindings, object_move_offsets))
 }
 
@@ -958,7 +996,7 @@ fn resolve_property_object_register(
     instructions: &[crate::vm::BytecodeInstruction],
     before: usize,
     register: u32,
-    object_move_offsets: &mut BTreeSet<u32>,
+    object_move_offsets: &mut BTreeMap<u32, u32>,
 ) -> Option<u32> {
     for (index, instruction) in instructions[..before].iter().enumerate().rev() {
         if unsigned(instruction, "dst").and_then(|value| u32::try_from(value).ok())
@@ -969,9 +1007,11 @@ fn resolve_property_object_register(
         if instruction.name != "Move" {
             return None;
         }
-        object_move_offsets.insert(instruction.offset);
         let source = u32::try_from(unsigned(instruction, "src")?).ok()?;
-        return resolve_property_object_register(instructions, index, source, object_move_offsets);
+        let original =
+            resolve_property_object_register(instructions, index, source, object_move_offsets)?;
+        object_move_offsets.insert(instruction.offset, original);
+        return Some(original);
     }
     Some(register)
 }
@@ -1486,7 +1526,6 @@ mod tests {
         assert!(diagnostics.compiled_entries >= 1);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn monomorphic_property_read_and_write_run_in_generated_loop() {
         let mut context = Context::default();
@@ -1513,7 +1552,29 @@ mod tests {
         assert_eq!(diagnostics.property_guard_misses, 0);
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn property_store_preserves_a_boolean_created_after_native_entry() {
+        const SOURCE: &str = "function f(o,n){for(var i=0;i<n;i++){var v=i;\
+            if(i>=500)v=i<900;o.x=v;}return typeof o.x+':'+o.x}f({x:0},2000)";
+        let mut results = Vec::new();
+        for enabled in [false, true] {
+            let mut context = Context::default();
+            context.set_baseline_jit_enabled(enabled);
+            let value = context.eval(Source::from_bytes(SOURCE)).unwrap();
+            assert_eq!(value, JsValue::from(crate::js_string!("boolean:false")));
+            results.push(value.display().to_string());
+            let diagnostics = context.arithmetic_jit_diagnostics();
+            if enabled {
+                assert!(diagnostics.compiled_entries > 0, "{diagnostics:?}");
+                assert!(diagnostics.type_deopts > 0, "{diagnostics:?}");
+                assert!(diagnostics.property_bailouts > 0, "{diagnostics:?}");
+            } else {
+                assert_eq!(diagnostics.compiled_entries, 0);
+            }
+        }
+        assert_eq!(results[0], results[1]);
+    }
+
     #[test]
     fn issue305_prop_mono_shape_stays_in_generated_loop_past_i32() {
         let mut context = Context::default();
@@ -1539,7 +1600,6 @@ mod tests {
         assert_eq!(diagnostics.property_bailouts, 0);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn shape_transition_invalidates_property_machine_code() {
         let mut context = Context::default();
@@ -1562,7 +1622,6 @@ mod tests {
         assert!(diagnostics.compile_rejections >= 1);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn delete_redefine_and_accessor_objects_never_reuse_stale_property_code() {
         let mut context = Context::default();
@@ -1584,7 +1643,6 @@ mod tests {
         assert!(diagnostics.compile_rejections >= 1);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn forged_stale_ic_slot_is_invalidated_before_interpreter_resume() {
         let mut context = Context::default();
@@ -1626,7 +1684,6 @@ mod tests {
         assert!(!ic.slot().attributes.contains(SlotAttributes::PROTOTYPE));
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn prototype_property_and_prototype_mutation_stay_in_interpreter() {
         let mut context = Context::default();
@@ -1647,7 +1704,6 @@ mod tests {
         assert!(diagnostics.compile_rejections >= 1);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn property_loop_matches_jit_suppressed_execution() {
         const SOURCE: &str = "(function(n){let o={x:3},s=1;for(let i=0;i<n;i++){s=(s+o.x*3)%1000003;o.x=o.x+1}return s+o.x})(2000)";
@@ -1667,7 +1723,6 @@ mod tests {
         assert!(compiled.arithmetic_jit_diagnostics().property_guard_hits >= 1);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn property_write_is_committed_before_exact_arithmetic_bailout() {
         let mut context = Context::default();
@@ -1710,7 +1765,6 @@ mod tests {
         assert_eq!(diagnostics.compiled_entries, 0);
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn budgeted_generated_loops_yield_with_exact_property_state_and_gc_roots() {
         for enabled in [false, true] {
@@ -1748,7 +1802,6 @@ mod tests {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn failure_snapshot_copies_live_code_and_metadata_without_changing_execution() {
         let mut context = Context::default();
@@ -1760,7 +1813,10 @@ mod tests {
         assert!(first.contains("StackMap"));
         assert!(first.contains("DeoptRecipe"));
         assert!(first.contains("bytecode_entry_pc="));
+        #[cfg(target_arch = "x86_64")]
         assert!(first.contains("48 83 ec 08 48 8b 07 ff d0"));
+        #[cfg(target_arch = "aarch64")]
+        assert!(first.contains("fd 7b bf a9 fd 03 00 91"));
         assert_eq!(context.jit_debug_snapshot(), first);
         boa_gc::force_collect();
         assert_eq!(context.arithmetic_jit_diagnostics(), before);
@@ -1770,7 +1826,6 @@ mod tests {
         assert!(first.starts_with("jit-debug-v1"));
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn async_native_panic_restores_the_shared_budget_and_deadline() {
         let mut context = Context::default();
@@ -1910,7 +1965,6 @@ mod tests {
         );
     }
 
-    #[cfg(target_arch = "x86_64")]
     #[test]
     fn property_and_arithmetic_loops_compile_independently_in_one_function() {
         let mut context = Context::default();

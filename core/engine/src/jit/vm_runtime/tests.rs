@@ -1,6 +1,24 @@
 use super::*;
 use crate::{JsNativeError, JsResult, JsValue, NativeFunction, Source, js_string};
 
+#[test]
+fn helper_safepoints_use_the_native_call_return_pc() {
+    let mut context = Context::default();
+    let script =
+        crate::Script::parse(Source::from_bytes("let o={x:42};o.x"), None, &mut context).unwrap();
+    let block = script.codeblock(&mut context).unwrap();
+    let code = RuntimeCode::compile(&block).unwrap();
+    let expected = if cfg!(target_arch = "aarch64") { 16 } else { 9 };
+    assert_eq!(code.return_pc, expected);
+    assert!(code.entries.len() >= 2);
+    assert_eq!(code.descriptor.safepoints().len(), code.entries.len());
+    for (bytecode_pc, entry) in &code.entries {
+        assert!(code.descriptor.safepoints().iter().any(|point| {
+            point.bytecode_offset == *bytecode_pc && point.machine_offset == entry + expected
+        }));
+    }
+}
+
 fn gc_throw(_: &JsValue, args: &[JsValue], _: &mut Context) -> JsResult<JsValue> {
     boa_gc::force_minor_collect();
     boa_gc::force_collect();
