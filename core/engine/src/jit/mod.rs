@@ -4,9 +4,13 @@
 //! the synchronous VM uses generated x86-64 code for verified hot integer
 //! arithmetic loops. The common lowering layer makes every unsupported
 //! instruction and unrepresentable Number result an explicit interpreter
-//! fallback. The API remains experimental and may evolve between fork revisions
-//! while Gate 3 is in progress.
+//! fallback. ARM64 provides the same fixed-entry and runtime-call foundation;
+//! arithmetic/property lowering is introduced by the subsequent Gate 5 tasks.
+//! The API remains experimental and may evolve between fork revisions.
 
+#[cfg(any(target_arch = "aarch64", test))]
+mod aarch64;
+mod abi;
 mod arithmetic;
 mod deopt;
 mod exception;
@@ -16,6 +20,7 @@ mod runtime_call;
 mod stack_map;
 mod vm_runtime;
 
+pub use abi::{JitArchitecture, JitRegisterMap};
 pub use vm_runtime::JitExceptionDiagnostics;
 pub(crate) use vm_runtime::VmRuntime;
 
@@ -55,15 +60,24 @@ use std::{
 use platform::{ExecutableMemory, WritableMemory};
 
 /// The calling convention used by the first baseline JIT entry stub.
+#[cfg(target_arch = "x86_64")]
 pub const JIT_ABI: &str = "System V AMD64: extern C fn() -> u64";
+/// The calling convention used by the ARM64 baseline JIT entry stub.
+#[cfg(target_arch = "aarch64")]
+pub const JIT_ABI: &str = "AAPCS64 / Apple arm64: extern C fn() -> u64";
+/// No generated entry convention is implemented on this architecture.
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub const JIT_ABI: &str = "unsupported architecture";
 
 /// Errors produced while allocating, publishing, or looking up JIT code.
 #[derive(Debug)]
 pub enum JitError {
-    /// This experimental backend only exists on supported `x86_64` Unix hosts.
+    /// This experimental backend only exists on supported `x86_64`/ARM64 Unix hosts.
     UnsupportedPlatform,
     /// The requested code object had no bytes or overflowed page rounding.
     InvalidCodeSize,
+    /// The assembler rejected a register, label, or unrepresentable displacement.
+    InvalidAssembly(&'static str),
     /// An operating-system memory operation failed.
     Os(io::Error),
     /// A handle no longer names the current cache generation.
@@ -83,6 +97,7 @@ impl fmt::Display for JitError {
                 formatter.write_str("baseline JIT is unsupported on this platform")
             }
             Self::InvalidCodeSize => formatter.write_str("invalid JIT code size"),
+            Self::InvalidAssembly(message) => write!(formatter, "invalid JIT assembly: {message}"),
             Self::Os(error) => write!(formatter, "JIT code memory operation failed: {error}"),
             Self::StaleCodeHandle => formatter.write_str("JIT code handle is stale or invalidated"),
             Self::FrameMetadata(error) => error.fmt(formatter),
@@ -162,23 +177,36 @@ struct FixedReturnCode {
 
 impl FixedReturnCode {
     fn compile(value: u64) -> Result<Self, JitError> {
-        // System V AMD64: movabs rax, imm64; ret.
-        let mut bytes = [0_u8; 11];
-        bytes[0] = 0x48;
-        bytes[1] = 0xB8;
-        bytes[2..10].copy_from_slice(&value.to_le_bytes());
-        bytes[10] = 0xC3;
-
-        let mut writable = WritableMemory::allocate(bytes.len())?;
-        writable.write(0, &bytes)?;
-        let memory = writable.publish()?;
-        Ok(Self { memory, value })
+        #[cfg(target_arch = "x86_64")]
+        let bytes = {
+            // System V AMD64: movabs rax, imm64; ret.
+            let mut bytes = [0_u8; 11];
+            bytes[0] = 0x48;
+            bytes[1] = 0xB8;
+            bytes[2..10].copy_from_slice(&value.to_le_bytes());
+            bytes[10] = 0xC3;
+            bytes
+        };
+        #[cfg(target_arch = "aarch64")]
+        let bytes = aarch64::fixed_return(value)?;
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let mut writable = WritableMemory::allocate(bytes.len())?;
+            writable.write(0, &bytes)?;
+            let memory = writable.publish()?;
+            Ok(Self { memory, value })
+        }
+        #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+        {
+            let _ = value;
+            Err(JitError::UnsupportedPlatform)
+        }
     }
 
     fn call(&self) -> u64 {
         // SAFETY: `compile` is the only constructor and emits exactly
-        // `movabs rax, imm64; ret`, matching JIT_ABI without touching the stack
-        // or any callee-saved register. The mapping remains alive for the call.
+        // the architecture's fixed-return sequence, matching JIT_ABI without
+        // touching the stack or callee-saved registers. Its mapping stays live.
         let entry: unsafe extern "C" fn() -> u64 =
             unsafe { std::mem::transmute(self.memory.as_ptr()) };
         // SAFETY: The generated function has no arguments and its body/ABI were
@@ -268,11 +296,32 @@ impl JitCodeCache {
             .filter(|entry| entry.generation == handle.generation)
             .map(|entry| (CodePermission::ReadExecute, entry.code.memory.mapped_len()))
     }
+
+    /// Dumps an owned fixed stub's ABI, bytes and ARM64 disassembly for diagnostics.
+    /// Invalidated or foreign handles return no dump and never read retired memory.
+    #[must_use]
+    pub fn debug_code_dump(&self, handle: JitCodeHandle) -> Option<String> {
+        if handle.cache_id != self.cache_id {
+            return None;
+        }
+        let entry = self.entries.get(&handle.key)?;
+        if entry.generation != handle.generation {
+            return None;
+        }
+        let mut output = format!(
+            "architecture={:?} abi={JIT_ABI} permission=RX code_bytes={} mapped_bytes={}\n",
+            JitArchitecture::host(),
+            entry.code.memory.requested_len(),
+            entry.code.memory.mapped_len(),
+        );
+        entry.code.memory.write_debug_bytes(&mut output);
+        Some(output)
+    }
 }
 
 #[cfg(all(
     test,
-    target_arch = "x86_64",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
     any(target_os = "linux", target_os = "macos")
 ))]
 mod tests {
@@ -286,6 +335,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::print_stderr)]
     fn fixed_stub_enters_and_returns_with_rx_permissions() {
         let mut cache = JitCodeCache::new();
         let handle = cache
@@ -298,6 +348,13 @@ mod tests {
         let (permission, mapped_len) = cache.diagnostics(handle).expect("diagnostics");
         assert_eq!(permission, CodePermission::ReadExecute);
         assert!(mapped_len >= 11);
+        let dump = cache.debug_code_dump(handle).unwrap();
+        if std::env::var_os("BOA_JIT_DIAGNOSTICS").is_some() {
+            eprintln!("{dump}");
+        }
+        assert!(dump.contains(JIT_ABI));
+        #[cfg(target_arch = "aarch64")]
+        assert!(dump.contains("ldr x0, 0x8"));
     }
 
     #[test]
@@ -311,6 +368,7 @@ mod tests {
         ));
         assert_eq!(cache.call_fixed_return(new).expect("new call"), 20);
         assert!(cache.invalidate(key(2)));
+        assert!(cache.debug_code_dump(new).is_none());
         assert!(matches!(
             cache.call_fixed_return(new),
             Err(JitError::StaleCodeHandle)

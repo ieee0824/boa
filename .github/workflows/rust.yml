@@ -112,8 +112,19 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-15-intel]
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-15-intel
+            arch: x86_64
+          - os: macos-14
+            arch: aarch64
+    env:
+      BOA_JIT_DIAGNOSTICS: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -130,8 +141,36 @@ jobs:
             ~/.cargo/registry
           key: ${{ matrix.os }}-${{ runner.arch }}-baseline-jit-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Test RW-to-RX memory and entry ABI
-        run: "cargo test -p boa_engine --features baseline-jit jit::"
+      - name: Record native environment
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            uname -a
+            rustc --version --verbose
+            git show --no-patch --format=fuller HEAD
+          } > artifacts/environment.txt
+          actual_host=$(rustc --version --verbose | awk '/^host:/ {print $2}')
+          test "${actual_host%%-*}" = "$EXPECTED_ARCH"
+          test "$(uname -m | sed 's/^arm64$/aarch64/')" = "$EXPECTED_ARCH"
+
+      - name: Test code memory, entry ABI, runtime calls and frame contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked -p boa_engine --features baseline-jit jit:: -- --nocapture \
+            2>&1 | tee artifacts/baseline-jit.log
+
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: baseline-jit-${{ matrix.os }}-${{ runner.arch }}
+          path: artifacts/
+          if-no-files-found: error
 
   msrv:
     name: MSRV
