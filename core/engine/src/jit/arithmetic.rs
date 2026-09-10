@@ -6,7 +6,7 @@
 //! bytecode and lets the interpreter perform the operation.
 
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     mem::{offset_of, size_of},
     sync::atomic::{AtomicU64, Ordering},
@@ -153,11 +153,10 @@ impl ArithmeticCode {
             else {
                 return Ok(None);
             };
-            for property in &properties {
-                region
-                    .required
-                    .retain(|register| *register != property.object_register);
-            }
+            let object_roots: HashSet<_> = properties.iter().map(|p| p.object_register).collect();
+            region
+                .required
+                .retain(|register| !object_roots.contains(register));
             let mut assembler = Assembler::default();
             let resumed_entry_offset = assembler.position();
             assembler.entry(snapshot.instructions[region.increment].next_offset);
@@ -417,6 +416,11 @@ pub struct ArithmeticJitDiagnostics {
     pub generated_code_bytes: u64,
     /// Calls that entered generated machine code.
     pub compiled_entries: u64,
+    /// Object aliases copied before writing completed native results to the VM.
+    pub completed_alias_copies: u64,
+    /// Allocations and capacity growths of completed-entry alias snapshots.
+    /// Pure arithmetic completions do not allocate a snapshot.
+    pub completed_alias_allocations: u64,
     /// Calls that resumed the interpreter.
     pub bailouts: u64,
     /// Cached loop sites evicted to keep executable memory bounded.
@@ -829,10 +833,21 @@ impl ArithmeticRuntime {
         }
         match exit {
             ArithmeticExit::Completed(pc) => {
-                // Resolve aliases before updating any original VM registers.
-                let original_registers = (0..register_count)
-                    .map(|index| vm.get_register(index).clone())
-                    .collect::<Vec<_>>();
+                // Preserve only alias sources, before any original register can
+                // be overwritten. An arithmetic-only completion allocates nothing.
+                let aliases = if code.properties.is_empty() {
+                    // Only property bindings can introduce object-tagged Moves.
+                    // Scalar-only code needs neither a snapshot nor a second scan.
+                    Vec::new()
+                } else {
+                    snapshot_completed_aliases(
+                        register_count,
+                        &values,
+                        &write_kinds,
+                        |source| vm.get_register(source).clone(),
+                        &mut self.diagnostics,
+                    )
+                };
                 for (index, (&value, &write_kind)) in values
                     .iter()
                     .zip(&write_kinds)
@@ -842,12 +857,12 @@ impl ArithmeticRuntime {
                     match (value, write_kind) {
                         (Some(value), 1) => vm.set_register(index, JsValue::from(value as f64)),
                         (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
-                        (Some(source), 3) => {
-                            vm.set_register(index, original_registers[source as usize].clone());
-                        }
-                        (_, 0) => {}
+                        (Some(_), 3) | (_, 0) => {}
                         _ => unreachable!("emitter only writes validated arithmetic value kinds"),
                     }
+                }
+                for (index, value) in aliases {
+                    vm.set_register(index, value);
                 }
                 vm.frame.pc = pc;
                 true
@@ -872,6 +887,40 @@ impl ArithmeticRuntime {
     }
 }
 
+// Keep every source rooted until all scalar and alias writes have finished.
+// Destinations may overwrite other alias sources, including cyclic mappings.
+fn snapshot_completed_aliases(
+    register_count: usize,
+    values: &[Option<i64>],
+    write_kinds: &[u8],
+    mut read_register: impl FnMut(usize) -> JsValue,
+    diagnostics: &mut ArithmeticJitDiagnostics,
+) -> Vec<(usize, JsValue)> {
+    let mut aliases = Vec::new();
+    for (index, (&value, &kind)) in values
+        .iter()
+        .zip(write_kinds)
+        .take(register_count)
+        .enumerate()
+    {
+        if kind != 3 {
+            continue;
+        }
+        let source = value.expect("object alias has a source") as usize;
+        assert!(
+            source < register_count,
+            "object alias source is inside VM frame"
+        );
+        if aliases.len() == aliases.capacity() {
+            diagnostics.completed_alias_allocations =
+                diagnostics.completed_alias_allocations.saturating_add(1);
+        }
+        aliases.push((index, read_register(source)));
+        diagnostics.completed_alias_copies = diagnostics.completed_alias_copies.saturating_add(1);
+    }
+    aliases
+}
+
 struct LoopRegion {
     first: usize,
     increment: usize,
@@ -880,140 +929,212 @@ struct LoopRegion {
     required: Vec<u32>,
 }
 
+#[cfg(test)]
+thread_local! {
+    static PROPERTY_BINDING_VISITS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+#[derive(Clone, Copy)]
+struct ObjectOrigin {
+    register: u32,
+    last_move: Option<usize>,
+}
+
+#[derive(Default)]
+struct PropertyObjectOrigins {
+    // Absent registers are entry values; None marks a scalar overwrite.
+    registers: HashMap<u32, Option<ObjectOrigin>>,
+    moves: Vec<(u32, ObjectOrigin)>,
+}
+
+impl PropertyObjectOrigins {
+    fn origin(&self, register: u32) -> Option<ObjectOrigin> {
+        self.registers
+            .get(&register)
+            .copied()
+            .unwrap_or(Some(ObjectOrigin {
+                register,
+                last_move: None,
+            }))
+    }
+
+    fn resolve(&self, register: u32, used_moves: &mut BTreeMap<u32, u32>) -> Option<u32> {
+        let origin = self.origin(register)?;
+        let mut previous = origin.last_move;
+        while let Some(index) = previous {
+            let (offset, source) = self.moves[index];
+            if used_moves.insert(offset, origin.register).is_some() {
+                break;
+            }
+            #[cfg(test)]
+            PROPERTY_BINDING_VISITS.with(|count| {
+                let (instructions, moves) = count.get();
+                count.set((instructions, moves + 1));
+            });
+            previous = source.last_move;
+        }
+        Some(origin.register)
+    }
+
+    fn record(&mut self, instruction: &crate::vm::BytecodeInstruction) {
+        let Some(dst) = unsigned(instruction, "dst").and_then(|v| u32::try_from(v).ok()) else {
+            return;
+        };
+        let origin = if instruction.name == "Move" {
+            unsigned(instruction, "src")
+                .and_then(|v| u32::try_from(v).ok())
+                .and_then(|register| self.origin(register))
+                .map(|source| {
+                    let index = self.moves.len();
+                    self.moves.push((instruction.offset, source));
+                    ObjectOrigin {
+                        register: source.register,
+                        last_move: Some(index),
+                    }
+                })
+        } else {
+            None
+        };
+        self.registers.insert(dst, origin);
+    }
+}
+
 fn property_bindings(
     snapshot: &BytecodeContractSnapshot,
     inline_caches: &[InlineCache],
     region: &LoopRegion,
 ) -> Option<(Vec<PropertyBinding>, BTreeMap<u32, u32>)> {
     let mut bindings = Vec::<PropertyBinding>::new();
+    let mut by_slot = HashMap::new();
+    let mut ic_sites = HashSet::new();
+    let mut unique_slots = 0u32;
     let mut object_move_offsets = BTreeMap::new();
+    let mut origins = PropertyObjectOrigins::default();
     let instructions = &snapshot.instructions[region.first..region.end];
-    for (instruction_index, instruction) in instructions.iter().enumerate() {
-        let (object_operand, is_write) = match instruction.name {
-            "GetPropertyByName" => {
-                if unsigned(instruction, "receiver")? != unsigned(instruction, "value")? {
-                    return None;
-                }
-                ("value", false)
-            }
-            "SetPropertyByName" => {
-                if unsigned(instruction, "receiver")? != unsigned(instruction, "object")? {
-                    return None;
-                }
-                ("object", true)
-            }
-            _ => continue,
-        };
-        let ic_index = u32::try_from(unsigned(instruction, "ic_index")?).ok()?;
-        let temporary_object = u32::try_from(unsigned(instruction, object_operand)?).ok()?;
-        let object_register = resolve_property_object_register(
-            instructions,
-            instruction_index,
-            temporary_object,
-            &mut object_move_offsets,
-        )?;
-        // Alias payloads refer to the VM register at native entry. Its object
-        // identity must remain stable throughout every generated iteration.
-        if instructions.iter().any(|candidate| {
-            unsigned(candidate, "dst") == Some(u64::from(object_register))
-                || (candidate.name == "AddAssignLocal"
-                    && unsigned(candidate, "value") == Some(u64::from(object_register)))
-        }) {
-            return None;
-        }
-        let (shape, slot) = inline_caches
-            .get(ic_index as usize)?
-            .monomorphic_own_data_slot()?;
-        if is_write && !slot.attributes.contains(SlotAttributes::WRITABLE) {
-            return None;
-        }
-        let key = (object_register, shape, slot.index);
-        let scratch_register = if let Some(binding) = bindings
-            .iter_mut()
-            .find(|binding| (binding.object_register, binding.shape, binding.slot) == key)
-        {
-            binding.writable |= is_write;
-            binding.scratch_register
-        } else {
-            let unique_slots = bindings
-                .iter()
-                .map(|binding| binding.scratch_register)
-                .collect::<BTreeSet<_>>()
-                .len();
-            let scratch_register = snapshot
-                .register_count
-                .checked_add(u32::try_from(unique_slots).ok()?)?;
-            bindings.push(PropertyBinding {
-                ic_index,
-                object_register,
-                shape,
-                slot: slot.index,
-                scratch_register,
-                writable: is_write,
-            });
-            scratch_register
-        };
-        // Every IC site is independently guarded even when two sites alias the
-        // same object slot. Keep a zero-width guard-only binding for that site.
-        if !bindings.iter().any(|binding| binding.ic_index == ic_index) {
-            bindings.push(PropertyBinding {
-                ic_index,
-                object_register,
-                shape,
-                slot: slot.index,
-                scratch_register,
-                writable: false,
-            });
+    let mut has_properties = false;
+    for instruction in instructions {
+        #[cfg(test)]
+        PROPERTY_BINDING_VISITS.with(|count| {
+            let (i, m) = count.get();
+            count.set((i + 1, m));
+        });
+        if matches!(instruction.name, "GetPropertyByName" | "SetPropertyByName") {
+            has_properties = true;
+            break;
         }
     }
-    // Root objects are opaque inputs, never scalar operands. Aliases created
-    // by Move carry a side tag that is guarded by both native emitters.
-    for binding in &bindings {
-        for instruction in instructions {
-            for operand in &instruction.operands {
-                if operand.name == "dst"
-                    || register_operand(instruction.name, operand.name, operand.value)
-                        != Some(binding.object_register)
-                {
-                    continue;
-                }
-                let object_use = match instruction.name {
-                    "Move" => object_move_offsets.contains_key(&instruction.offset),
-                    "GetPropertyByName" => matches!(operand.name, "value" | "receiver"),
-                    "SetPropertyByName" => matches!(operand.name, "object" | "receiver"),
-                    _ => false,
-                };
-                if !object_use {
-                    return None;
-                }
+    if !has_properties {
+        return Some((bindings, object_move_offsets));
+    }
+    let mut written = HashSet::new();
+    for instruction in instructions {
+        #[cfg(test)]
+        PROPERTY_BINDING_VISITS.with(|count| {
+            let (i, m) = count.get();
+            count.set((i + 1, m));
+        });
+        if let Some(dst) = unsigned(instruction, "dst") {
+            written.insert(dst);
+        }
+        if instruction.name == "AddAssignLocal"
+            && let Some(value) = unsigned(instruction, "value")
+        {
+            written.insert(value);
+        }
+    }
+    for instruction in instructions {
+        #[cfg(test)]
+        PROPERTY_BINDING_VISITS.with(|count| {
+            let (i, m) = count.get();
+            count.set((i + 1, m));
+        });
+        let property = match instruction.name {
+            "GetPropertyByName" => Some(("value", false)),
+            "SetPropertyByName" => Some(("object", true)),
+            _ => None,
+        };
+        if let Some((object_operand, is_write)) = property {
+            if unsigned(instruction, "receiver")? != unsigned(instruction, object_operand)? {
+                return None;
+            }
+            let ic_index = u32::try_from(unsigned(instruction, "ic_index")?).ok()?;
+            let temporary_object = u32::try_from(unsigned(instruction, object_operand)?).ok()?;
+            let object_register = origins.resolve(temporary_object, &mut object_move_offsets)?;
+            // Alias payloads refer to stable VM entry registers, never scalar writes.
+            if written.contains(&u64::from(object_register)) {
+                return None;
+            }
+            let (shape, slot) = inline_caches
+                .get(ic_index as usize)?
+                .monomorphic_own_data_slot()?;
+            if is_write && !slot.attributes.contains(SlotAttributes::WRITABLE) {
+                return None;
+            }
+            let key = (object_register, shape, slot.index);
+            let scratch_register = if let Some(&index) = by_slot.get(&key) {
+                let binding: &mut PropertyBinding = &mut bindings[index];
+                binding.writable |= is_write;
+                binding.scratch_register
+            } else {
+                let scratch_register = snapshot.register_count.checked_add(unique_slots)?;
+                unique_slots = unique_slots.checked_add(1)?;
+                by_slot.insert(key, bindings.len());
+                bindings.push(PropertyBinding {
+                    ic_index,
+                    object_register,
+                    shape,
+                    slot: slot.index,
+                    scratch_register,
+                    writable: is_write,
+                });
+                ic_sites.insert(ic_index);
+                scratch_register
+            };
+            // Retain a separate guard for each IC, even when its slot is shared.
+            if ic_sites.insert(ic_index) {
+                bindings.push(PropertyBinding {
+                    ic_index,
+                    object_register,
+                    shape,
+                    slot: slot.index,
+                    scratch_register,
+                    writable: false,
+                });
+            }
+        }
+        // Resolve property inputs before recording this instruction's destination.
+        origins.record(instruction);
+    }
+    let roots: HashSet<_> = bindings
+        .iter()
+        .map(|binding| binding.object_register)
+        .collect();
+    // Validate every operand once, rather than repeating the walk for each binding.
+    for instruction in instructions {
+        #[cfg(test)]
+        PROPERTY_BINDING_VISITS.with(|count| {
+            let (i, m) = count.get();
+            count.set((i + 1, m));
+        });
+        for operand in &instruction.operands {
+            if operand.name == "dst"
+                || !register_operand(instruction.name, operand.name, operand.value)
+                    .is_some_and(|register| roots.contains(&register))
+            {
+                continue;
+            }
+            let object_use = match instruction.name {
+                "Move" => object_move_offsets.contains_key(&instruction.offset),
+                "GetPropertyByName" => matches!(operand.name, "value" | "receiver"),
+                "SetPropertyByName" => matches!(operand.name, "object" | "receiver"),
+                _ => false,
+            };
+            if !object_use {
+                return None;
             }
         }
     }
     Some((bindings, object_move_offsets))
-}
-
-fn resolve_property_object_register(
-    instructions: &[crate::vm::BytecodeInstruction],
-    before: usize,
-    register: u32,
-    object_move_offsets: &mut BTreeMap<u32, u32>,
-) -> Option<u32> {
-    for (index, instruction) in instructions[..before].iter().enumerate().rev() {
-        if unsigned(instruction, "dst").and_then(|value| u32::try_from(value).ok())
-            != Some(register)
-        {
-            continue;
-        }
-        if instruction.name != "Move" {
-            return None;
-        }
-        let source = u32::try_from(unsigned(instruction, "src")?).ok()?;
-        let original =
-            resolve_property_object_register(instructions, index, source, object_move_offsets)?;
-        object_move_offsets.insert(instruction.offset, original);
-        return Some(original);
-    }
-    Some(register)
 }
 
 impl LoopRegion {
@@ -1211,6 +1332,214 @@ mod tests {
     use futures_lite::future;
 
     use super::*;
+
+    #[test]
+    fn property_binding_walk_is_bounded_and_keeps_every_inline_cache_guard() {
+        for (properties, repeats) in [(1, 1), (8, 1), (32, 1), (8, 4)] {
+            let object = (0..properties)
+                .map(|i| format!("p{i}:{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let accesses =
+                (0..repeats)
+                    .flat_map(|_| 0..properties)
+                    .fold(String::new(), |mut output, i| {
+                        std::fmt::Write::write_fmt(&mut output, format_args!("s+=o.p{i};"))
+                            .expect("writing to a String cannot fail");
+                        output
+                    });
+            let source = format!(
+                "function f(o,n){{var s=0;for(var i=0;i<n;i++){{{accesses}}}return s}}var o={{{object}}};f(o,200)"
+            );
+            let expected = 200 * repeats * properties * (properties + 1) / 2;
+            let mut context = Context::default();
+            context.set_baseline_jit_enabled(false);
+            let script = Script::parse(Source::from_bytes(&source), None, &mut context).unwrap();
+            let outer = script.codeblock(&mut context).unwrap();
+            let function_index = outer
+                .constants
+                .iter()
+                .position(|c| matches!(c, Constant::Function(_)))
+                .unwrap();
+            let function = outer.constant_function(function_index);
+            assert_eq!(
+                script.evaluate(&mut context).unwrap().as_number(),
+                Some(expected as f64)
+            );
+            let snapshot = function.bytecode_contract().verify().unwrap();
+            let resume = snapshot
+                .instructions
+                .iter()
+                .find(|i| i.name == "IncrementLoopIteration")
+                .unwrap()
+                .next_offset;
+            let region = LoopRegion::find(&snapshot, resume).unwrap();
+            let instruction_count = region.end - region.first;
+            PROPERTY_BINDING_VISITS.with(|count| count.set((0, 0)));
+            let (bindings, moves) = property_bindings(&snapshot, &function.ic, &region).unwrap();
+            let (visits, move_visits) = PROPERTY_BINDING_VISITS.with(std::cell::Cell::get);
+            assert!(visits <= 4 * instruction_count);
+            assert_eq!(move_visits, moves.len());
+            assert!(move_visits <= instruction_count);
+            assert_eq!(bindings.len(), properties * repeats);
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|b| b.ic_index)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                properties * repeats
+            );
+            assert_eq!(
+                bindings
+                    .iter()
+                    .map(|b| b.scratch_register)
+                    .collect::<HashSet<_>>()
+                    .len(),
+                properties
+            );
+            eprintln!(
+                "properties={properties} repeats={repeats} instructions={instruction_count} visits={visits} moves={move_visits} guards={}",
+                bindings.len()
+            );
+            context.set_baseline_jit_enabled(true);
+            assert_eq!(
+                context
+                    .eval(Source::from_bytes("f(o,200)"))
+                    .unwrap()
+                    .as_number(),
+                Some(expected as f64)
+            );
+            assert!(context.arithmetic_jit_diagnostics().compiled_entries > 0);
+            // Relink a later site of the same slot: it must still have its own guard.
+            if repeats > 1 {
+                let index = bindings[properties].ic_index as usize;
+                let ic = &function.ic[index];
+                // A bad slot is repaired by the initial interpreter iteration.
+                // Instead retain a second live shape at just this later site;
+                // generic reads remain valid but its native contract is stale.
+                let alternate = context
+                    .eval(Source::from_bytes("({p0:1,extra:0})"))
+                    .unwrap();
+                let alternate_object = alternate.as_object().unwrap();
+                let alternate_shape = alternate_object.borrow().shape_edge().clone();
+                ic.set(&alternate_shape, ic.slot());
+                assert!(ic.monomorphic_own_data_slot().is_none());
+                assert_eq!(
+                    context
+                        .eval(Source::from_bytes("f(o,200)"))
+                        .unwrap()
+                        .as_number(),
+                    Some(expected as f64)
+                );
+                assert!(context.arithmetic_jit_diagnostics().property_guard_misses > 0);
+            }
+        }
+    }
+
+    #[test]
+    fn object_origin_index_preserves_move_history_across_register_overwrites() {
+        let mut origins = PropertyObjectOrigins::default();
+        let mut used = BTreeMap::new();
+        origins.record(&instruction(
+            0,
+            4,
+            "Move",
+            vec![register("dst", 2), register("src", 0)],
+        ));
+        origins.record(&instruction(
+            4,
+            8,
+            "Move",
+            vec![register("dst", 3), register("src", 2)],
+        ));
+        origins.record(&instruction(
+            8,
+            12,
+            "Move",
+            vec![register("dst", 2), register("src", 1)],
+        ));
+        assert_eq!(origins.resolve(3, &mut used), Some(0));
+        assert_eq!(used, BTreeMap::from([(0, 0), (4, 0)]));
+        assert_eq!(origins.resolve(2, &mut used), Some(1));
+        assert_eq!(used.get(&8), Some(&1));
+        origins.record(&instruction(12, 16, "PushZero", vec![register("dst", 2)]));
+        assert_eq!(origins.resolve(2, &mut used), None);
+        assert_eq!(origins.resolve(3, &mut used), Some(0));
+    }
+
+    #[test]
+    #[should_panic(expected = "object alias source is inside VM frame")]
+    fn completed_alias_snapshot_rejects_sources_outside_the_vm_frame() {
+        snapshot_completed_aliases(
+            1,
+            &[Some(1)],
+            &[3],
+            |_| panic!("must fail before reading a VM register"),
+            &mut ArithmeticJitDiagnostics::default(),
+        );
+    }
+
+    #[test]
+    fn completed_alias_snapshot_ignores_unused_and_scalar_registers() {
+        for count in [8, 64, 1024] {
+            let values = vec![Some(7); count];
+            let kinds = vec![1; count];
+            let mut diagnostics = ArithmeticJitDiagnostics::default();
+            let aliases = snapshot_completed_aliases(
+                count,
+                &values,
+                &kinds,
+                |_| panic!("arithmetic completion must not read original registers"),
+                &mut diagnostics,
+            );
+            assert!(aliases.is_empty());
+            assert_eq!(aliases.capacity(), 0);
+            assert_eq!(diagnostics.completed_alias_copies, 0);
+            assert_eq!(diagnostics.completed_alias_allocations, 0);
+        }
+    }
+
+    #[test]
+    fn completed_alias_snapshot_preserves_cycles_and_survives_collection() {
+        let first = JsValue::from(JsObject::with_null_proto());
+        let second = JsValue::from(JsObject::with_null_proto());
+        let mut registers = [first.clone(), second.clone(), JsValue::from(7)];
+        let values = [Some(1), Some(0), Some(42), Some(999)];
+        let kinds = [3, 3, 1, 3]; // Last entry is outside the VM register frame.
+        let mut diagnostics = ArithmeticJitDiagnostics::default();
+        let aliases = snapshot_completed_aliases(
+            3,
+            &values,
+            &kinds,
+            |source| registers[source].clone(),
+            &mut diagnostics,
+        );
+        registers.fill(JsValue::undefined());
+        boa_gc::force_collect();
+        for (index, value) in aliases {
+            registers[index] = value;
+        }
+        assert_eq!(registers[0], second);
+        assert_eq!(registers[1], first);
+        assert_eq!(diagnostics.completed_alias_copies, 2);
+        assert_eq!(diagnostics.completed_alias_allocations, 1);
+    }
+
+    #[test]
+    fn pure_arithmetic_native_entries_do_not_copy_original_registers() {
+        let mut context = Context::default();
+        let value = context
+            .eval(Source::from_bytes(
+                "function f(n){var s=0;for(var i=0;i<n;i++)s+=i;return s}f(200);f(200)",
+            ))
+            .unwrap();
+        assert_eq!(value.as_number(), Some(19900.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(diagnostics.compiled_entries >= 2, "{diagnostics:?}");
+        assert_eq!(diagnostics.completed_alias_copies, 0);
+        assert_eq!(diagnostics.completed_alias_allocations, 0);
+    }
 
     fn register(name: &'static str, value: u64) -> crate::vm::BytecodeOperand {
         crate::vm::BytecodeOperand {
