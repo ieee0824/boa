@@ -417,6 +417,11 @@ pub struct ArithmeticJitDiagnostics {
     pub generated_code_bytes: u64,
     /// Calls that entered generated machine code.
     pub compiled_entries: u64,
+    /// Object aliases copied before writing completed native results to the VM.
+    pub completed_alias_copies: u64,
+    /// Allocations and capacity growths of completed-entry alias snapshots.
+    /// Pure arithmetic completions do not allocate a snapshot.
+    pub completed_alias_allocations: u64,
     /// Calls that resumed the interpreter.
     pub bailouts: u64,
     /// Cached loop sites evicted to keep executable memory bounded.
@@ -829,10 +834,15 @@ impl ArithmeticRuntime {
         }
         match exit {
             ArithmeticExit::Completed(pc) => {
-                // Resolve aliases before updating any original VM registers.
-                let original_registers = (0..register_count)
-                    .map(|index| vm.get_register(index).clone())
-                    .collect::<Vec<_>>();
+                // Preserve only alias sources, before any original register can
+                // be overwritten. An arithmetic-only completion allocates nothing.
+                let aliases = snapshot_completed_aliases(
+                    register_count,
+                    &values,
+                    &write_kinds,
+                    |source| vm.get_register(source).clone(),
+                    &mut self.diagnostics,
+                );
                 for (index, (&value, &write_kind)) in values
                     .iter()
                     .zip(&write_kinds)
@@ -842,12 +852,12 @@ impl ArithmeticRuntime {
                     match (value, write_kind) {
                         (Some(value), 1) => vm.set_register(index, JsValue::from(value as f64)),
                         (Some(value), 2) => vm.set_register(index, JsValue::from(value != 0)),
-                        (Some(source), 3) => {
-                            vm.set_register(index, original_registers[source as usize].clone());
-                        }
-                        (_, 0) => {}
+                        (Some(_), 3) | (_, 0) => {}
                         _ => unreachable!("emitter only writes validated arithmetic value kinds"),
                     }
+                }
+                for (index, value) in aliases {
+                    vm.set_register(index, value);
                 }
                 vm.frame.pc = pc;
                 true
@@ -870,6 +880,40 @@ impl ArithmeticRuntime {
             }
         }
     }
+}
+
+// Keep every source rooted until all scalar and alias writes have finished.
+// Destinations may overwrite other alias sources, including cyclic mappings.
+fn snapshot_completed_aliases(
+    register_count: usize,
+    values: &[Option<i64>],
+    write_kinds: &[u8],
+    mut read_register: impl FnMut(usize) -> JsValue,
+    diagnostics: &mut ArithmeticJitDiagnostics,
+) -> Vec<(usize, JsValue)> {
+    let mut aliases = Vec::new();
+    for (index, (&value, &kind)) in values
+        .iter()
+        .zip(write_kinds)
+        .take(register_count)
+        .enumerate()
+    {
+        if kind != 3 {
+            continue;
+        }
+        let source = value.expect("object alias has a source") as usize;
+        assert!(
+            source < register_count,
+            "object alias source is inside VM frame"
+        );
+        if aliases.len() == aliases.capacity() {
+            diagnostics.completed_alias_allocations =
+                diagnostics.completed_alias_allocations.saturating_add(1);
+        }
+        aliases.push((index, read_register(source)));
+        diagnostics.completed_alias_copies = diagnostics.completed_alias_copies.saturating_add(1);
+    }
+    aliases
 }
 
 struct LoopRegion {
@@ -1211,6 +1255,79 @@ mod tests {
     use futures_lite::future;
 
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "object alias source is inside VM frame")]
+    fn completed_alias_snapshot_rejects_sources_outside_the_vm_frame() {
+        snapshot_completed_aliases(
+            1,
+            &[Some(1)],
+            &[3],
+            |_| panic!("must fail before reading a VM register"),
+            &mut ArithmeticJitDiagnostics::default(),
+        );
+    }
+
+    #[test]
+    fn completed_alias_snapshot_ignores_unused_and_scalar_registers() {
+        for count in [8, 64, 1024] {
+            let values = vec![Some(7); count];
+            let kinds = vec![1; count];
+            let mut diagnostics = ArithmeticJitDiagnostics::default();
+            let aliases = snapshot_completed_aliases(
+                count,
+                &values,
+                &kinds,
+                |_| panic!("arithmetic completion must not read original registers"),
+                &mut diagnostics,
+            );
+            assert!(aliases.is_empty());
+            assert_eq!(aliases.capacity(), 0);
+            assert_eq!(diagnostics.completed_alias_copies, 0);
+            assert_eq!(diagnostics.completed_alias_allocations, 0);
+        }
+    }
+
+    #[test]
+    fn completed_alias_snapshot_preserves_cycles_and_survives_collection() {
+        let first = JsValue::from(JsObject::with_null_proto());
+        let second = JsValue::from(JsObject::with_null_proto());
+        let mut registers = [first.clone(), second.clone(), JsValue::from(7)];
+        let values = [Some(1), Some(0), Some(42), Some(999)];
+        let kinds = [3, 3, 1, 3]; // Last entry is outside the VM register frame.
+        let mut diagnostics = ArithmeticJitDiagnostics::default();
+        let aliases = snapshot_completed_aliases(
+            3,
+            &values,
+            &kinds,
+            |source| registers[source].clone(),
+            &mut diagnostics,
+        );
+        registers.fill(JsValue::undefined());
+        boa_gc::force_collect();
+        for (index, value) in aliases {
+            registers[index] = value;
+        }
+        assert_eq!(registers[0], second);
+        assert_eq!(registers[1], first);
+        assert_eq!(diagnostics.completed_alias_copies, 2);
+        assert_eq!(diagnostics.completed_alias_allocations, 1);
+    }
+
+    #[test]
+    fn pure_arithmetic_native_entries_do_not_copy_original_registers() {
+        let mut context = Context::default();
+        let value = context
+            .eval(Source::from_bytes(
+                "function f(n){var s=0;for(var i=0;i<n;i++)s+=i;return s}f(200);f(200)",
+            ))
+            .unwrap();
+        assert_eq!(value.as_number(), Some(19900.0));
+        let diagnostics = context.arithmetic_jit_diagnostics();
+        assert!(diagnostics.compiled_entries >= 2, "{diagnostics:?}");
+        assert_eq!(diagnostics.completed_alias_copies, 0);
+        assert_eq!(diagnostics.completed_alias_allocations, 0);
+    }
 
     fn register(name: &'static str, value: u64) -> crate::vm::BytecodeOperand {
         crate::vm::BytecodeOperand {
