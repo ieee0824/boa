@@ -835,13 +835,19 @@ impl ArithmeticRuntime {
             ArithmeticExit::Completed(pc) => {
                 // Preserve only alias sources, before any original register can
                 // be overwritten. An arithmetic-only completion allocates nothing.
-                let aliases = snapshot_completed_aliases(
-                    register_count,
-                    &values,
-                    &write_kinds,
-                    |source| vm.get_register(source).clone(),
-                    &mut self.diagnostics,
-                );
+                let aliases = if code.properties.is_empty() {
+                    // Only property bindings can introduce object-tagged Moves.
+                    // Scalar-only code needs neither a snapshot nor a second scan.
+                    Vec::new()
+                } else {
+                    snapshot_completed_aliases(
+                        register_count,
+                        &values,
+                        &write_kinds,
+                        |source| vm.get_register(source).clone(),
+                        &mut self.diagnostics,
+                    )
+                };
                 for (index, (&value, &write_kind)) in values
                     .iter()
                     .zip(&write_kinds)
