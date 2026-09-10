@@ -87,6 +87,7 @@ where
         /// initialization of `lhs` would make it very hard to return an expression over all
         /// possible branches of the `if let`s. Instead, we extract the check into its own function,
         /// then use it inside the condition of a simple `if ... else` expression.
+        #[inline(never)]
         fn is_keyword_call<R: ReadChar>(
             keyword: Keyword,
             cursor: &mut Cursor<R>,
@@ -118,47 +119,80 @@ where
 
         cursor.set_goal(InputElement::TemplateTail);
 
-        let mut lhs = if let Some(start) = is_keyword_call(Keyword::Super, cursor, interner)? {
-            cursor.advance(interner);
+        let (lhs, member_call) =
+            if let Some(start) = is_keyword_call(Keyword::Super, cursor, interner)? {
+                (
+                    self.parse_keyword_call(Keyword::Super, start, cursor, interner)?,
+                    false,
+                )
+            } else if let Some(start) = is_keyword_call(Keyword::Import, cursor, interner)? {
+                (
+                    self.parse_keyword_call(Keyword::Import, start, cursor, interner)?,
+                    false,
+                )
+            } else {
+                (
+                    MemberExpression::new(self.allow_yield, self.allow_await)
+                        .parse(cursor, interner)?,
+                    true,
+                )
+            };
+
+        self.parse_tail(lhs, member_call, cursor, interner)
+    }
+}
+
+impl LeftHandSideExpression {
+    // Keyword and call/optional tails must not enlarge recursive member frames.
+    #[inline(never)]
+    fn parse_keyword_call<R: ReadChar>(
+        self,
+        keyword: Keyword,
+        start: Position,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
+        cursor.advance(interner);
+        if keyword == Keyword::Super {
             let (args, args_span) =
                 Arguments::new(self.allow_yield, self.allow_await).parse(cursor, interner)?;
-            SuperCall::new(args, Span::new(start, args_span.end())).into()
-        } else if let Some(start) = is_keyword_call(Keyword::Import, cursor, interner)? {
-            // `import`
-            cursor.advance(interner);
-            // `(`
-            cursor.advance(interner);
+            return Ok(SuperCall::new(args, Span::new(start, args_span.end())).into());
+        }
+        // The import keyword has been consumed; consume `(` before its argument.
+        cursor.advance(interner);
+        let arg = AssignmentExpression::new(true, self.allow_yield, self.allow_await)
+            .parse(cursor, interner)?;
+        let end = cursor
+            .expect(
+                TokenKind::Punctuator(Punctuator::CloseParen),
+                "import call",
+                interner,
+            )?
+            .span()
+            .end();
+        CallExpressionTail::new(
+            self.allow_yield,
+            self.allow_await,
+            ImportCall::new(arg, Span::new(start, end)).into(),
+        )
+        .parse(cursor, interner)
+    }
 
-            let arg = AssignmentExpression::new(true, self.allow_yield, self.allow_await)
+    #[inline(never)]
+    fn parse_tail<R: ReadChar>(
+        self,
+        mut lhs: Expression,
+        member_call: bool,
+        cursor: &mut Cursor<R>,
+        interner: &mut Interner,
+    ) -> ParseResult<Expression> {
+        if member_call
+            && let Some(tok) = cursor.peek(0, interner)?
+            && tok.kind() == &TokenKind::Punctuator(Punctuator::OpenParen)
+        {
+            lhs = CallExpression::new(self.allow_yield, self.allow_await, lhs)
                 .parse(cursor, interner)?;
-
-            let end = cursor
-                .expect(
-                    TokenKind::Punctuator(Punctuator::CloseParen),
-                    "import call",
-                    interner,
-                )?
-                .span()
-                .end();
-
-            CallExpressionTail::new(
-                self.allow_yield,
-                self.allow_await,
-                ImportCall::new(arg, Span::new(start, end)).into(),
-            )
-            .parse(cursor, interner)?
-        } else {
-            let mut member = MemberExpression::new(self.allow_yield, self.allow_await)
-                .parse(cursor, interner)?;
-            if let Some(tok) = cursor.peek(0, interner)?
-                && tok.kind() == &TokenKind::Punctuator(Punctuator::OpenParen)
-            {
-                member = CallExpression::new(self.allow_yield, self.allow_await, member)
-                    .parse(cursor, interner)?;
-            }
-            member
-        };
-
+        }
         if let Some(tok) = cursor.peek(0, interner)?
             && tok.kind() == &TokenKind::Punctuator(Punctuator::Optional)
         {

@@ -128,7 +128,9 @@ jobs:
           commit = subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()
           cases = {}
           for stack in (2048, 8192):
-              report = json.loads((root/f'calibration-{stack}/latest.json').read_text())
+              reports = list((root/f'calibration-{stack}').rglob('latest.json'))
+              assert len(reports) == 1, reports
+              report = json.loads(reports[0].read_text())
               assert report['u'] == revision and report['c'] == commit, report
               stats = report['r']['a']
               assert stats['t'] == stats['o'] == 1, stats

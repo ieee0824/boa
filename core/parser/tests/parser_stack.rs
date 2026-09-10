@@ -90,13 +90,23 @@ fn parse_on_stack(stack_bytes: usize) {
             // The grammar budget must not impose a small syntax-depth limit on
             // optimized builds whose native frames already fit the host stack.
             #[cfg(not(debug_assertions))]
-            for source in [
-                format!("{}0{};", "[".repeat(100), "]".repeat(100)),
-                format!("{}0{};", "(".repeat(100), ")".repeat(100)),
+            for (name, source) in [
+                (
+                    "arrays",
+                    format!("{}0{};", "[".repeat(100), "]".repeat(100)),
+                ),
+                (
+                    "parentheses",
+                    format!("{}0{};", "(".repeat(100), ")".repeat(100)),
+                ),
             ] {
                 Parser::new(Source::from_bytes(&source))
                     .parse_script(&Scope::new_global(), &mut interner)
-                    .expect("optimized parsing must retain ordinary deep nesting");
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{name}: optimized parsing must retain ordinary deep nesting: {error}"
+                        )
+                    });
             }
             // Flat lists and iteratively parsed chains do not consume the recursion budget.
             for source in [
